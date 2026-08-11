@@ -1312,6 +1312,85 @@ necessidade concreta, já que os solvers de Navier-Stokes 2D/3D usam projeção
 explícita, não um solve implícito); recuperação combinatória de faceta no
 CDT; módulos 9-14 do roadmap.
 
+## Faxina antes dos módulos 9-14
+
+Antes de entrar nos módulos de produto (UI, GPU, persistência, IA, API,
+plugins), uma consolidação em três fases. O motivo do timing é concreto:
+essas camadas todas se acoplam à API dos solvers, e o Módulo 10 (GPU)
+exigiria portar o **mesmo** kernel duplicado seis vezes. Pagar essa dívida
+depois custa muito mais.
+
+**Fase 1 - versionamento.** O repositório tinha *um commit e um arquivo
+rastreado* (o README): ~22 mil linhas de engine viviam fora do controle de
+versão. Commitado tudo (121 arquivos), com `.gitignore` ampliado (artefatos
+MSVC, `settings.local.json` que continha caminhos de uma máquina antiga) e
+um `.gitattributes` novo normalizando fim de linha - relevante porque o
+projeto é desenvolvido em mais de um dispositivo, e sem isso todo arquivo
+tocado em outra máquina aparece como reescrito por inteiro no diff.
+
+**Fase 2 - código morto.** Os quatro visualizadores standalone (`viewer`,
+`field_viewer`, `cavity_viewer`, `turbulence_viewer`) já tinham virado
+modos do `unified_viewer`, mas continuavam na árvore: uma segunda cópia do
+mesmo código de render, condenada a divergir. Removidos (−1.092 linhas)
+após confirmar que o unificado exercita tudo que eles faziam.
+
+**Fase 3 - `StaggeredCavityBase3D`.** Seis classes de cavidade 3D
+carregavam cada uma sua cópia literal da maquinaria de malha staggered.
+Extraída para uma base comum: **−2.513 linhas** no módulo solver.
+
+| classe | antes | depois |
+|---|---:|---:|
+| `StaggeredLidDrivenCavitySolver3D` | 391 | **19** |
+| `MixingLengthLidDrivenCavitySolver3D` | 475 | 92 |
+| `SmagorinskyLesLidDrivenCavitySolver3D` | 485 | 107 |
+| `KEpsilonLidDrivenCavitySolver3D` | 648 | 280 |
+| `KOmegaSSTLidDrivenCavitySolver3D` | 750 | 375 |
+| `DesSstLidDrivenCavitySolver3D` | 754 | 381 |
+| `StaggeredCavityBase3D` (novo) | — | 382 |
+
+**A extração foi verificada como preservadora de comportamento antes de ser
+feita, não depois.** Cada função foi comparada nas seis classes
+normalizando espaço/comentários e comparando hash: `uAt`, `vAt`, `wAt`,
+`maxDivergence`, `applyLaplacian`, `projectToDivergenceFree`,
+`lidVelocityAt`, `wallDistanceAt` e `dot` eram **idênticas byte a byte** nas
+seis; o preditor de momento era idêntico nas cinco turbulentas. Só duas
+coisas divergiam, ambas compreendidas: `pAt` (a classe LES escrevia o clamp
+com `std::clamp`, as outras com `if/else` - mesma semântica) e
+`stableTimeStep` (a laminar não tem `nu_t` a somar).
+
+**Sem funções virtuais, deliberadamente.** O desenho óbvio - um hook virtual
+`eddyViscosityAt()` - poria despacho virtual no laço mais interno do
+momento, seis vezes por célula por componente. Em vez disso cada fechamento
+registra um ponteiro pro seu próprio `nut_` via `setEddyViscosityField()`;
+`nutAt()` é função comum, inlinável, que retorna 0.0 quando o ponteiro é
+nulo (o caso laminar). Um desvio previsível em vez de uma consulta de
+vtable, e a classe continua não-polimórfica (daí o destrutor protegido e
+não-virtual).
+
+**O caso laminar mereceu medição, não suposição.** Unificar seu momento
+significa trocar `nu·laplaciano` pela forma ponderada por face - com
+`nu_t=0` as duas são algebricamente idênticas, mas **não** bit a bit (é
+`nu*(a-b) - nu*(b-c)` contra `nu*(a-2b+c)`). Medido diretamente contra
+valores de referência capturados antes da mudança, após 200 passos: 18.8%
+das amostras idênticas bit a bit e diferença máxima de **9.09e-16** em
+valores até 0.5 - cerca de 9 ULPs acumulados, exatamente a mudança de ordem
+de arredondamento esperada, não de comportamento (divergência máxima
+3.293e-13 contra 3.304e-13 antes). Com isso a classe laminar caiu de 391
+para **19 linhas**.
+
+**Dois bugs foram introduzidos pela refatoração e pegos pelos testes** -
+vale registrar porque ambos vieram de automatizar demais. Ao reescrever os
+construtores por regex, a substituição da lista de inicialização engoliu
+`cDes_(cDes)` no DES, deixando o membro não inicializado (lixo → `NaN` no
+`F_DES` já no primeiro passo); e o `setEddyViscosityField` não foi inserido
+no k-epsilon porque o corpo do construtor dele começa com um comentário, não
+com a linha que o padrão procurava. Os dois apareceram no teste de repouso
+exato (`u == 0.0` bit a bit) - o tipo de asserção que parece pedante até
+salvar uma refatoração. Também houve duas tentativas descartadas de
+script antes disso (um splitter que cortava função por "linha igual a `}`",
+engolindo funções de uma linha; e um filtro de header que comia o corpo da
+classe), revertidas via git - que é exatamente por que a Fase 1 veio antes.
+
 ## Marching cubes 3D: fecha o pré-requisito do renderizador de iso-superfícies
 
 `marchingCubes3D` fecha o item explicitamente deixado em aberto na task

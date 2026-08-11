@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aether/solver/StaggeredCavityBase3D.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -74,7 +76,10 @@ namespace aether::solver {
 // exactly zero everywhere whenever the velocity field is exactly zero
 // (the same strong rest-state guarantee MixingLengthLidDrivenCavitySolver3D
 // has, and that the two-equation closures cannot offer).
-class SmagorinskyLesLidDrivenCavitySolver3D {
+//
+// The staggered-grid plumbing lives in StaggeredCavityBase3D; only the
+// subgrid model itself is here.
+class SmagorinskyLesLidDrivenCavitySolver3D : public StaggeredCavityBase3D {
 public:
     // smagorinskyConstant defaults to the commonly quoted 0.17; see the
     // class comment on why it is a parameter rather than a hardcoded
@@ -83,72 +88,20 @@ public:
                                            double lengthY, double lengthZ, double viscosity,
                                            double lidVelocity, double smagorinskyConstant = 0.17);
 
-    // Conservative estimate from molecular viscosity plus the current
-    // (possibly still-zero, if called before any step()) subgrid
-    // viscosity -- same caveat as every other eddy-viscosity solver here.
-    double stableTimeStep() const;
-
     void step(double dt);
 
-    double u(std::size_t i, std::size_t j, std::size_t k) const; // i in [0,nx]
-    double v(std::size_t i, std::size_t j, std::size_t k) const; // j in [0,ny]
-    double w(std::size_t i, std::size_t j, std::size_t k) const; // k in [0,nz]
-    double pressure(std::size_t i, std::size_t j, std::size_t k) const;
     // The subgrid-scale eddy viscosity nu_sgs at a cell center.
     double subgridViscosity(std::size_t i, std::size_t j, std::size_t k) const;
     // The filter width Delta = cbrt(dx*dy*dz). Constant for a uniform
     // mesh; exposed because the mesh-refinement limit that defines LES is
     // stated in terms of it.
     double filterWidth() const;
-    double time() const { return time_; }
-
-    double maxDivergence() const;
 
 private:
-    std::size_t indexU(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * (nx_ + 1) + k * (nx_ + 1) * ny_;
-    }
-    std::size_t indexV(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * nx_ + k * nx_ * (ny_ + 1);
-    }
-    std::size_t indexW(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-    std::size_t indexP(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-
-    double lidVelocityAt(double x, double y) const;
-    double wallDistanceAt(std::size_t i, std::size_t j, std::size_t k) const;
-
-    double uAt(long long i, long long j, long long k) const;
-    double vAt(long long i, long long j, long long k) const;
-    double wAt(long long i, long long j, long long k) const;
-    double pAt(long long i, long long j, long long k) const;
-    // 0.0 for any cell index outside the domain (nu_sgs vanishes at a wall).
-    double nutAt(long long i, long long j, long long k) const;
-
     void updateSubgridViscosity();
 
-    std::vector<double> applyLaplacian(const std::vector<double>& x) const;
-    static double dot(const std::vector<double>& a, const std::vector<double>& b);
-    void projectToDivergenceFree(std::vector<double>& uStar, std::vector<double>& vStar,
-                                  std::vector<double>& wStar, double dt);
-
-    std::size_t nx_;
-    std::size_t ny_;
-    std::size_t nz_;
-    double lengthX_;
-    double lengthY_;
-    double lengthZ_;
-    double dx_;
-    double dy_;
-    double dz_;
-    double viscosity_;
-    double lidVelocity_;
     double smagorinskyConstant_;
-    std::vector<double> u_;
-    std::vector<double> v_;
-    std::vector<double> w_;
-    std::vector<double> p_;
     std::vector<double> nut_;
-    double time_ = 0.0;
 };
 
 } // namespace aether::solver
