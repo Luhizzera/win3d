@@ -1,0 +1,5 @@
+numpy>=1.24
+matplotlib>=3.7
+cupy-cuda12x[ctk]     # requer GPU NVIDIA; instala tambem os headers/runtime CUDA via pip
+numba>=0.66
+nvidia-cuda-nvcc-cu12 # fornece a nvvm.dll usada pelo numba.cuda para compilar kernels

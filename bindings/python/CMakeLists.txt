@@ -1,0 +1,14 @@
+pybind11_add_module(aether_core_py aether_core_bindings.cpp)
+target_link_libraries(aether_core_py PRIVATE aether_core)
+
+pybind11_add_module(aether_geometry_py aether_geometry_bindings.cpp)
+target_link_libraries(aether_geometry_py PRIVATE aether_geometry)
+
+pybind11_add_module(aether_mesh_py aether_mesh_bindings.cpp)
+target_link_libraries(aether_mesh_py PRIVATE aether_mesh)
+
+pybind11_add_module(aether_solver_py aether_solver_bindings.cpp)
+target_link_libraries(aether_solver_py PRIVATE aether_solver)
+
+pybind11_add_module(aether_postprocessing_py aether_postprocessing_bindings.cpp)
+target_link_libraries(aether_postprocessing_py PRIVATE aether_postprocessing)

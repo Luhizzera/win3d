@@ -1,0 +1,32 @@
+python/.venv/
+__pycache__/
+*.pyc
+*.png
+
+# C++ build output
+build/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.dir/
+*.obj
+*.o
+*.pyd
+*.so
+*.lib
+*.exe
+*.exp
+.vs/
+
+# MSVC generator output, in case anyone ever configures in-source by
+# mistake (these normally live under build/ and are covered above).
+*.sln
+*.vcxproj
+*.vcxproj.filters
+CTestTestfile.cmake
+Testing/
+
+# Machine-local Claude Code settings (paths and permissions are specific to
+# one device; settings.json would be shared, settings.local.json is not).
+.claude/settings.local.json

@@ -1,0 +1,4 @@
+add_executable(aether_geometry_tests geometry_tests.cpp)
+target_link_libraries(aether_geometry_tests PRIVATE aether_geometry aether_testing)
+
+add_test(NAME aether_geometry_tests COMMAND aether_geometry_tests)

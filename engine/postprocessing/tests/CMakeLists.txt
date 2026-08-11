@@ -1,0 +1,4 @@
+add_executable(aether_postprocessing_tests postprocessing_tests.cpp)
+target_link_libraries(aether_postprocessing_tests PRIVATE aether_postprocessing aether_testing)
+
+add_test(NAME aether_postprocessing_tests COMMAND aether_postprocessing_tests)

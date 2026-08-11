@@ -1,0 +1,16 @@
+# Normalize line endings in the repository to LF, checking out native
+# endings per platform. Matters here because this project is developed
+# across more than one machine -- without it, every file touched on a
+# different device shows up as fully rewritten in the diff.
+* text=auto
+
+*.cpp text
+*.hpp text
+*.py  text
+*.txt text
+*.md  text
+*.ps1 text eol=crlf
+
+*.png binary
+*.stl binary
+*.obj binary

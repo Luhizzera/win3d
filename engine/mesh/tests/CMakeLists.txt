@@ -1,0 +1,4 @@
+add_executable(aether_mesh_tests mesh_tests.cpp)
+target_link_libraries(aether_mesh_tests PRIVATE aether_mesh aether_testing)
+
+add_test(NAME aether_mesh_tests COMMAND aether_mesh_tests)
