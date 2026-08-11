@@ -124,22 +124,11 @@ engine/postprocessing/ Módulo 7 - Streamline2D (integração real de linhas de
                        ver seção própria abaixo)
 engine/testing/        Header-only: macro AETHER_CHECK para os testes (ver nota abaixo)
 apps/common/           Módulo 8 - toolkit compartilhado de bootstrap OpenGL
-                       3.3 core profile + WGL (contexto, shaders, VBO/VAO)
-                       usado pelos quatro visualizadores abaixo, extraído
-                       do apps/viewer para não duplicar ~150 linhas de
-                       boilerplate (e o bug de janela que já apareceu lá)
-                       quatro vezes
-apps/viewer/            Módulo 8 - visualizador de malhas STL, OpenGL 3.3
-                       core profile (shaders GLSL + VBOs/VAOs)
-apps/field_viewer/      Módulo 7 - resolve a condução de calor (Módulo 5) e
-                       mostra o campo como heatmap 2D, OpenGL 3.3 core
-                       profile
-apps/cavity_viewer/     Módulo 7 - cavidade com tampa deslizante: vetores de
-                       velocidade + streamlines reais, OpenGL 3.3 core
-                       profile
-apps/turbulence_viewer/ Módulo 6/7 - u+ vs ln(y+) dos três fechamentos de
-                       turbulência, OpenGL 3.3 core profile
-apps/unified_viewer/   Módulo 8 - os quatro visualizadores acima reunidos num
+                       3.3 core profile + WGL (contexto, shaders, VBO/VAO),
+                       extraído do viewer original para não duplicar ~150
+                       linhas de boilerplate (e o bug de janela que já
+                       apareceu lá)
+apps/unified_viewer/   Módulo 8 - os quatro visualizadores originais num
                        único executável com seleção de modo por argumento de
                        linha de comando (`mesh`/`heatmap`/`cavity`/`turbulence`),
                        mais o modo `cavity3d` (campo de vetores 3D da cavidade
@@ -1574,10 +1563,12 @@ etc. repetidos) agora que os quatro `.cpp` viraram uma única unidade de
 tradução.
 
 Os quatro executáveis originais (`aether_viewer`, `aether_field_viewer`,
-`aether_cavity_viewer`, `aether_turbulence_viewer`) permanecem na árvore
-sem alteração - `aether_unified_viewer` é um ponto de entrada adicional, não
-uma substituição, então quem só precisa de um modo específico continua
-podendo linkar/rodar só aquele binário menor.
+`aether_cavity_viewer`, `aether_turbulence_viewer`) foram mantidos na árvore
+por um tempo como pontos de entrada adicionais, e **removidos depois**, na
+faxina anterior aos módulos 9-14: como cada um virou um modo do executável
+unificado, mantê-los significava carregar uma segunda cópia do mesmo código
+condenada a divergir da primeira. Ver a seção "Faxina antes dos módulos
+9-14" mais abaixo.
 
 Validado compilando e rodando os quatro modos (`mesh` com um tetraedro STL
 de teste, `heatmap`, `cavity`, `turbulence` sem argumentos) e conferindo que
@@ -1615,50 +1606,31 @@ python -c "import aether; print(aether.Vector3(1,1,1).norm())"
 
 ## Visualizador
 
-```
-build\apps\viewer\Release\aether_viewer.exe caminho\para\arquivo.stl
-```
-
-Câmera orbital: arrastar com o botão esquerdo do mouse gira a vista, a
-roda do mouse aproxima/afasta. É uma implementação Win32 + OpenGL de função
-fixa (glBegin/glVertex, sem shaders) - suficiente para inspecionar malhas
-importadas agora; um pipeline moderno (shaders, VBOs) ou Vulkan é trabalho
-futuro do Módulo 8.
-
-## Visualização de campo (pós-processamento)
+Um único executável com seleção de modo por argumento:
 
 ```
-build\apps\field_viewer\Release\aether_field_viewer.exe
+build\apps\unified_viewer\Release\aether_unified_viewer.exe <modo>
 ```
 
-Resolve a clássica placa com 3 lados frios e 1 lado quente (Módulo 5,
-`SteadyDiffusionSolver`, condições de contorno em todas as 4 faces) e mostra
-o campo 2D real como heatmap azul-branco-vermelho. Ainda sem linhas de
-contorno/iso-superfícies/streamlines - isso e uma integração mais direta com
-o viewer 3D (Módulo 8) são trabalho futuro do Módulo 7.
+| modo | o que mostra |
+|---|---|
+| `mesh <arquivo.stl>` | malha STL/OBJ importada, câmera orbital em perspectiva |
+| `heatmap` | placa com 3 lados frios e 1 quente (`SteadyDiffusionSolver`), heatmap azul-branco-vermelho |
+| `cavity` | cavidade 2D com tampa deslizante (`LidDrivenCavitySolver2D`, Re=10): vetores + streamlines reais |
+| `cavity3d` | campo de vetores 3D da cavidade staggered (`StaggeredLidDrivenCavitySolver3D`) |
+| `isosurface` | iso-superfície real de `nu_t` do k-ω SST 3D, via marching cubes |
+| `turbulence` | u+ vs ln(y+) dos três fechamentos de canal 1D sobre a lei da parede teórica |
 
-```
-build\apps\cavity_viewer\Release\aether_cavity_viewer.exe
-```
+No modo `mesh`/`cavity3d`/`isosurface`: arrastar com o botão esquerdo gira a
+vista, a roda aproxima/afasta. Pipeline OpenGL 3.3 core profile (shaders
+GLSL + VBOs/VAOs) em todos os modos.
 
-Resolve a cavidade com tampa deslizante (Módulo 4, `LidDrivenCavitySolver2D`,
-Re=10) e mostra o campo de velocidade como vetores coloridos por magnitude -
-confirma visualmente o vórtice primário que os testes já provam existir
-matematicamente (conservação de massa numa caixa fechada). Ainda sem
-streamlines/linhas de corrente de verdade (isso é integração ao longo do
-campo, não implementada) - trabalho futuro do Módulo 7.
-
-```
-build\apps\turbulence_viewer\Release\aether_turbulence_viewer.exe
-```
-
-O gráfico clássico de validação de turbulência: u+ vs ln(y+), sobrepondo a
-lei da parede teórica (cinza) com `MixingLengthChannelFlowSolver1D` (azul)
-e `KEpsilonChannelFlowSolver1D` (laranja). O laranja gruda na reta teórica
-desde o primeiro ponto porque a célula adjacente à parede é literalmente
-fixada por essa fórmula (é a própria condição de contorno). O azul fica
-sistematicamente abaixo da reta com a mesma inclinação - o modelo acerta o
+Sobre o modo `turbulence`, vale a explicação que o app também imprime no
+console: a curva laranja (k-epsilon) gruda na reta teórica desde o primeiro
+ponto porque a célula adjacente à parede é *literalmente fixada* por essa
+fórmula - é a própria condição de contorno. A azul (comprimento de mistura)
+fica sistematicamente abaixo com a mesma inclinação: o modelo acerta o
 expoente 1/kappa (validado em `solver_tests.cpp`) mas não foi ajustado pra
 reproduzir a constante aditiva B=5.0, que não existe explicitamente nesse
-fechamento mais simples (sem amortecimento de van Driest); isso é esperado,
-não um bug, e o app imprime essa explicação no console.
+fechamento mais simples (sem amortecimento de van Driest). Isso é esperado,
+não um bug.

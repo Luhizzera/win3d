@@ -16,10 +16,10 @@ add_subdirectory(engine/mesh)
 add_subdirectory(engine/solver)
 add_subdirectory(engine/postprocessing)
 add_subdirectory(apps/common)
-add_subdirectory(apps/viewer)
-add_subdirectory(apps/field_viewer)
-add_subdirectory(apps/cavity_viewer)
-add_subdirectory(apps/turbulence_viewer)
+# apps/unified_viewer supersedes the four standalone viewers this project
+# started with (viewer, field_viewer, cavity_viewer, turbulence_viewer):
+# each became a mode of the single executable, so the originals were
+# removed rather than left as a second, drifting copy of the same code.
 add_subdirectory(apps/unified_viewer)
 
 if(AETHER_BUILD_PYTHON_BINDINGS)
