@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aether/solver/StaggeredCavityBase3D.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -53,20 +55,17 @@ namespace aether::solver {
 // mode is present in principle but not exercised by the validation used
 // (an interior-dominated mesh-refinement comparison against plain SST, not
 // a wall-resolved boundary-layer case).
-class DesSstLidDrivenCavitySolver3D {
+// The staggered-grid plumbing lives in StaggeredCavityBase3D;
+// only the closure itself is here.
+class DesSstLidDrivenCavitySolver3D : public StaggeredCavityBase3D {
 public:
     // cDes defaults to Strelets' commonly quoted 0.61; see the class
     // comment on why it is a parameter rather than a hardcoded constant.
     DesSstLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
                                    double lengthZ, double viscosity, double lidVelocity, double cDes = 0.61);
 
-    double stableTimeStep() const;
     void step(double dt);
 
-    double u(std::size_t i, std::size_t j, std::size_t k) const; // i in [0,nx]
-    double v(std::size_t i, std::size_t j, std::size_t k) const; // j in [0,ny]
-    double w(std::size_t i, std::size_t j, std::size_t k) const; // k in [0,nz]
-    double pressure(std::size_t i, std::size_t j, std::size_t k) const;
     double k(std::size_t i, std::size_t j, std::size_t k) const;
     double omega(std::size_t i, std::size_t j, std::size_t k) const;
     double eddyViscosity(std::size_t i, std::size_t j, std::size_t k) const;
@@ -80,28 +79,8 @@ public:
     // mesh; exposed for the same reason
     // SmagorinskyLesLidDrivenCavitySolver3D exposes it.
     double filterWidth() const;
-    double time() const { return time_; }
-
-    double maxDivergence() const;
 
 private:
-    std::size_t indexU(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * (nx_ + 1) + k * (nx_ + 1) * ny_;
-    }
-    std::size_t indexV(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * nx_ + k * nx_ * (ny_ + 1);
-    }
-    std::size_t indexW(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-    std::size_t indexP(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-
-    double lidVelocityAt(double x, double y) const;
-    double wallDistanceAt(std::size_t i, std::size_t j, std::size_t k) const;
-
-    double uAt(long long i, long long j, long long k) const;
-    double vAt(long long i, long long j, long long k) const;
-    double wAt(long long i, long long j, long long k) const;
-    double pAt(long long i, long long j, long long k) const;
-    double nutAt(long long i, long long j, long long k) const;
     double kAt(long long i, long long j, long long k) const;
     double omegaGhostAt(std::size_t i, std::size_t j, std::size_t k, int di, int dj, int dk) const;
     double sigmaKNutAt(long long i, long long j, long long k) const;
@@ -109,27 +88,7 @@ private:
 
     void updateBlendingAndCoefficients();
 
-    std::vector<double> applyLaplacian(const std::vector<double>& x) const;
-    static double dot(const std::vector<double>& a, const std::vector<double>& b);
-    void projectToDivergenceFree(std::vector<double>& uStar, std::vector<double>& vStar,
-                                  std::vector<double>& wStar, double dt);
-
-    std::size_t nx_;
-    std::size_t ny_;
-    std::size_t nz_;
-    double lengthX_;
-    double lengthY_;
-    double lengthZ_;
-    double dx_;
-    double dy_;
-    double dz_;
-    double viscosity_;
-    double lidVelocity_;
     double cDes_;
-    std::vector<double> u_;
-    std::vector<double> v_;
-    std::vector<double> w_;
-    std::vector<double> p_;
     std::vector<double> k_;
     std::vector<double> omega_;
     std::vector<double> nut_;
@@ -140,7 +99,6 @@ private:
     std::vector<double> beta_;
     std::vector<double> gamma_;
     std::vector<double> fDes_;
-    double time_ = 0.0;
 };
 
 } // namespace aether::solver

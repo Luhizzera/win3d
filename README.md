@@ -124,22 +124,11 @@ engine/postprocessing/ Módulo 7 - Streamline2D (integração real de linhas de
                        ver seção própria abaixo)
 engine/testing/        Header-only: macro AETHER_CHECK para os testes (ver nota abaixo)
 apps/common/           Módulo 8 - toolkit compartilhado de bootstrap OpenGL
-                       3.3 core profile + WGL (contexto, shaders, VBO/VAO)
-                       usado pelos quatro visualizadores abaixo, extraído
-                       do apps/viewer para não duplicar ~150 linhas de
-                       boilerplate (e o bug de janela que já apareceu lá)
-                       quatro vezes
-apps/viewer/            Módulo 8 - visualizador de malhas STL, OpenGL 3.3
-                       core profile (shaders GLSL + VBOs/VAOs)
-apps/field_viewer/      Módulo 7 - resolve a condução de calor (Módulo 5) e
-                       mostra o campo como heatmap 2D, OpenGL 3.3 core
-                       profile
-apps/cavity_viewer/     Módulo 7 - cavidade com tampa deslizante: vetores de
-                       velocidade + streamlines reais, OpenGL 3.3 core
-                       profile
-apps/turbulence_viewer/ Módulo 6/7 - u+ vs ln(y+) dos três fechamentos de
-                       turbulência, OpenGL 3.3 core profile
-apps/unified_viewer/   Módulo 8 - os quatro visualizadores acima reunidos num
+                       3.3 core profile + WGL (contexto, shaders, VBO/VAO),
+                       extraído do viewer original para não duplicar ~150
+                       linhas de boilerplate (e o bug de janela que já
+                       apareceu lá)
+apps/unified_viewer/   Módulo 8 - os quatro visualizadores originais num
                        único executável com seleção de modo por argumento de
                        linha de comando (`mesh`/`heatmap`/`cavity`/`turbulence`),
                        mais o modo `cavity3d` (campo de vetores 3D da cavidade
@@ -1323,6 +1312,85 @@ necessidade concreta, já que os solvers de Navier-Stokes 2D/3D usam projeção
 explícita, não um solve implícito); recuperação combinatória de faceta no
 CDT; módulos 9-14 do roadmap.
 
+## Faxina antes dos módulos 9-14
+
+Antes de entrar nos módulos de produto (UI, GPU, persistência, IA, API,
+plugins), uma consolidação em três fases. O motivo do timing é concreto:
+essas camadas todas se acoplam à API dos solvers, e o Módulo 10 (GPU)
+exigiria portar o **mesmo** kernel duplicado seis vezes. Pagar essa dívida
+depois custa muito mais.
+
+**Fase 1 - versionamento.** O repositório tinha *um commit e um arquivo
+rastreado* (o README): ~22 mil linhas de engine viviam fora do controle de
+versão. Commitado tudo (121 arquivos), com `.gitignore` ampliado (artefatos
+MSVC, `settings.local.json` que continha caminhos de uma máquina antiga) e
+um `.gitattributes` novo normalizando fim de linha - relevante porque o
+projeto é desenvolvido em mais de um dispositivo, e sem isso todo arquivo
+tocado em outra máquina aparece como reescrito por inteiro no diff.
+
+**Fase 2 - código morto.** Os quatro visualizadores standalone (`viewer`,
+`field_viewer`, `cavity_viewer`, `turbulence_viewer`) já tinham virado
+modos do `unified_viewer`, mas continuavam na árvore: uma segunda cópia do
+mesmo código de render, condenada a divergir. Removidos (−1.092 linhas)
+após confirmar que o unificado exercita tudo que eles faziam.
+
+**Fase 3 - `StaggeredCavityBase3D`.** Seis classes de cavidade 3D
+carregavam cada uma sua cópia literal da maquinaria de malha staggered.
+Extraída para uma base comum: **−2.513 linhas** no módulo solver.
+
+| classe | antes | depois |
+|---|---:|---:|
+| `StaggeredLidDrivenCavitySolver3D` | 391 | **19** |
+| `MixingLengthLidDrivenCavitySolver3D` | 475 | 92 |
+| `SmagorinskyLesLidDrivenCavitySolver3D` | 485 | 107 |
+| `KEpsilonLidDrivenCavitySolver3D` | 648 | 280 |
+| `KOmegaSSTLidDrivenCavitySolver3D` | 750 | 375 |
+| `DesSstLidDrivenCavitySolver3D` | 754 | 381 |
+| `StaggeredCavityBase3D` (novo) | — | 382 |
+
+**A extração foi verificada como preservadora de comportamento antes de ser
+feita, não depois.** Cada função foi comparada nas seis classes
+normalizando espaço/comentários e comparando hash: `uAt`, `vAt`, `wAt`,
+`maxDivergence`, `applyLaplacian`, `projectToDivergenceFree`,
+`lidVelocityAt`, `wallDistanceAt` e `dot` eram **idênticas byte a byte** nas
+seis; o preditor de momento era idêntico nas cinco turbulentas. Só duas
+coisas divergiam, ambas compreendidas: `pAt` (a classe LES escrevia o clamp
+com `std::clamp`, as outras com `if/else` - mesma semântica) e
+`stableTimeStep` (a laminar não tem `nu_t` a somar).
+
+**Sem funções virtuais, deliberadamente.** O desenho óbvio - um hook virtual
+`eddyViscosityAt()` - poria despacho virtual no laço mais interno do
+momento, seis vezes por célula por componente. Em vez disso cada fechamento
+registra um ponteiro pro seu próprio `nut_` via `setEddyViscosityField()`;
+`nutAt()` é função comum, inlinável, que retorna 0.0 quando o ponteiro é
+nulo (o caso laminar). Um desvio previsível em vez de uma consulta de
+vtable, e a classe continua não-polimórfica (daí o destrutor protegido e
+não-virtual).
+
+**O caso laminar mereceu medição, não suposição.** Unificar seu momento
+significa trocar `nu·laplaciano` pela forma ponderada por face - com
+`nu_t=0` as duas são algebricamente idênticas, mas **não** bit a bit (é
+`nu*(a-b) - nu*(b-c)` contra `nu*(a-2b+c)`). Medido diretamente contra
+valores de referência capturados antes da mudança, após 200 passos: 18.8%
+das amostras idênticas bit a bit e diferença máxima de **9.09e-16** em
+valores até 0.5 - cerca de 9 ULPs acumulados, exatamente a mudança de ordem
+de arredondamento esperada, não de comportamento (divergência máxima
+3.293e-13 contra 3.304e-13 antes). Com isso a classe laminar caiu de 391
+para **19 linhas**.
+
+**Dois bugs foram introduzidos pela refatoração e pegos pelos testes** -
+vale registrar porque ambos vieram de automatizar demais. Ao reescrever os
+construtores por regex, a substituição da lista de inicialização engoliu
+`cDes_(cDes)` no DES, deixando o membro não inicializado (lixo → `NaN` no
+`F_DES` já no primeiro passo); e o `setEddyViscosityField` não foi inserido
+no k-epsilon porque o corpo do construtor dele começa com um comentário, não
+com a linha que o padrão procurava. Os dois apareceram no teste de repouso
+exato (`u == 0.0` bit a bit) - o tipo de asserção que parece pedante até
+salvar uma refatoração. Também houve duas tentativas descartadas de
+script antes disso (um splitter que cortava função por "linha igual a `}`",
+engolindo funções de uma linha; e um filtro de header que comia o corpo da
+classe), revertidas via git - que é exatamente por que a Fase 1 veio antes.
+
 ## Marching cubes 3D: fecha o pré-requisito do renderizador de iso-superfícies
 
 `marchingCubes3D` fecha o item explicitamente deixado em aberto na task
@@ -1574,10 +1642,12 @@ etc. repetidos) agora que os quatro `.cpp` viraram uma única unidade de
 tradução.
 
 Os quatro executáveis originais (`aether_viewer`, `aether_field_viewer`,
-`aether_cavity_viewer`, `aether_turbulence_viewer`) permanecem na árvore
-sem alteração - `aether_unified_viewer` é um ponto de entrada adicional, não
-uma substituição, então quem só precisa de um modo específico continua
-podendo linkar/rodar só aquele binário menor.
+`aether_cavity_viewer`, `aether_turbulence_viewer`) foram mantidos na árvore
+por um tempo como pontos de entrada adicionais, e **removidos depois**, na
+faxina anterior aos módulos 9-14: como cada um virou um modo do executável
+unificado, mantê-los significava carregar uma segunda cópia do mesmo código
+condenada a divergir da primeira. Ver a seção "Faxina antes dos módulos
+9-14" mais abaixo.
 
 Validado compilando e rodando os quatro modos (`mesh` com um tetraedro STL
 de teste, `heatmap`, `cavity`, `turbulence` sem argumentos) e conferindo que
@@ -1615,50 +1685,31 @@ python -c "import aether; print(aether.Vector3(1,1,1).norm())"
 
 ## Visualizador
 
-```
-build\apps\viewer\Release\aether_viewer.exe caminho\para\arquivo.stl
-```
-
-Câmera orbital: arrastar com o botão esquerdo do mouse gira a vista, a
-roda do mouse aproxima/afasta. É uma implementação Win32 + OpenGL de função
-fixa (glBegin/glVertex, sem shaders) - suficiente para inspecionar malhas
-importadas agora; um pipeline moderno (shaders, VBOs) ou Vulkan é trabalho
-futuro do Módulo 8.
-
-## Visualização de campo (pós-processamento)
+Um único executável com seleção de modo por argumento:
 
 ```
-build\apps\field_viewer\Release\aether_field_viewer.exe
+build\apps\unified_viewer\Release\aether_unified_viewer.exe <modo>
 ```
 
-Resolve a clássica placa com 3 lados frios e 1 lado quente (Módulo 5,
-`SteadyDiffusionSolver`, condições de contorno em todas as 4 faces) e mostra
-o campo 2D real como heatmap azul-branco-vermelho. Ainda sem linhas de
-contorno/iso-superfícies/streamlines - isso e uma integração mais direta com
-o viewer 3D (Módulo 8) são trabalho futuro do Módulo 7.
+| modo | o que mostra |
+|---|---|
+| `mesh <arquivo.stl>` | malha STL/OBJ importada, câmera orbital em perspectiva |
+| `heatmap` | placa com 3 lados frios e 1 quente (`SteadyDiffusionSolver`), heatmap azul-branco-vermelho |
+| `cavity` | cavidade 2D com tampa deslizante (`LidDrivenCavitySolver2D`, Re=10): vetores + streamlines reais |
+| `cavity3d` | campo de vetores 3D da cavidade staggered (`StaggeredLidDrivenCavitySolver3D`) |
+| `isosurface` | iso-superfície real de `nu_t` do k-ω SST 3D, via marching cubes |
+| `turbulence` | u+ vs ln(y+) dos três fechamentos de canal 1D sobre a lei da parede teórica |
 
-```
-build\apps\cavity_viewer\Release\aether_cavity_viewer.exe
-```
+No modo `mesh`/`cavity3d`/`isosurface`: arrastar com o botão esquerdo gira a
+vista, a roda aproxima/afasta. Pipeline OpenGL 3.3 core profile (shaders
+GLSL + VBOs/VAOs) em todos os modos.
 
-Resolve a cavidade com tampa deslizante (Módulo 4, `LidDrivenCavitySolver2D`,
-Re=10) e mostra o campo de velocidade como vetores coloridos por magnitude -
-confirma visualmente o vórtice primário que os testes já provam existir
-matematicamente (conservação de massa numa caixa fechada). Ainda sem
-streamlines/linhas de corrente de verdade (isso é integração ao longo do
-campo, não implementada) - trabalho futuro do Módulo 7.
-
-```
-build\apps\turbulence_viewer\Release\aether_turbulence_viewer.exe
-```
-
-O gráfico clássico de validação de turbulência: u+ vs ln(y+), sobrepondo a
-lei da parede teórica (cinza) com `MixingLengthChannelFlowSolver1D` (azul)
-e `KEpsilonChannelFlowSolver1D` (laranja). O laranja gruda na reta teórica
-desde o primeiro ponto porque a célula adjacente à parede é literalmente
-fixada por essa fórmula (é a própria condição de contorno). O azul fica
-sistematicamente abaixo da reta com a mesma inclinação - o modelo acerta o
+Sobre o modo `turbulence`, vale a explicação que o app também imprime no
+console: a curva laranja (k-epsilon) gruda na reta teórica desde o primeiro
+ponto porque a célula adjacente à parede é *literalmente fixada* por essa
+fórmula - é a própria condição de contorno. A azul (comprimento de mistura)
+fica sistematicamente abaixo com a mesma inclinação: o modelo acerta o
 expoente 1/kappa (validado em `solver_tests.cpp`) mas não foi ajustado pra
 reproduzir a constante aditiva B=5.0, que não existe explicitamente nesse
-fechamento mais simples (sem amortecimento de van Driest); isso é esperado,
-não um bug, e o app imprime essa explicação no console.
+fechamento mais simples (sem amortecimento de van Driest). Isso é esperado,
+não um bug.

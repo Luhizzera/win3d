@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aether/solver/StaggeredCavityBase3D.hpp"
+
 #include <cstddef>
 #include <vector>
 
@@ -40,64 +42,18 @@ namespace aether::solver {
 // one cell pinned to remove the Neumann null space) and same "no
 // literature benchmark" validation philosophy as every other Navier-Stokes
 // solver in this project.
-class StaggeredLidDrivenCavitySolver3D {
+// The staggered-grid plumbing (indexing, ghost mirrors, momentum
+// predictor, pressure projection, stableTimeStep, maxDivergence) lives in
+// StaggeredCavityBase3D. Nothing else is left here: with no turbulence
+// closure registered, nutAt() is identically zero and the base's
+// face-weighted diffusion reduces to the plain molecular Laplacian this
+// class used to spell out itself.
+class StaggeredLidDrivenCavitySolver3D : public StaggeredCavityBase3D {
 public:
-    StaggeredLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX,
-                                      double lengthY, double lengthZ, double viscosity,
-                                      double lidVelocity);
+    StaggeredLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY, double lengthZ,
+           double viscosity, double lidVelocity);
 
-    double stableTimeStep() const;
     void step(double dt);
-
-    double u(std::size_t i, std::size_t j, std::size_t k) const; // i in [0,nx]
-    double v(std::size_t i, std::size_t j, std::size_t k) const; // j in [0,ny]
-    double w(std::size_t i, std::size_t j, std::size_t k) const; // k in [0,nz]
-    double pressure(std::size_t i, std::size_t j, std::size_t k) const;
-    double time() const { return time_; }
-
-    double maxDivergence() const;
-
-private:
-    std::size_t indexU(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * (nx_ + 1) + k * (nx_ + 1) * ny_;
-    }
-    std::size_t indexV(std::size_t i, std::size_t j, std::size_t k) const {
-        return i + j * nx_ + k * nx_ * (ny_ + 1);
-    }
-    std::size_t indexW(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-    std::size_t indexP(std::size_t i, std::size_t j, std::size_t k) const { return i + j * nx_ + k * nx_ * ny_; }
-
-    double lidVelocityAt(double x, double y) const;
-
-    // Direct array access for i in [0,nx]; ghost-mirrors (homogeneous,
-    // except the lid at k>=nz) for j/k out of range.
-    double uAt(long long i, long long j, long long k) const;
-    double vAt(long long i, long long j, long long k) const;
-    double wAt(long long i, long long j, long long k) const;
-    // Neumann mirror (ghost = interior) across all six walls.
-    double pAt(long long i, long long j, long long k) const;
-
-    std::vector<double> applyLaplacian(const std::vector<double>& x) const;
-    static double dot(const std::vector<double>& a, const std::vector<double>& b);
-    void projectToDivergenceFree(std::vector<double>& uStar, std::vector<double>& vStar,
-                                  std::vector<double>& wStar, double dt);
-
-    std::size_t nx_;
-    std::size_t ny_;
-    std::size_t nz_;
-    double lengthX_;
-    double lengthY_;
-    double lengthZ_;
-    double dx_;
-    double dy_;
-    double dz_;
-    double viscosity_;
-    double lidVelocity_;
-    std::vector<double> u_;
-    std::vector<double> v_;
-    std::vector<double> w_;
-    std::vector<double> p_;
-    double time_ = 0.0;
 };
 
 } // namespace aether::solver
