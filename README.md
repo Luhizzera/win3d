@@ -1374,9 +1374,37 @@ descontínua) e o núcleo do vórtice primário como mancha de baixa velocidade
 acima do centro, deslocado no sentido do movimento da tampa, que é onde ele
 deve estar a Re=100.
 
+### Campos numéricos editáveis por teclado
+
+Complemento ao slider: `Ui::textField()` - clique pra focar, `WM_CHAR` pra
+digitar (dígitos, `.`, `-`), Backspace edita, Enter confirma (analisa,
+limita ao intervalo, escreve `*value`), Escape descarta, e **clique fora
+também confirma** - a convenção usual de campo de texto, não só a de
+arrasto do slider. Um buffer malformado no commit (vazio, ou só `"-"`)
+deixa `*value` inalterado em vez de escrever lixo.
+
+Reaproveita o mesmo padrão "enfileira no WndProc, drena por quadro" que
+`mousePressed`/`mouseReleased` já usavam: `WM_CHAR` empilha em
+`g_pendingText`, drenado pra `UiInput::textInput` uma vez por quadro. Um
+detalhe que evitou um caminho de código a mais: `TranslateMessage()` (já
+chamado no laço de mensagens) gera `WM_CHAR` também pra Backspace/Enter/Esc,
+não só pra caracteres imprimíveis - então um único handler cobre digitação
+e os três controles sem precisar de `WM_KEYDOWN`/`VK_*` separado.
+
+Trocados por `textField()` os parâmetros que costumam precisar de um valor
+preciso (um Reynolds específico) que uma trilha de slider de 260px não
+alcança bem: viscosidade e velocidade da tampa. Resolução continua slider -
+precisa cair num inteiro, e arrastar é o jeito natural de escolher um.
+
+**Validado com captura real da janela, os dois caminhos de confirmação**:
+clique + digitação + Enter aplicou o valor, disparou reconstrução (passos
+voltam a 0) e reformatou a caixa; clique + digitação + clique-fora (sem
+Enter) também aplicou - confirmando que o commit por clique externo, um
+caminho de código distinto do de Enter, funciona de verdade e não só em
+teoria.
+
 **Ainda em aberto no Módulo 9**: painel sobre os modos 3D (precisa de
-thread de trabalho pro passo); entrada de texto e campos numéricos
-editáveis (só slider hoje); janelas móveis/ancoráveis; árvore de cena.
+thread de trabalho pro passo); janelas móveis/ancoráveis; árvore de cena.
 
 ## Faxina antes dos módulos 9-14
 

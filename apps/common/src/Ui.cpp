@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace aether::app {
 
@@ -268,6 +269,7 @@ void Ui::begin(int screenWidth, int screenHeight, const UiInput& input) {
     vertices_.clear();
     wantsMouse_ = false;
     sliderCounter_ = 0;
+    fieldCounter_ = 0;
     if (!input_.mouseDown) {
         activeSlider_ = -1; // a drag cannot outlive the button being held
     }
@@ -383,6 +385,88 @@ bool Ui::checkbox(const std::string& text, bool* value) {
         *value = !*value;
     }
     return clicked;
+}
+
+bool Ui::commitEdit(double* value, double minimum, double maximum) {
+    editingField_ = -1;
+    if (editBuffer_.empty()) {
+        return false;
+    }
+    char* end = nullptr;
+    const double parsed = std::strtod(editBuffer_.c_str(), &end);
+    if (end == editBuffer_.c_str()) {
+        return false; // nothing parseable (e.g. a lone "-" or ".")
+    }
+    *value = std::clamp(parsed, minimum, maximum);
+    return true;
+}
+
+bool Ui::textField(const std::string& text, double* value, double minimum, double maximum) {
+    const int id = fieldCounter_++;
+    const int x = panelX_ + kPadding;
+    const int y = cursorY_;
+    const int w = panelWidth_ - 2 * kPadding;
+
+    char labelBuffer[96];
+    std::snprintf(labelBuffer, sizeof(labelBuffer), "%s:", text.c_str());
+    drawText(x, y, labelBuffer, kText);
+
+    const int boxY = y + kGlyphHeight + 3;
+    const int boxH = kWidgetHeight;
+    const bool hovered = hit(x, boxY, w, boxH);
+    bool changed = false;
+
+    // A click outside the box commits whatever is being edited -- checked
+    // here, in this call, because this is the only place that knows this
+    // particular field's rectangle. It must run before the "start editing"
+    // check below, or a click that focuses this field would immediately
+    // also be read as "outside click" against itself.
+    if (editingField_ == id && input_.mousePressed && !hovered) {
+        changed = commitEdit(value, minimum, maximum);
+    }
+    if (editingField_ != id && hovered && input_.mousePressed) {
+        editingField_ = id;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.6g", *value);
+        editBuffer_ = buf;
+    }
+    if (editingField_ == id) {
+        for (const char c : input_.textInput) {
+            const auto code = static_cast<unsigned char>(c);
+            if (code == 0x08) { // backspace
+                if (!editBuffer_.empty()) {
+                    editBuffer_.pop_back();
+                }
+            } else if (code == 0x0D) { // enter: commit and stop
+                changed = commitEdit(value, minimum, maximum);
+                break;
+            } else if (code == 0x1B) { // escape: discard and stop
+                editingField_ = -1;
+                break;
+            } else if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+                if (editBuffer_.size() < 32) {
+                    editBuffer_.push_back(c);
+                }
+            }
+        }
+    }
+
+    drawRect(x, boxY, w, boxH, editingField_ == id ? kButtonHover : kButtonFace);
+    char valueBuffer[64];
+    if (editingField_ == id) {
+        // A trailing underscore stands in for a cursor -- simple and
+        // legible without needing a blink timer this class has no clock
+        // for (Ui has no notion of elapsed time between frames).
+        std::snprintf(valueBuffer, sizeof(valueBuffer), "%s_", editBuffer_.c_str());
+        drawText(x + 4, boxY + (boxH - kGlyphHeight) / 2, valueBuffer, kAccent);
+    } else {
+        std::snprintf(valueBuffer, sizeof(valueBuffer), "%.6g", *value);
+        drawText(x + 4, boxY + (boxH - kGlyphHeight) / 2, valueBuffer, kText);
+    }
+
+    wantsMouse_ = wantsMouse_ || hovered;
+    cursorY_ = boxY + boxH + 4;
+    return changed;
 }
 
 bool Ui::slider(const std::string& text, double* value, double minimum, double maximum) {

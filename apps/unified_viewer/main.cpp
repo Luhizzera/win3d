@@ -1694,6 +1694,11 @@ int g_height = 800;
 gl33::UiInput g_input;
 bool g_pendingPress = false;
 bool g_pendingRelease = false;
+// WM_CHAR characters queued since the last frame collected them into
+// g_input.textInput -- same "queue in WndProc, drain once per frame"
+// pattern as g_pendingPress/g_pendingRelease above, needed because WndProc
+// can fire multiple times between two iterations of the render loop.
+std::string g_pendingText;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -1718,6 +1723,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g_input.mouseDown = false;
         g_pendingRelease = true;
         ReleaseCapture();
+        return 0;
+    case WM_CHAR:
+        // TranslateMessage() (already called in this app's message loop)
+        // turns WM_KEYDOWN into WM_CHAR, including for Backspace/Enter/Esc
+        // -- see UiInput::textInput's own comment for why that is enough.
+        if (wParam > 0 && wParam < 0x80) {
+            g_pendingText.push_back(static_cast<char>(wParam));
+        }
         return 0;
     default:
         return DefWindowProc(hwnd, message, wParam, lParam);
@@ -1881,8 +1894,10 @@ int run() {
 
         g_input.mousePressed = g_pendingPress;
         g_input.mouseReleased = g_pendingRelease;
+        g_input.textInput = g_pendingText;
         g_pendingPress = false;
         g_pendingRelease = false;
+        g_pendingText.clear();
 
         if (running) {
             for (int s = 0; s < kStepsPerFrame; ++s) {
@@ -1951,9 +1966,15 @@ int run() {
         ui.separator();
         ui.label("Parametros");
         bool needsRebuild = false;
+        // Resolution stays a slider: it must land on an integer and a
+        // coarse drag is the natural way to pick one. Viscosity and lid
+        // velocity get textField() instead -- both often need a precise
+        // value (a specific Reynolds number) that a 260px slider track
+        // cannot address finely, which is the whole reason M9.4 added
+        // keyboard entry on top of the slider widget.
         needsRebuild |= ui.slider("resolucao", &resolution, 16, 80);
-        needsRebuild |= ui.slider("viscosidade", &viscosity, 0.002, 0.05);
-        needsRebuild |= ui.slider("veloc. da tampa", &lidVelocity, 0.0, 2.0);
+        needsRebuild |= ui.textField("viscosidade", &viscosity, 0.0005, 0.5);
+        needsRebuild |= ui.textField("veloc. da tampa", &lidVelocity, 0.0, 5.0);
         if (needsRebuild) {
             sim.n = static_cast<std::size_t>(resolution);
             sim.viscosity = viscosity;

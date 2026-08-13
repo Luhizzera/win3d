@@ -52,6 +52,13 @@ struct UiInput {
     bool mouseDown = false;     // button currently held
     bool mousePressed = false;  // went down this frame
     bool mouseReleased = false; // came up this frame
+    // Raw WM_CHAR characters collected since the previous begin() call, for
+    // textField(). Backspace (0x08), Enter (0x0D) and Escape (0x1B) arrive
+    // here too -- Windows generates WM_CHAR for control characters as well
+    // as printable ones once TranslateMessage() has seen the keydown, so a
+    // single message handler covers typing and the three control keys
+    // textField() needs without a separate WM_KEYDOWN/VK_* path.
+    std::string textInput;
 };
 
 struct UiColor {
@@ -89,6 +96,15 @@ public:
     bool button(const std::string& text);
     bool slider(const std::string& text, double* value, double minimum, double maximum);
     bool checkbox(const std::string& text, bool* value);
+    // Click-to-focus numeric entry: shows "<label>: <value>" then an
+    // editable box. While focused, digits/'.'/'-' type into a scratch
+    // buffer, Backspace edits it, Enter commits (parses, clamps to
+    // [minimum,maximum], writes *value, returns true that frame), Escape
+    // discards, and a click anywhere outside the box also commits -- the
+    // usual "click away" convention for a text field, not just a slider's
+    // drag-while-held one. An unparseable buffer on commit (e.g. empty, or
+    // just "-") leaves *value unchanged rather than writing garbage.
+    bool textField(const std::string& text, double* value, double minimum, double maximum);
 
     // Direct drawing, for callers that want text or a rectangle outside
     // the panel layout (status lines, overlays).
@@ -112,6 +128,11 @@ private:
     void pushQuad(float x, float y, float w, float h, float u0, float v0, float u1, float v1,
                    const UiColor& color);
     bool hit(int x, int y, int w, int h) const;
+    // Parses editBuffer_, clamps into range and writes *value on success;
+    // always clears editingField_. Shared by textField()'s three commit
+    // paths (Enter, click-away, and -- trivially -- never leaving it
+    // uncommitted) so the parse/clamp logic exists exactly once.
+    bool commitEdit(double* value, double minimum, double maximum);
 
     GLuint program_ = 0;
     GLuint vao_ = 0;
@@ -137,6 +158,14 @@ private:
     // spans frames by definition.
     int activeSlider_ = -1;
     int sliderCounter_ = 0;
+    // Which textField() (by call-order index, matching activeSlider_'s own
+    // convention) is currently being typed into, and its scratch buffer.
+    // -1 means no field is focused. Deliberately NOT reset in begin() --
+    // unlike activeSlider_, an edit-in-progress must survive frames where
+    // the mouse isn't held at all.
+    int editingField_ = -1;
+    std::string editBuffer_;
+    int fieldCounter_ = 0;
 };
 
 } // namespace aether::app
