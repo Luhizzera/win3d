@@ -6,8 +6,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(AETHER_BUILD_TESTS "Build Aether C++ unit tests" ON)
 option(AETHER_BUILD_PYTHON_BINDINGS "Build Python bindings (requires pybind11)" ON)
+# Module 10: GPU. CUDA was chosen deliberately over the dependency-free
+# alternatives (GL 4.3 compute shaders, OpenCL) -- see engine/gpu's own
+# README/header comments for the tradeoff this reverses (a CUDA Toolkit
+# install is now a real external SDK dependency of the C++ build, and the
+# engine is tied to NVIDIA hardware for this module specifically). Detected
+# rather than required: a machine without the CUDA Toolkit still builds
+# every other module untouched, the same optional-dependency pattern
+# AETHER_BUILD_PYTHON_BINDINGS already uses for pybind11 below.
+option(AETHER_ENABLE_CUDA "Build GPU kernels via CUDA (Module 10)" ON)
 
 enable_testing()
+
+if(AETHER_ENABLE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    else()
+        message(STATUS "CUDA compiler not found - skipping engine/gpu (Module 10). "
+                        "Install the CUDA Toolkit and re-run cmake to enable it.")
+    endif()
+endif()
 
 add_subdirectory(engine/testing)
 add_subdirectory(engine/core)
@@ -15,6 +37,9 @@ add_subdirectory(engine/geometry)
 add_subdirectory(engine/mesh)
 add_subdirectory(engine/solver)
 add_subdirectory(engine/postprocessing)
+if(AETHER_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+    add_subdirectory(engine/gpu)
+endif()
 add_subdirectory(apps/common)
 # apps/unified_viewer supersedes the four standalone viewers this project
 # started with (viewer, field_viewer, cavity_viewer, turbulence_viewer):

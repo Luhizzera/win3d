@@ -1526,6 +1526,76 @@ script antes disso (um splitter que cortava função por "linha igual a `}`",
 engolindo funções de uma linha; e um filtro de header que comia o corpo da
 classe), revertidas via git - que é exatamente por que a Fase 1 veio antes.
 
+## Módulo 10: GPU - primeiro kernel CUDA
+
+**Decisão de arquitetura, tomada explicitamente antes de escrever qualquer
+código**: entre compute shaders GL 4.3 (zero dependência nova, reaproveita
+o pipeline OpenGL já existente), OpenCL (cross-vendor, carregável
+dinamicamente, sem SDK obrigatório) e CUDA (nomeado no roadmap original,
+ferramental mais maduro, mas SDK externo real e trava a engine a hardware
+NVIDIA), o usuário escolheu **CUDA** - com pleno conhecimento de que isso
+reverte, deliberadamente e só para este módulo, a decisão permanente do
+projeto de não ter dependências externas de runtime. Registrado aqui e na
+memória do projeto porque é uma reversão real de princípio, não um detalhe
+de implementação.
+
+A máquina de desenvolvimento tem uma RTX 5080 (driver com CUDA 13.2), mas
+só o driver estava presente - o CUDA Toolkit (`nvcc`, necessário pra
+compilar C++/CUDA, diferente do runtime que os protótipos LBM em Python via
+cupy/numba já usavam) precisou ser instalado.
+
+**Integração ao CMake, no mesmo padrão de dependência opcional que os
+bindings Python já usam** (`pybind11_FOUND`): `check_language(CUDA)`
+detecta o compilador; se ausente, `engine/gpu` é pulado com uma mensagem
+explicando como habilitar, e o resto do projeto continua buildando
+normalmente. Uma máquina sem CUDA Toolkit não fica com o build quebrado.
+
+**`PoissonOperatorCuda`: o primeiro kernel CUDA do projeto**, e a escolha
+de qual operador portar primeiro também foi deliberada: o operador de
+Poisson 7-pontos é a peça de numérica mais reaproveitada do código inteiro
+(todo solver de Navier-Stokes explícito, 2D ou 3D, laminar ou qualquer um
+dos cinco fechamentos de turbulência, chama algo exatamente dessa forma uma
+vez por passo de projeção de pressão), e é embaraçosamente paralelo - cada
+célula de saída depende só de 6 vizinhos fixos, sem ambiguidade de ordem de
+acumulação entre células.
+
+**A validação que isso permite é mais forte que o normal deste projeto**:
+MSVC e nvcc são ambos estritos em IEEE-754 por padrão (nenhum dos dois
+ativa fast-math sem pedir), então em vez da comparação por tolerância
+usual, GPU e CPU são comparados por **igualdade bit a bit exata**.
+
+**E isso pegou um bug real na primeira tentativa** - não um bug de lógica,
+mas uma diferença genuína de estratégia de arredondamento. Medido
+diretamente: 16 de 120 células batiam bit a bit, com diferenças de
+~1e-13 a ~1e-14 em valores de até ~250 - pequeno demais pra ser erro de
+índice (que produziria diferenças estruturais grandes), mas grande demais
+pra ser ruído puro. A assinatura exata de **contração de FMA**: o nvcc funde
+`a*b+c` numa única instrução fused-multiply-add por padrão (um só
+arredondamento em vez de dois), o que é legal em IEEE-754 mas não é o que o
+código escalar em dupla precisão do MSVC faz sem `/fp:fast`. Corrigido com
+`-fmad=false` no alvo CUDA, forçando a mesma aritmética sequencial de
+arredondamento que o CPU já usa - depois disso, **120/120 células
+idênticas bit a bit, diferença máxima exatamente 0.0**.
+
+**Deliberadamente ainda não feito**: um solve persistente na GPU (esta
+classe copia host->device, lança o kernel, copia de volta - uma vez por
+chamada de `apply()`, sem estado residente entre chamadas). Suficiente pra
+validar o kernel em si; um ganho de performance real precisa do laço de CG
+inteiro (produtos internos inclusos) residente na GPU, pra não pagar a
+transferência PCIe a cada iteração - trabalho futuro explícito do Módulo
+10, não tentado aqui pra manter o primeiro código CUDA do projeto pequeno o
+bastante pra revisar e validar por completo.
+
+Nenhum bug de lógica; o único problema encontrado foi a contração de FMA
+acima, corrigido e documentado. Build limpo, 6 suites C++ passando
+(`aether_gpu_tests` nova).
+
+**Ainda em aberto no Módulo 10**: solve de CG inteiramente residente na
+GPU; portar o preditor de momento de `StaggeredCavityBase3D` (o outro laço
+quente, agora compartilhado pelas seis cavidades 3D desde a faxina antes
+dos módulos 9-14 - portar uma vez beneficia as seis); bindings Python pro
+módulo GPU.
+
 ## Marching cubes 3D: fecha o pré-requisito do renderizador de iso-superfícies
 
 `marchingCubes3D` fecha o item explicitamente deixado em aberto na task

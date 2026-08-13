@@ -1,0 +1,4 @@
+add_executable(aether_gpu_tests gpu_tests.cpp)
+target_link_libraries(aether_gpu_tests PRIVATE aether_gpu aether_testing)
+
+add_test(NAME aether_gpu_tests COMMAND aether_gpu_tests)
