@@ -1312,6 +1312,72 @@ necessidade concreta, já que os solvers de Navier-Stokes 2D/3D usam projeção
 explícita, não um solve implícito); recuperação combinatória de faceta no
 CDT; módulos 9-14 do roadmap.
 
+## Módulo 9: UI com painéis (primeira etapa)
+
+Primeiro módulo de produto do roadmap. A decisão de partida foi de escopo,
+não de código: **construir a UI do zero em vez de adotar Dear ImGui**. Não
+por preferência técnica - ImGui resolveria isso melhor e mais rápido - mas
+porque o projeto tem uma decisão permanente de não ter dependências
+externas de runtime (o `apps/common` existe justamente porque o bootstrap
+WGL/GL-3.3 foi escrito à mão em vez de puxar GLFW/GLAD). Reverter isso não
+é uma escolha a tomar de passagem. O custo é real e está registrado: são
+algumas centenas de linhas que o ImGui daria de graça, com muito menos
+widgets.
+
+**`apps/common/Ui`** - GUI em modo imediato sobre o mesmo pipeline GL 3.3
+dos viewers:
+
+- **Fonte bitmap 5x7 embarcada**, cobrindo os 95 caracteres ASCII
+  imprimíveis. Sem arquivo de fonte pra distribuir ou carregar. A tabela
+  foi autorada e depois **verificada glifo a glifo**, renderizando o
+  conjunto inteiro como arte ASCII, e só então convertida pra C++ -
+  **programaticamente, não transcrita à mão**. Transcrever 665 números é
+  exatamente o passo que planta um pixel errado que ninguém nota até uma
+  letra específica sair estranha.
+- **Um shader, uma textura, uma chamada de desenho por quadro.** Toda a
+  geometria - fundo de painel, faces de botão, trilhos de slider e cada
+  glifo de texto - acumula num único buffer de vértices. Retângulos sólidos
+  amostram uma célula deliberadamente toda branca no atlas da fonte, então
+  não precisam de shader nem caminho de desenho separado.
+- Widgets: painel, label, separador, botão, slider e checkbox. Modo
+  imediato: sem árvore retida, sem callbacks, sem invalidação - o estado
+  mora nos objetos de simulação, não nos widgets. O único estado retido é
+  qual slider está sendo arrastado, porque um arrasto atravessa quadros por
+  definição.
+
+**Modo `sim`** - o primeiro modo interativo no sentido de CFD, não no de
+câmera: todos os anteriores resolviam o problema de uma vez e exibiam um
+resultado fixo. Aqui o solver avança dentro do laço de render e o painel
+escreve de volta nele. Dá pra trocar o fechamento de turbulência (laminar /
+comprimento de mistura / k-epsilon / k-ω SST), editar resolução,
+viscosidade e velocidade da tampa, controlar run/pause/passo/reiniciar e
+ler diagnósticos ao vivo (Re, malha, passos, tempo, divergência máxima) -
+tudo sem recompilar. Os quatro fechamentos 2D têm construtor e superfície
+`u`/`v`/`time`/`maxDivergence` idênticos, então um ponteiro por fechamento
+mais um visitante pequeno bastam; não foi preciso hierarquia de wrapper.
+
+Duas simplificações deliberadas, ambas pra manter esta primeira etapa sobre
+a UI e não sobre encanamento de renderer: o campo é desenhado como heatmap
+por célula através do próprio `drawRect()` da UI (que já agrupa retângulos
+em uma chamada só - mais barato e muito menos código que levantar um
+segundo shader, e exercita a camada nova o bastante pra servir de teste de
+fumaça); e é 2D, não 3D - o painel é agnóstico de dimensão, mas os
+fechamentos 3D custam o suficiente por passo pra que passo interativo exija
+uma thread de trabalho, o que é tarefa própria.
+
+**Validado com captura real da janela** (técnica `PrintWindow`, a mesma de
+todos os viewers): a fonte sai legível, o painel e os widgets desenham
+corretos, e o campo mostra o resultado fisicamente certo - banda vermelha
+rápida no topo **afinando nos dois cantos** (o taper regularizado da tampa,
+que existe justamente pra remover a singularidade de pressão de uma tampa
+descontínua) e o núcleo do vórtice primário como mancha de baixa velocidade
+acima do centro, deslocado no sentido do movimento da tampa, que é onde ele
+deve estar a Re=100.
+
+**Ainda em aberto no Módulo 9**: painel sobre os modos 3D (precisa de
+thread de trabalho pro passo); entrada de texto e campos numéricos
+editáveis (só slider hoje); janelas móveis/ancoráveis; árvore de cena.
+
 ## Faxina antes dos módulos 9-14
 
 Antes de entrar nos módulos de produto (UI, GPU, persistência, IA, API,

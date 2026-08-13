@@ -13,9 +13,9 @@
 // orbit camera vs. three static 2D orthographic overlays). That would add
 // real complexity for little benefit, since only one mode ever runs per
 // process invocation anyway -- this is "one executable, mode-selected", not
-// "one code path for everything". The four original apps remain in the
-// tree unchanged (still independently useful, e.g. for a build that only
-// needs one of them); this is an additional entry point, not a replacement.
+// "one code path for everything". The four original standalone apps were
+// later removed in the cleanup before modules 9-14: keeping them meant
+// carrying a second copy of the same render code, bound to drift.
 //
 // Usage:
 //   aether_unified_viewer.exe mesh <arquivo.stl>
@@ -57,11 +57,15 @@
 #include "aether/solver/KEpsilonChannelFlowSolver1D.hpp"
 #include "aether/solver/KOmegaSSTChannelFlowSolver1D.hpp"
 #include "aether/solver/KOmegaSSTLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/KEpsilonLidDrivenCavitySolver2D.hpp"
+#include "aether/solver/KOmegaSSTLidDrivenCavitySolver2D.hpp"
 #include "aether/solver/LidDrivenCavitySolver2D.hpp"
+#include "aether/solver/MixingLengthLidDrivenCavitySolver2D.hpp"
 #include "aether/solver/MixingLengthChannelFlowSolver1D.hpp"
 #include "aether/solver/StaggeredLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/SteadyDiffusionSolver.hpp"
 #include "aether_app/Gl33.hpp"
+#include "aether_app/Ui.hpp"
 
 #include <windowsx.h>
 
@@ -70,6 +74,8 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace gl33 = aether::app;
@@ -1656,6 +1662,350 @@ int run() {
 // ===========================================================================
 // Entry point: mode dispatch.
 // ===========================================================================
+
+// ===========================================================================
+// Mode: sim (Module 9) -- live 2D lid-driven cavity driven from a CAD-like
+// control panel: pick the turbulence closure, edit parameters, run/pause/
+// step/reset, and read diagnostics, all without recompiling.
+//
+// **This is the first mode that is interactive in the CFD sense** rather
+// than the camera sense: every earlier mode solved its problem up front and
+// then displayed a fixed result. Here the solver advances inside the render
+// loop, and the panel writes back into it.
+//
+// Two deliberate simplifications, both to keep this first pass about the UI
+// rather than about renderer plumbing:
+//   - The field is drawn as a per-cell speed heatmap through the UI layer's
+//     own drawRect(), not a separate GL pipeline. The UI already batches
+//     screen-space coloured rectangles into a single draw call, so a 40x40
+//     cavity is ~1600 more rectangles in the same batch -- cheaper and far
+//     less code than standing up a second shader, and it exercises the new
+//     UI layer hard enough to double as its smoke test.
+//   - 2D, not 3D. The panel and its wiring are dimension-agnostic, so
+//     pointing them at the 3D staggered cavity is mechanical follow-up --
+//     but the 3D closures cost enough per step that interactive stepping
+//     would need a worker thread, which is its own task.
+// ===========================================================================
+namespace sim_mode {
+
+HWND g_window = nullptr;
+int g_width = 1280;
+int g_height = 800;
+gl33::UiInput g_input;
+bool g_pendingPress = false;
+bool g_pendingRelease = false;
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_SIZE:
+        g_width = LOWORD(lParam);
+        g_height = HIWORD(lParam);
+        glViewport(0, 0, g_width, g_height);
+        return 0;
+    case WM_MOUSEMOVE:
+        g_input.mouseX = GET_X_LPARAM(lParam);
+        g_input.mouseY = GET_Y_LPARAM(lParam);
+        return 0;
+    case WM_LBUTTONDOWN:
+        g_input.mouseDown = true;
+        g_pendingPress = true;
+        SetCapture(hwnd);
+        return 0;
+    case WM_LBUTTONUP:
+        g_input.mouseDown = false;
+        g_pendingRelease = true;
+        ReleaseCapture();
+        return 0;
+    default:
+        return DefWindowProc(hwnd, message, wParam, lParam);
+    }
+}
+
+// The four 2D cavity closures share an identical constructor signature and
+// an identical u/v/time/maxDivergence surface, so holding one owning pointer
+// per closure plus a small visitor is enough -- no wrapper hierarchy needed.
+enum class Closure { Laminar = 0, MixingLength, KEpsilon, KOmegaSST };
+
+const char* closureName(Closure closure) {
+    switch (closure) {
+    case Closure::Laminar:
+        return "laminar";
+    case Closure::MixingLength:
+        return "mixing-length";
+    case Closure::KEpsilon:
+        return "k-epsilon";
+    case Closure::KOmegaSST:
+        return "k-omega SST";
+    }
+    return "?";
+}
+
+struct Simulation {
+    Closure closure = Closure::Laminar;
+    std::size_t n = 40;
+    double viscosity = 0.01;
+    double lidVelocity = 1.0;
+    long long steps = 0;
+
+    std::unique_ptr<aether::solver::LidDrivenCavitySolver2D> laminar;
+    std::unique_ptr<aether::solver::MixingLengthLidDrivenCavitySolver2D> mixingLength;
+    std::unique_ptr<aether::solver::KEpsilonLidDrivenCavitySolver2D> kEpsilon;
+    std::unique_ptr<aether::solver::KOmegaSSTLidDrivenCavitySolver2D> kOmegaSST;
+
+    void rebuild() {
+        laminar.reset();
+        mixingLength.reset();
+        kEpsilon.reset();
+        kOmegaSST.reset();
+        steps = 0;
+        switch (closure) {
+        case Closure::Laminar:
+            laminar = std::make_unique<aether::solver::LidDrivenCavitySolver2D>(n, n, 1.0, 1.0, viscosity,
+                                                                                 lidVelocity);
+            break;
+        case Closure::MixingLength:
+            mixingLength = std::make_unique<aether::solver::MixingLengthLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        case Closure::KEpsilon:
+            kEpsilon = std::make_unique<aether::solver::KEpsilonLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        case Closure::KOmegaSST:
+            kOmegaSST = std::make_unique<aether::solver::KOmegaSSTLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        }
+    }
+
+    template <typename Fn> auto visit(Fn&& fn) const -> decltype(fn(*laminar)) {
+        if (laminar) {
+            return fn(*laminar);
+        }
+        if (mixingLength) {
+            return fn(*mixingLength);
+        }
+        if (kEpsilon) {
+            return fn(*kEpsilon);
+        }
+        return fn(*kOmegaSST);
+    }
+
+    void step() {
+        const auto advance = [](auto& solver) { solver.step(0.3 * solver.stableTimeStep()); };
+        if (laminar) {
+            advance(*laminar);
+        } else if (mixingLength) {
+            advance(*mixingLength);
+        } else if (kEpsilon) {
+            advance(*kEpsilon);
+        } else {
+            advance(*kOmegaSST);
+        }
+        ++steps;
+    }
+
+    double speedAt(std::size_t i, std::size_t j) const {
+        return visit([&](const auto& solver) {
+            const double u = solver.u(i, j);
+            const double v = solver.v(i, j);
+            return std::sqrt(u * u + v * v);
+        });
+    }
+    double pressureAt(std::size_t i, std::size_t j) const {
+        return visit([&](const auto& solver) { return solver.pressure(i, j); });
+    }
+    double maxDivergence() const {
+        return visit([](const auto& solver) { return solver.maxDivergence(); });
+    }
+    double time() const {
+        return visit([](const auto& solver) { return solver.time(); });
+    }
+};
+
+int run() {
+    std::printf("Aether Unified Viewer - modo 'sim' (Modulo 9: UI com paineis)\n");
+    std::printf("  painel a esquerda: fechamento, parametros, run/pause/passo/reiniciar\n");
+    std::printf("  o campo e' redesenhado a cada quadro a partir do solver ao vivo\n\n");
+    std::fflush(stdout);
+
+    g_window = gl33::createSimpleWindow(L"AetherSim", L"Aether - Simulacao interativa (Modulo 9)", g_width,
+                                        g_height, WndProc);
+    if (g_window == nullptr) {
+        std::fprintf(stderr, "erro ao criar janela\n");
+        return 1;
+    }
+    HDC hdc = nullptr;
+    HGLRC context = gl33::createGl33Context(g_window, hdc);
+    if (context == nullptr) {
+        return 1;
+    }
+
+    gl33::Ui ui;
+    if (!ui.initialize()) {
+        std::fprintf(stderr, "erro ao inicializar a UI\n");
+        return 1;
+    }
+
+    Simulation sim;
+    sim.rebuild();
+
+    // Starts running: opening this mode to a frozen, uniformly-blue field
+    // reads as broken, and the first thing anyone would do is press RODAR.
+    bool running = true;
+    bool showPressure = false;
+    double resolution = static_cast<double>(sim.n);
+    double viscosity = sim.viscosity;
+    double lidVelocity = sim.lidVelocity;
+    constexpr int kStepsPerFrame = 4;
+
+    ShowWindow(g_window, SW_SHOW);
+    UpdateWindow(g_window);
+
+    MSG message{};
+    bool quit = false;
+    while (!quit) {
+        while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                quit = true;
+            }
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
+        if (quit) {
+            break;
+        }
+
+        g_input.mousePressed = g_pendingPress;
+        g_input.mouseReleased = g_pendingRelease;
+        g_pendingPress = false;
+        g_pendingRelease = false;
+
+        if (running) {
+            for (int s = 0; s < kStepsPerFrame; ++s) {
+                sim.step();
+            }
+        }
+
+        glClearColor(0.06f, 0.07f, 0.08f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        ui.begin(g_width, g_height, g_input);
+
+        // --- field: per-cell heatmap, emitted into the UI's own batch ---
+        const int panelWidth = 260;
+        const int margin = 24;
+        const int available = std::min(g_width - panelWidth - 3 * margin, g_height - 2 * margin);
+        const int fieldSize = std::max(available, 64);
+        const int fieldX = panelWidth + 2 * margin;
+        const int fieldY = (g_height - fieldSize) / 2;
+
+        double maxValue = 1e-12;
+        double minValue = 0.0;
+        for (std::size_t j = 0; j < sim.n; ++j) {
+            for (std::size_t i = 0; i < sim.n; ++i) {
+                const double value = showPressure ? sim.pressureAt(i, j) : sim.speedAt(i, j);
+                maxValue = std::max(maxValue, value);
+                minValue = std::min(minValue, value);
+            }
+        }
+        const double span = (maxValue - minValue) > 1e-12 ? (maxValue - minValue) : 1.0;
+
+        const int cell = std::max(fieldSize / static_cast<int>(sim.n), 1);
+        for (std::size_t j = 0; j < sim.n; ++j) {
+            for (std::size_t i = 0; i < sim.n; ++i) {
+                const double value = showPressure ? sim.pressureAt(i, j) : sim.speedAt(i, j);
+                float r = 0.0f;
+                float g = 0.0f;
+                float b = 0.0f;
+                colorForValue((value - minValue) / span, r, g, b);
+                // Row j=0 is the cavity floor, so flip j into screen space.
+                const int px = fieldX + static_cast<int>(i) * cell;
+                const int py = fieldY + (static_cast<int>(sim.n) - 1 - static_cast<int>(j)) * cell;
+                ui.drawRect(px, py, cell, cell, gl33::UiColor{r, g, b, 1.0f});
+            }
+        }
+        ui.drawText(fieldX, fieldY - 16,
+                    showPressure ? "pressao (azul=baixa, vermelho=alta)"
+                                 : "velocidade |u| (azul=baixa, vermelho=alta)",
+                    gl33::UiColor{0.60f, 0.63f, 0.67f, 1.0f});
+
+        // --- control panel ---
+        ui.beginPanel(margin, margin, panelWidth, "AETHER - CAVIDADE 2D");
+
+        ui.label("Fechamento de turbulencia");
+        for (int c = 0; c < 4; ++c) {
+            const auto candidate = static_cast<Closure>(c);
+            std::string caption = (sim.closure == candidate) ? "[x] " : "[ ] ";
+            caption += closureName(candidate);
+            if (ui.button(caption) && sim.closure != candidate) {
+                sim.closure = candidate;
+                sim.rebuild();
+                running = false;
+            }
+        }
+
+        ui.separator();
+        ui.label("Parametros");
+        bool needsRebuild = false;
+        needsRebuild |= ui.slider("resolucao", &resolution, 16, 80);
+        needsRebuild |= ui.slider("viscosidade", &viscosity, 0.002, 0.05);
+        needsRebuild |= ui.slider("veloc. da tampa", &lidVelocity, 0.0, 2.0);
+        if (needsRebuild) {
+            sim.n = static_cast<std::size_t>(resolution);
+            sim.viscosity = viscosity;
+            sim.lidVelocity = lidVelocity;
+            sim.rebuild();
+            running = false;
+        }
+
+        ui.separator();
+        ui.label("Simulacao");
+        if (ui.button(running ? "PAUSAR" : "RODAR")) {
+            running = !running;
+        }
+        if (ui.button("+1 PASSO")) {
+            sim.step();
+        }
+        if (ui.button("REINICIAR")) {
+            sim.rebuild();
+            running = false;
+        }
+        ui.checkbox("mostrar pressao", &showPressure);
+
+        ui.separator();
+        ui.label("Diagnostico");
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "Re = %.0f", sim.lidVelocity / sim.viscosity);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "malha: %zux%zu", sim.n, sim.n);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "passos: %lld", sim.steps);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "t = %.4f s", sim.time());
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "div max = %.2e", sim.maxDivergence());
+        ui.label(buffer);
+
+        ui.endPanel();
+        ui.end();
+
+        SwapBuffers(hdc);
+        Sleep(1);
+    }
+
+    ui.shutdown();
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(context);
+    ReleaseDC(g_window, hdc);
+    return 0;
+}
+
+} // namespace sim_mode
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "uso: aether_unified_viewer <modo> [args]\n");
@@ -1687,6 +2037,9 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(mode, "turbulence") == 0) {
         return turbulence_mode::run();
+    }
+    if (std::strcmp(mode, "sim") == 0) {
+        return sim_mode::run();
     }
 
     std::fprintf(stderr, "modo desconhecido: %s\n", mode);

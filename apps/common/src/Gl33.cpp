@@ -30,6 +30,7 @@ PfnGlGetUniformLocation glGetUniformLocation = nullptr;
 PfnGlUniformMatrix4fv glUniformMatrix4fv = nullptr;
 PfnGlUniform3f glUniform3f = nullptr;
 PfnGlUniform1f glUniform1f = nullptr;
+PfnGlUniform2f glUniform2f = nullptr;
 
 namespace {
 
@@ -74,6 +75,7 @@ bool loadGl33Functions() {
     ok &= loadProc("glUniformMatrix4fv", glUniformMatrix4fv);
     ok &= loadProc("glUniform3f", glUniform3f);
     ok &= loadProc("glUniform1f", glUniform1f);
+    ok &= loadProc("glUniform2f", glUniform2f);
     return ok;
 }
 

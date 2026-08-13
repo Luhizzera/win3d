@@ -62,6 +62,7 @@ using PfnGlGetUniformLocation = GLint(WINAPI*)(GLuint, const GLchar*);
 using PfnGlUniformMatrix4fv = void(WINAPI*)(GLint, GLsizei, GLboolean, const GLfloat*);
 using PfnGlUniform3f = void(WINAPI*)(GLint, GLfloat, GLfloat, GLfloat);
 using PfnGlUniform1f = void(WINAPI*)(GLint, GLfloat);
+using PfnGlUniform2f = void(WINAPI*)(GLint, GLfloat, GLfloat);
 
 // Populated by createGl33Context() on success; every apps/* viewer shares
 // these same pointers (one process, one GL context at a time -- true for
@@ -92,6 +93,9 @@ extern PfnGlGetUniformLocation glGetUniformLocation;
 extern PfnGlUniformMatrix4fv glUniformMatrix4fv;
 extern PfnGlUniform3f glUniform3f;
 extern PfnGlUniform1f glUniform1f;
+// Added for the Module 9 UI layer (Ui.cpp), which passes the screen
+// size as a vec2 uniform.
+extern PfnGlUniform2f glUniform2f;
 
 // Standard 32-bit RGBA + 24-bit depth double-buffered pixel format
 // descriptor every viewer in this project uses.
