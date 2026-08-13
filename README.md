@@ -1403,8 +1403,49 @@ Enter) também aplicou - confirmando que o commit por clique externo, um
 caminho de código distinto do de Enter, funciona de verdade e não só em
 teoria.
 
-**Ainda em aberto no Módulo 9**: painel sobre os modos 3D (precisa de
-thread de trabalho pro passo); janelas móveis/ancoráveis; árvore de cena.
+### Modo `sim3d`: o painel sobre a cavidade 3D real, com thread de trabalho
+
+**Este é o primeiro código multi-thread do projeto**, e a razão é concreta:
+um passo em 3D custa O(n³) em vez de O(n²), e os construtores de
+k-epsilon/k-omega SST/DES rodam um primer de 400 passos de mistura por
+dentro antes do painel poder mostrar qualquer coisa - nenhum dos dois é
+barato o bastante pra caber no laço de render a 60fps como no modo `sim`
+2D. Então o solver passou a viver na própria thread.
+
+**Contrato de threading, registrado explicitamente porque é fácil errar
+sutilmente**: `rebuildIfRequested()`/`stepOnce()` só rodam na thread de
+trabalho; `requestRebuild()`/`requestStepOnce()`/`setRunning()` só rodam na
+thread de render/UI; `trySnapshot()` só roda na thread de render e **nunca
+bloqueia** - é o único lugar onde um `lock_guard` comum seria errado, já
+que uma leitura bloqueante ali congelaria o painel pelo tempo que uma
+reconstrução levar.
+
+A thread de render usa `std::mutex::try_lock()` uma vez por quadro pra
+copiar o que precisa desenhar; se falhar (worker no meio de um passo ou
+reconstrução), o quadro simplesmente redesenha o retrato anterior. Trocar
+um parâmetro *pode* bloquear brevemente por até a duração de um passo (a
+troca precisa da mesma trava que o passo usa), mas isso é uma ação rara do
+usuário, não o laço de desenho - a resposividade que importa (painel,
+câmera orbital) nunca espera por nada.
+
+**Validado com captura real da janela em três cenários**: (1) rodando por
+~6s o laminar acumulou **112.812 passos** com divergência em `1.63e-12`,
+confirmando que o worker avança livre do teto de quadros do render; (2)
+trocar de fechamento durante a execução manteve o painel inteiramente
+interativo durante e depois da reconstrução, sem travar; (3) arrastar fora
+do painel orbita a câmera corretamente (o cubo girou, o painel ficou
+intacto), confirmando que `ui.wantsMouse()` separa corretamente cliques de
+UI de arrasto de câmera.
+
+Reaproveita a maior parte do `cavity3d_mode` já existente (câmera orbital,
+setas coloridas por velocidade, caixa de arame) - a diferença é que aqui o
+buffer de vértices é reconstruído a cada quadro a partir do retrato mais
+recente em vez de uma vez só no início, e os seis fechamentos 3D (não só o
+laminar) ficam disponíveis por um seletor no painel, com o mesmo padrão
+"um ponteiro por variante mais um pequeno visitante" das outras telas.
+
+**Ainda em aberto no Módulo 9**: janelas móveis/ancoráveis; árvore de
+cena.
 
 ## Faxina antes dos módulos 9-14
 
