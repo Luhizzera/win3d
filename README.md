@@ -1312,6 +1312,141 @@ necessidade concreta, já que os solvers de Navier-Stokes 2D/3D usam projeção
 explícita, não um solve implícito); recuperação combinatória de faceta no
 CDT; módulos 9-14 do roadmap.
 
+## Módulo 9: UI com painéis (primeira etapa)
+
+Primeiro módulo de produto do roadmap. A decisão de partida foi de escopo,
+não de código: **construir a UI do zero em vez de adotar Dear ImGui**. Não
+por preferência técnica - ImGui resolveria isso melhor e mais rápido - mas
+porque o projeto tem uma decisão permanente de não ter dependências
+externas de runtime (o `apps/common` existe justamente porque o bootstrap
+WGL/GL-3.3 foi escrito à mão em vez de puxar GLFW/GLAD). Reverter isso não
+é uma escolha a tomar de passagem. O custo é real e está registrado: são
+algumas centenas de linhas que o ImGui daria de graça, com muito menos
+widgets.
+
+**`apps/common/Ui`** - GUI em modo imediato sobre o mesmo pipeline GL 3.3
+dos viewers:
+
+- **Fonte bitmap 5x7 embarcada**, cobrindo os 95 caracteres ASCII
+  imprimíveis. Sem arquivo de fonte pra distribuir ou carregar. A tabela
+  foi autorada e depois **verificada glifo a glifo**, renderizando o
+  conjunto inteiro como arte ASCII, e só então convertida pra C++ -
+  **programaticamente, não transcrita à mão**. Transcrever 665 números é
+  exatamente o passo que planta um pixel errado que ninguém nota até uma
+  letra específica sair estranha.
+- **Um shader, uma textura, uma chamada de desenho por quadro.** Toda a
+  geometria - fundo de painel, faces de botão, trilhos de slider e cada
+  glifo de texto - acumula num único buffer de vértices. Retângulos sólidos
+  amostram uma célula deliberadamente toda branca no atlas da fonte, então
+  não precisam de shader nem caminho de desenho separado.
+- Widgets: painel, label, separador, botão, slider e checkbox. Modo
+  imediato: sem árvore retida, sem callbacks, sem invalidação - o estado
+  mora nos objetos de simulação, não nos widgets. O único estado retido é
+  qual slider está sendo arrastado, porque um arrasto atravessa quadros por
+  definição.
+
+**Modo `sim`** - o primeiro modo interativo no sentido de CFD, não no de
+câmera: todos os anteriores resolviam o problema de uma vez e exibiam um
+resultado fixo. Aqui o solver avança dentro do laço de render e o painel
+escreve de volta nele. Dá pra trocar o fechamento de turbulência (laminar /
+comprimento de mistura / k-epsilon / k-ω SST), editar resolução,
+viscosidade e velocidade da tampa, controlar run/pause/passo/reiniciar e
+ler diagnósticos ao vivo (Re, malha, passos, tempo, divergência máxima) -
+tudo sem recompilar. Os quatro fechamentos 2D têm construtor e superfície
+`u`/`v`/`time`/`maxDivergence` idênticos, então um ponteiro por fechamento
+mais um visitante pequeno bastam; não foi preciso hierarquia de wrapper.
+
+Duas simplificações deliberadas, ambas pra manter esta primeira etapa sobre
+a UI e não sobre encanamento de renderer: o campo é desenhado como heatmap
+por célula através do próprio `drawRect()` da UI (que já agrupa retângulos
+em uma chamada só - mais barato e muito menos código que levantar um
+segundo shader, e exercita a camada nova o bastante pra servir de teste de
+fumaça); e é 2D, não 3D - o painel é agnóstico de dimensão, mas os
+fechamentos 3D custam o suficiente por passo pra que passo interativo exija
+uma thread de trabalho, o que é tarefa própria.
+
+**Validado com captura real da janela** (técnica `PrintWindow`, a mesma de
+todos os viewers): a fonte sai legível, o painel e os widgets desenham
+corretos, e o campo mostra o resultado fisicamente certo - banda vermelha
+rápida no topo **afinando nos dois cantos** (o taper regularizado da tampa,
+que existe justamente pra remover a singularidade de pressão de uma tampa
+descontínua) e o núcleo do vórtice primário como mancha de baixa velocidade
+acima do centro, deslocado no sentido do movimento da tampa, que é onde ele
+deve estar a Re=100.
+
+### Campos numéricos editáveis por teclado
+
+Complemento ao slider: `Ui::textField()` - clique pra focar, `WM_CHAR` pra
+digitar (dígitos, `.`, `-`), Backspace edita, Enter confirma (analisa,
+limita ao intervalo, escreve `*value`), Escape descarta, e **clique fora
+também confirma** - a convenção usual de campo de texto, não só a de
+arrasto do slider. Um buffer malformado no commit (vazio, ou só `"-"`)
+deixa `*value` inalterado em vez de escrever lixo.
+
+Reaproveita o mesmo padrão "enfileira no WndProc, drena por quadro" que
+`mousePressed`/`mouseReleased` já usavam: `WM_CHAR` empilha em
+`g_pendingText`, drenado pra `UiInput::textInput` uma vez por quadro. Um
+detalhe que evitou um caminho de código a mais: `TranslateMessage()` (já
+chamado no laço de mensagens) gera `WM_CHAR` também pra Backspace/Enter/Esc,
+não só pra caracteres imprimíveis - então um único handler cobre digitação
+e os três controles sem precisar de `WM_KEYDOWN`/`VK_*` separado.
+
+Trocados por `textField()` os parâmetros que costumam precisar de um valor
+preciso (um Reynolds específico) que uma trilha de slider de 260px não
+alcança bem: viscosidade e velocidade da tampa. Resolução continua slider -
+precisa cair num inteiro, e arrastar é o jeito natural de escolher um.
+
+**Validado com captura real da janela, os dois caminhos de confirmação**:
+clique + digitação + Enter aplicou o valor, disparou reconstrução (passos
+voltam a 0) e reformatou a caixa; clique + digitação + clique-fora (sem
+Enter) também aplicou - confirmando que o commit por clique externo, um
+caminho de código distinto do de Enter, funciona de verdade e não só em
+teoria.
+
+### Modo `sim3d`: o painel sobre a cavidade 3D real, com thread de trabalho
+
+**Este é o primeiro código multi-thread do projeto**, e a razão é concreta:
+um passo em 3D custa O(n³) em vez de O(n²), e os construtores de
+k-epsilon/k-omega SST/DES rodam um primer de 400 passos de mistura por
+dentro antes do painel poder mostrar qualquer coisa - nenhum dos dois é
+barato o bastante pra caber no laço de render a 60fps como no modo `sim`
+2D. Então o solver passou a viver na própria thread.
+
+**Contrato de threading, registrado explicitamente porque é fácil errar
+sutilmente**: `rebuildIfRequested()`/`stepOnce()` só rodam na thread de
+trabalho; `requestRebuild()`/`requestStepOnce()`/`setRunning()` só rodam na
+thread de render/UI; `trySnapshot()` só roda na thread de render e **nunca
+bloqueia** - é o único lugar onde um `lock_guard` comum seria errado, já
+que uma leitura bloqueante ali congelaria o painel pelo tempo que uma
+reconstrução levar.
+
+A thread de render usa `std::mutex::try_lock()` uma vez por quadro pra
+copiar o que precisa desenhar; se falhar (worker no meio de um passo ou
+reconstrução), o quadro simplesmente redesenha o retrato anterior. Trocar
+um parâmetro *pode* bloquear brevemente por até a duração de um passo (a
+troca precisa da mesma trava que o passo usa), mas isso é uma ação rara do
+usuário, não o laço de desenho - a resposividade que importa (painel,
+câmera orbital) nunca espera por nada.
+
+**Validado com captura real da janela em três cenários**: (1) rodando por
+~6s o laminar acumulou **112.812 passos** com divergência em `1.63e-12`,
+confirmando que o worker avança livre do teto de quadros do render; (2)
+trocar de fechamento durante a execução manteve o painel inteiramente
+interativo durante e depois da reconstrução, sem travar; (3) arrastar fora
+do painel orbita a câmera corretamente (o cubo girou, o painel ficou
+intacto), confirmando que `ui.wantsMouse()` separa corretamente cliques de
+UI de arrasto de câmera.
+
+Reaproveita a maior parte do `cavity3d_mode` já existente (câmera orbital,
+setas coloridas por velocidade, caixa de arame) - a diferença é que aqui o
+buffer de vértices é reconstruído a cada quadro a partir do retrato mais
+recente em vez de uma vez só no início, e os seis fechamentos 3D (não só o
+laminar) ficam disponíveis por um seletor no painel, com o mesmo padrão
+"um ponteiro por variante mais um pequeno visitante" das outras telas.
+
+**Ainda em aberto no Módulo 9**: janelas móveis/ancoráveis; árvore de
+cena.
+
 ## Faxina antes dos módulos 9-14
 
 Antes de entrar nos módulos de produto (UI, GPU, persistência, IA, API,

@@ -13,9 +13,9 @@
 // orbit camera vs. three static 2D orthographic overlays). That would add
 // real complexity for little benefit, since only one mode ever runs per
 // process invocation anyway -- this is "one executable, mode-selected", not
-// "one code path for everything". The four original apps remain in the
-// tree unchanged (still independently useful, e.g. for a build that only
-// needs one of them); this is an additional entry point, not a replacement.
+// "one code path for everything". The four original standalone apps were
+// later removed in the cleanup before modules 9-14: keeping them meant
+// carrying a second copy of the same render code, bound to drift.
 //
 // Usage:
 //   aether_unified_viewer.exe mesh <arquivo.stl>
@@ -57,11 +57,20 @@
 #include "aether/solver/KEpsilonChannelFlowSolver1D.hpp"
 #include "aether/solver/KOmegaSSTChannelFlowSolver1D.hpp"
 #include "aether/solver/KOmegaSSTLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/KEpsilonLidDrivenCavitySolver2D.hpp"
+#include "aether/solver/KOmegaSSTLidDrivenCavitySolver2D.hpp"
 #include "aether/solver/LidDrivenCavitySolver2D.hpp"
+#include "aether/solver/MixingLengthLidDrivenCavitySolver2D.hpp"
 #include "aether/solver/MixingLengthChannelFlowSolver1D.hpp"
+#include "aether/solver/DesSstLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/KEpsilonLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/KOmegaSSTLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/MixingLengthLidDrivenCavitySolver3D.hpp"
+#include "aether/solver/SmagorinskyLesLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/StaggeredLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/SteadyDiffusionSolver.hpp"
 #include "aether_app/Gl33.hpp"
+#include "aether_app/Ui.hpp"
 
 #include <windowsx.h>
 
@@ -70,6 +79,12 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace gl33 = aether::app;
@@ -1656,6 +1671,955 @@ int run() {
 // ===========================================================================
 // Entry point: mode dispatch.
 // ===========================================================================
+
+// ===========================================================================
+// Mode: sim (Module 9) -- live 2D lid-driven cavity driven from a CAD-like
+// control panel: pick the turbulence closure, edit parameters, run/pause/
+// step/reset, and read diagnostics, all without recompiling.
+//
+// **This is the first mode that is interactive in the CFD sense** rather
+// than the camera sense: every earlier mode solved its problem up front and
+// then displayed a fixed result. Here the solver advances inside the render
+// loop, and the panel writes back into it.
+//
+// Two deliberate simplifications, both to keep this first pass about the UI
+// rather than about renderer plumbing:
+//   - The field is drawn as a per-cell speed heatmap through the UI layer's
+//     own drawRect(), not a separate GL pipeline. The UI already batches
+//     screen-space coloured rectangles into a single draw call, so a 40x40
+//     cavity is ~1600 more rectangles in the same batch -- cheaper and far
+//     less code than standing up a second shader, and it exercises the new
+//     UI layer hard enough to double as its smoke test.
+//   - 2D, not 3D. The panel and its wiring are dimension-agnostic, so
+//     pointing them at the 3D staggered cavity is mechanical follow-up --
+//     but the 3D closures cost enough per step that interactive stepping
+//     would need a worker thread, which is its own task.
+// ===========================================================================
+namespace sim_mode {
+
+HWND g_window = nullptr;
+int g_width = 1280;
+int g_height = 800;
+gl33::UiInput g_input;
+bool g_pendingPress = false;
+bool g_pendingRelease = false;
+// WM_CHAR characters queued since the last frame collected them into
+// g_input.textInput -- same "queue in WndProc, drain once per frame"
+// pattern as g_pendingPress/g_pendingRelease above, needed because WndProc
+// can fire multiple times between two iterations of the render loop.
+std::string g_pendingText;
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_SIZE:
+        g_width = LOWORD(lParam);
+        g_height = HIWORD(lParam);
+        glViewport(0, 0, g_width, g_height);
+        return 0;
+    case WM_MOUSEMOVE:
+        g_input.mouseX = GET_X_LPARAM(lParam);
+        g_input.mouseY = GET_Y_LPARAM(lParam);
+        return 0;
+    case WM_LBUTTONDOWN:
+        g_input.mouseDown = true;
+        g_pendingPress = true;
+        SetCapture(hwnd);
+        return 0;
+    case WM_LBUTTONUP:
+        g_input.mouseDown = false;
+        g_pendingRelease = true;
+        ReleaseCapture();
+        return 0;
+    case WM_CHAR:
+        // TranslateMessage() (already called in this app's message loop)
+        // turns WM_KEYDOWN into WM_CHAR, including for Backspace/Enter/Esc
+        // -- see UiInput::textInput's own comment for why that is enough.
+        if (wParam > 0 && wParam < 0x80) {
+            g_pendingText.push_back(static_cast<char>(wParam));
+        }
+        return 0;
+    default:
+        return DefWindowProc(hwnd, message, wParam, lParam);
+    }
+}
+
+// The four 2D cavity closures share an identical constructor signature and
+// an identical u/v/time/maxDivergence surface, so holding one owning pointer
+// per closure plus a small visitor is enough -- no wrapper hierarchy needed.
+enum class Closure { Laminar = 0, MixingLength, KEpsilon, KOmegaSST };
+
+const char* closureName(Closure closure) {
+    switch (closure) {
+    case Closure::Laminar:
+        return "laminar";
+    case Closure::MixingLength:
+        return "mixing-length";
+    case Closure::KEpsilon:
+        return "k-epsilon";
+    case Closure::KOmegaSST:
+        return "k-omega SST";
+    }
+    return "?";
+}
+
+struct Simulation {
+    Closure closure = Closure::Laminar;
+    std::size_t n = 40;
+    double viscosity = 0.01;
+    double lidVelocity = 1.0;
+    long long steps = 0;
+
+    std::unique_ptr<aether::solver::LidDrivenCavitySolver2D> laminar;
+    std::unique_ptr<aether::solver::MixingLengthLidDrivenCavitySolver2D> mixingLength;
+    std::unique_ptr<aether::solver::KEpsilonLidDrivenCavitySolver2D> kEpsilon;
+    std::unique_ptr<aether::solver::KOmegaSSTLidDrivenCavitySolver2D> kOmegaSST;
+
+    void rebuild() {
+        laminar.reset();
+        mixingLength.reset();
+        kEpsilon.reset();
+        kOmegaSST.reset();
+        steps = 0;
+        switch (closure) {
+        case Closure::Laminar:
+            laminar = std::make_unique<aether::solver::LidDrivenCavitySolver2D>(n, n, 1.0, 1.0, viscosity,
+                                                                                 lidVelocity);
+            break;
+        case Closure::MixingLength:
+            mixingLength = std::make_unique<aether::solver::MixingLengthLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        case Closure::KEpsilon:
+            kEpsilon = std::make_unique<aether::solver::KEpsilonLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        case Closure::KOmegaSST:
+            kOmegaSST = std::make_unique<aether::solver::KOmegaSSTLidDrivenCavitySolver2D>(
+                n, n, 1.0, 1.0, viscosity, lidVelocity);
+            break;
+        }
+    }
+
+    template <typename Fn> auto visit(Fn&& fn) const -> decltype(fn(*laminar)) {
+        if (laminar) {
+            return fn(*laminar);
+        }
+        if (mixingLength) {
+            return fn(*mixingLength);
+        }
+        if (kEpsilon) {
+            return fn(*kEpsilon);
+        }
+        return fn(*kOmegaSST);
+    }
+
+    void step() {
+        const auto advance = [](auto& solver) { solver.step(0.3 * solver.stableTimeStep()); };
+        if (laminar) {
+            advance(*laminar);
+        } else if (mixingLength) {
+            advance(*mixingLength);
+        } else if (kEpsilon) {
+            advance(*kEpsilon);
+        } else {
+            advance(*kOmegaSST);
+        }
+        ++steps;
+    }
+
+    double speedAt(std::size_t i, std::size_t j) const {
+        return visit([&](const auto& solver) {
+            const double u = solver.u(i, j);
+            const double v = solver.v(i, j);
+            return std::sqrt(u * u + v * v);
+        });
+    }
+    double pressureAt(std::size_t i, std::size_t j) const {
+        return visit([&](const auto& solver) { return solver.pressure(i, j); });
+    }
+    double maxDivergence() const {
+        return visit([](const auto& solver) { return solver.maxDivergence(); });
+    }
+    double time() const {
+        return visit([](const auto& solver) { return solver.time(); });
+    }
+};
+
+int run() {
+    std::printf("Aether Unified Viewer - modo 'sim' (Modulo 9: UI com paineis)\n");
+    std::printf("  painel a esquerda: fechamento, parametros, run/pause/passo/reiniciar\n");
+    std::printf("  o campo e' redesenhado a cada quadro a partir do solver ao vivo\n\n");
+    std::fflush(stdout);
+
+    g_window = gl33::createSimpleWindow(L"AetherSim", L"Aether - Simulacao interativa (Modulo 9)", g_width,
+                                        g_height, WndProc);
+    if (g_window == nullptr) {
+        std::fprintf(stderr, "erro ao criar janela\n");
+        return 1;
+    }
+    HDC hdc = nullptr;
+    HGLRC context = gl33::createGl33Context(g_window, hdc);
+    if (context == nullptr) {
+        return 1;
+    }
+
+    gl33::Ui ui;
+    if (!ui.initialize()) {
+        std::fprintf(stderr, "erro ao inicializar a UI\n");
+        return 1;
+    }
+
+    Simulation sim;
+    sim.rebuild();
+
+    // Starts running: opening this mode to a frozen, uniformly-blue field
+    // reads as broken, and the first thing anyone would do is press RODAR.
+    bool running = true;
+    bool showPressure = false;
+    double resolution = static_cast<double>(sim.n);
+    double viscosity = sim.viscosity;
+    double lidVelocity = sim.lidVelocity;
+    constexpr int kStepsPerFrame = 4;
+
+    ShowWindow(g_window, SW_SHOW);
+    UpdateWindow(g_window);
+
+    MSG message{};
+    bool quit = false;
+    while (!quit) {
+        while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                quit = true;
+            }
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
+        if (quit) {
+            break;
+        }
+
+        g_input.mousePressed = g_pendingPress;
+        g_input.mouseReleased = g_pendingRelease;
+        g_input.textInput = g_pendingText;
+        g_pendingPress = false;
+        g_pendingRelease = false;
+        g_pendingText.clear();
+
+        if (running) {
+            for (int s = 0; s < kStepsPerFrame; ++s) {
+                sim.step();
+            }
+        }
+
+        glClearColor(0.06f, 0.07f, 0.08f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        ui.begin(g_width, g_height, g_input);
+
+        // --- field: per-cell heatmap, emitted into the UI's own batch ---
+        const int panelWidth = 260;
+        const int margin = 24;
+        const int available = std::min(g_width - panelWidth - 3 * margin, g_height - 2 * margin);
+        const int fieldSize = std::max(available, 64);
+        const int fieldX = panelWidth + 2 * margin;
+        const int fieldY = (g_height - fieldSize) / 2;
+
+        double maxValue = 1e-12;
+        double minValue = 0.0;
+        for (std::size_t j = 0; j < sim.n; ++j) {
+            for (std::size_t i = 0; i < sim.n; ++i) {
+                const double value = showPressure ? sim.pressureAt(i, j) : sim.speedAt(i, j);
+                maxValue = std::max(maxValue, value);
+                minValue = std::min(minValue, value);
+            }
+        }
+        const double span = (maxValue - minValue) > 1e-12 ? (maxValue - minValue) : 1.0;
+
+        const int cell = std::max(fieldSize / static_cast<int>(sim.n), 1);
+        for (std::size_t j = 0; j < sim.n; ++j) {
+            for (std::size_t i = 0; i < sim.n; ++i) {
+                const double value = showPressure ? sim.pressureAt(i, j) : sim.speedAt(i, j);
+                float r = 0.0f;
+                float g = 0.0f;
+                float b = 0.0f;
+                colorForValue((value - minValue) / span, r, g, b);
+                // Row j=0 is the cavity floor, so flip j into screen space.
+                const int px = fieldX + static_cast<int>(i) * cell;
+                const int py = fieldY + (static_cast<int>(sim.n) - 1 - static_cast<int>(j)) * cell;
+                ui.drawRect(px, py, cell, cell, gl33::UiColor{r, g, b, 1.0f});
+            }
+        }
+        ui.drawText(fieldX, fieldY - 16,
+                    showPressure ? "pressao (azul=baixa, vermelho=alta)"
+                                 : "velocidade |u| (azul=baixa, vermelho=alta)",
+                    gl33::UiColor{0.60f, 0.63f, 0.67f, 1.0f});
+
+        // --- control panel ---
+        ui.beginPanel(margin, margin, panelWidth, "AETHER - CAVIDADE 2D");
+
+        ui.label("Fechamento de turbulencia");
+        for (int c = 0; c < 4; ++c) {
+            const auto candidate = static_cast<Closure>(c);
+            std::string caption = (sim.closure == candidate) ? "[x] " : "[ ] ";
+            caption += closureName(candidate);
+            if (ui.button(caption) && sim.closure != candidate) {
+                sim.closure = candidate;
+                sim.rebuild();
+                running = false;
+            }
+        }
+
+        ui.separator();
+        ui.label("Parametros");
+        bool needsRebuild = false;
+        // Resolution stays a slider: it must land on an integer and a
+        // coarse drag is the natural way to pick one. Viscosity and lid
+        // velocity get textField() instead -- both often need a precise
+        // value (a specific Reynolds number) that a 260px slider track
+        // cannot address finely, which is the whole reason M9.4 added
+        // keyboard entry on top of the slider widget.
+        needsRebuild |= ui.slider("resolucao", &resolution, 16, 80);
+        needsRebuild |= ui.textField("viscosidade", &viscosity, 0.0005, 0.5);
+        needsRebuild |= ui.textField("veloc. da tampa", &lidVelocity, 0.0, 5.0);
+        if (needsRebuild) {
+            sim.n = static_cast<std::size_t>(resolution);
+            sim.viscosity = viscosity;
+            sim.lidVelocity = lidVelocity;
+            sim.rebuild();
+            running = false;
+        }
+
+        ui.separator();
+        ui.label("Simulacao");
+        if (ui.button(running ? "PAUSAR" : "RODAR")) {
+            running = !running;
+        }
+        if (ui.button("+1 PASSO")) {
+            sim.step();
+        }
+        if (ui.button("REINICIAR")) {
+            sim.rebuild();
+            running = false;
+        }
+        ui.checkbox("mostrar pressao", &showPressure);
+
+        ui.separator();
+        ui.label("Diagnostico");
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "Re = %.0f", sim.lidVelocity / sim.viscosity);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "malha: %zux%zu", sim.n, sim.n);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "passos: %lld", sim.steps);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "t = %.4f s", sim.time());
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "div max = %.2e", sim.maxDivergence());
+        ui.label(buffer);
+
+        ui.endPanel();
+        ui.end();
+
+        SwapBuffers(hdc);
+        Sleep(1);
+    }
+
+    ui.shutdown();
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(context);
+    ReleaseDC(g_window, hdc);
+    return 0;
+}
+
+} // namespace sim_mode
+
+
+// ===========================================================================
+// Mode: sim3d (Module 9.5) -- the sim mode's control panel over the real 3D
+// staggered cavity, across all six closures this project has (laminar,
+// mixing-length, k-epsilon, k-omega SST, Smagorinsky LES, SST-DES).
+//
+// **Why this needs a worker thread and sim_mode's 2D panel did not**: a 3D
+// step costs O(n^3) instead of O(n^2), and the k-omega/DES/k-epsilon
+// constructors each run a 400-step mixing-length primer internally before
+// the panel can show anything -- both cheap enough at 2D resolutions to sit
+// directly in the render loop, neither cheap enough in 3D to keep a 60fps
+// UI responsive. So the solver now lives on its own thread: the worker
+// advances it (or rebuilds it) continuously, guarded by a mutex, and the
+// render thread only ever takes a brief try_lock() once per frame to copy
+// out whatever it needs to draw. If the worker is mid-step or mid-rebuild
+// when a frame wants to render, try_lock() fails, and the frame simply
+// redraws the previous snapshot -- the panel and the orbit camera stay
+// responsive even while a rebuild (which can take a second or two at these
+// resolutions) is in flight on the other thread. This is the first
+// multi-threaded code in the project.
+// ===========================================================================
+namespace sim3d_mode {
+
+using aether::core::Matrix4x4;
+using aether::core::Vector3;
+
+const char* kVertexShaderSource = R"GLSL(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aColor;
+uniform mat4 uMvp;
+out vec3 vColor;
+void main() {
+    vColor = aColor;
+    gl_Position = uMvp * vec4(aPos, 1.0);
+}
+)GLSL";
+
+const char* kFragmentShaderSource = R"GLSL(
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor, 1.0);
+}
+)GLSL";
+
+struct OrbitCamera {
+    Vector3 center;
+    double distance = 3.0;
+    double yaw = 0.7;
+    double pitch = 0.5;
+
+    Vector3 eye() const {
+        const double cp = std::cos(pitch);
+        return center + Vector3(distance * cp * std::cos(yaw), distance * std::sin(pitch),
+                                 distance * cp * std::sin(yaw));
+    }
+};
+
+enum class Closure3D { Laminar = 0, MixingLength, KEpsilon, KOmegaSST, LES, DES };
+
+const char* closureName3D(Closure3D closure) {
+    switch (closure) {
+    case Closure3D::Laminar:
+        return "laminar";
+    case Closure3D::MixingLength:
+        return "mixing-length";
+    case Closure3D::KEpsilon:
+        return "k-epsilon";
+    case Closure3D::KOmegaSST:
+        return "k-omega SST";
+    case Closure3D::LES:
+        return "LES Smagorinsky";
+    case Closure3D::DES:
+        return "SST-DES";
+    }
+    return "?";
+}
+
+// One cell-centered velocity field, copied out under the lock so the render
+// thread never touches the live solver directly.
+struct Snapshot3D {
+    std::size_t n = 0;
+    std::vector<double> u;
+    std::vector<double> v;
+    std::vector<double> w;
+    long long steps = 0;
+    double time = 0.0;
+    double maxDivergence = 0.0;
+};
+
+// Owns exactly one of the six 3D closures at a time (the same "one pointer
+// per variant plus a small visitor" shape sim_mode's 2D Simulation uses),
+// wrapped for cross-thread access. Every method that touches the solver
+// pointers or the field arrays takes mutex_; the only exception is the
+// plain atomics (running_, pending flags), which don't need it.
+//
+// **Threading contract, stated explicitly because it is easy to get subtly
+// wrong**: rebuildIfRequested() and stepOnce() are called ONLY from the
+// worker thread. requestRebuild(), requestStepOnce() and setRunning() are
+// called ONLY from the render/UI thread. trySnapshot() is called ONLY from
+// the render thread and never blocks -- it is the one place a plain
+// lock_guard would be wrong, since a blocking read here would freeze the
+// panel for as long as a rebuild takes.
+class Simulation3D {
+public:
+    void requestRebuild(Closure3D closure, std::size_t n, double viscosity, double lidVelocity) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        closure_ = closure;
+        n_ = n;
+        viscosity_ = viscosity;
+        lidVelocity_ = lidVelocity;
+        rebuildRequested_ = true;
+    }
+    void setRunning(bool running) { running_.store(running, std::memory_order_relaxed); }
+    bool running() const { return running_.load(std::memory_order_relaxed); }
+    void requestStepOnce() { pendingSingleStep_.store(true, std::memory_order_relaxed); }
+
+    // --- worker-thread-only ---
+    void rebuildIfRequested() {
+        if (!rebuildRequested_.exchange(false)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready_ = false;
+        laminar_.reset();
+        mixingLength_.reset();
+        kEpsilon_.reset();
+        kOmegaSST_.reset();
+        les_.reset();
+        des_.reset();
+        constexpr double length = 1.0;
+        switch (closure_) {
+        case Closure3D::Laminar:
+            laminar_ = std::make_unique<aether::solver::StaggeredLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        case Closure3D::MixingLength:
+            mixingLength_ = std::make_unique<aether::solver::MixingLengthLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        case Closure3D::KEpsilon:
+            kEpsilon_ = std::make_unique<aether::solver::KEpsilonLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        case Closure3D::KOmegaSST:
+            kOmegaSST_ = std::make_unique<aether::solver::KOmegaSSTLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        case Closure3D::LES:
+            les_ = std::make_unique<aether::solver::SmagorinskyLesLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        case Closure3D::DES:
+            des_ = std::make_unique<aether::solver::DesSstLidDrivenCavitySolver3D>(
+                n_, n_, n_, length, length, length, viscosity_, lidVelocity_);
+            break;
+        }
+        steps_ = 0;
+        time_ = 0.0;
+        ready_ = true;
+    }
+
+    void stepOnce() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ready_) {
+            return;
+        }
+        visitMutable([](auto& solver) { solver.step(0.3 * solver.stableTimeStep()); });
+        ++steps_;
+    }
+
+    bool consumeSingleStepRequest() { return pendingSingleStep_.exchange(false, std::memory_order_relaxed); }
+
+    // --- render-thread-only ---
+    // Never blocks: returns false (snapshot left untouched) if the worker
+    // currently holds the lock, so a slow rebuild never stalls a frame.
+    bool trySnapshot(Snapshot3D& out) const {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock() || !ready_) {
+            return false;
+        }
+        out.n = n_;
+        const std::size_t total = n_ * n_ * n_;
+        out.u.resize(total);
+        out.v.resize(total);
+        out.w.resize(total);
+        std::size_t idx = 0;
+        visit([&](const auto& solver) {
+            for (std::size_t k = 0; k < n_; ++k) {
+                for (std::size_t j = 0; j < n_; ++j) {
+                    for (std::size_t i = 0; i < n_; ++i, ++idx) {
+                        out.u[idx] = 0.5 * (solver.u(i, j, k) + solver.u(i + 1, j, k));
+                        out.v[idx] = 0.5 * (solver.v(i, j, k) + solver.v(i, j + 1, k));
+                        out.w[idx] = 0.5 * (solver.w(i, j, k) + solver.w(i, j, k + 1));
+                    }
+                }
+            }
+        });
+        out.steps = steps_;
+        out.time = visit([](const auto& solver) { return solver.time(); });
+        out.maxDivergence = visit([](const auto& solver) { return solver.maxDivergence(); });
+        return true;
+    }
+
+private:
+    template <typename Fn>
+    auto visit(Fn&& fn) const
+        -> decltype(fn(std::declval<aether::solver::StaggeredLidDrivenCavitySolver3D&>())) {
+        if (laminar_) return fn(*laminar_);
+        if (mixingLength_) return fn(*mixingLength_);
+        if (kEpsilon_) return fn(*kEpsilon_);
+        if (kOmegaSST_) return fn(*kOmegaSST_);
+        if (les_) return fn(*les_);
+        return fn(*des_);
+    }
+    template <typename Fn> void visitMutable(Fn&& fn) {
+        if (laminar_) { fn(*laminar_); return; }
+        if (mixingLength_) { fn(*mixingLength_); return; }
+        if (kEpsilon_) { fn(*kEpsilon_); return; }
+        if (kOmegaSST_) { fn(*kOmegaSST_); return; }
+        if (les_) { fn(*les_); return; }
+        fn(*des_);
+    }
+
+    mutable std::mutex mutex_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> rebuildRequested_{true}; // builds the default closure on first worker tick
+    std::atomic<bool> pendingSingleStep_{false};
+    bool ready_ = false; // guarded by mutex_; false while (re)building
+
+    Closure3D closure_ = Closure3D::Laminar;
+    std::size_t n_ = 10;
+    double viscosity_ = 0.05;
+    double lidVelocity_ = 1.0;
+    long long steps_ = 0;
+    double time_ = 0.0;
+
+    std::unique_ptr<aether::solver::StaggeredLidDrivenCavitySolver3D> laminar_;
+    std::unique_ptr<aether::solver::MixingLengthLidDrivenCavitySolver3D> mixingLength_;
+    std::unique_ptr<aether::solver::KEpsilonLidDrivenCavitySolver3D> kEpsilon_;
+    std::unique_ptr<aether::solver::KOmegaSSTLidDrivenCavitySolver3D> kOmegaSST_;
+    std::unique_ptr<aether::solver::SmagorinskyLesLidDrivenCavitySolver3D> les_;
+    std::unique_ptr<aether::solver::DesSstLidDrivenCavitySolver3D> des_;
+};
+
+void workerMain(Simulation3D* sim, std::atomic<bool>* quit) {
+    while (!quit->load(std::memory_order_relaxed)) {
+        sim->rebuildIfRequested();
+        if (sim->consumeSingleStepRequest() || sim->running()) {
+            sim->stepOnce();
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+}
+
+gl33::UiInput g_input;
+bool g_pendingPress = false;
+bool g_pendingRelease = false;
+std::string g_pendingText;
+int g_width = 1280;
+int g_height = 800;
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_SIZE:
+        g_width = LOWORD(lParam);
+        g_height = HIWORD(lParam);
+        if (wglGetCurrentContext()) {
+            glViewport(0, 0, g_width, g_height);
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        g_input.mouseX = GET_X_LPARAM(lParam);
+        g_input.mouseY = GET_Y_LPARAM(lParam);
+        return 0;
+    case WM_LBUTTONDOWN:
+        g_input.mouseDown = true;
+        g_pendingPress = true;
+        SetCapture(hwnd);
+        return 0;
+    case WM_LBUTTONUP:
+        g_input.mouseDown = false;
+        g_pendingRelease = true;
+        ReleaseCapture();
+        return 0;
+    case WM_MOUSEWHEEL:
+        // Handled by re-reading GET_WHEEL_DELTA_WPARAM in the render loop
+        // would need a queued delta; simplest to apply it right here since
+        // camera zoom has no UI-focus ambiguity to resolve (the panel has
+        // no scrollable content), unlike clicks and typing.
+        return 0;
+    case WM_CHAR:
+        if (wParam > 0 && wParam < 0x80) {
+            g_pendingText.push_back(static_cast<char>(wParam));
+        }
+        return 0;
+    default:
+        return DefWindowProc(hwnd, message, wParam, lParam);
+    }
+}
+
+int run() {
+    std::printf("Aether Unified Viewer - modo 'sim3d' (Modulo 9.5: painel sobre a cavidade 3D)\n");
+    std::printf("  o solver 3D roda numa thread propria; arraste fora do painel gira a camera\n\n");
+    std::fflush(stdout);
+
+    HWND window = gl33::createSimpleWindow(L"AetherSim3D", L"Aether - Cavidade 3D interativa (Modulo 9.5)",
+                                            g_width, g_height, WndProc);
+    if (window == nullptr) {
+        std::fprintf(stderr, "erro ao criar janela\n");
+        return 1;
+    }
+    HDC hdc = nullptr;
+    HGLRC context = gl33::createGl33Context(window, hdc);
+    if (context == nullptr) {
+        return 1;
+    }
+
+    gl33::Ui ui;
+    if (!ui.initialize()) {
+        std::fprintf(stderr, "erro ao inicializar a UI\n");
+        return 1;
+    }
+
+    const GLuint vertexShader = gl33::compileShader(gl33::kGlVertexShader, kVertexShaderSource);
+    const GLuint fragmentShader = gl33::compileShader(gl33::kGlFragmentShader, kFragmentShaderSource);
+    const GLuint program = gl33::linkProgram(vertexShader, fragmentShader);
+    gl33::glDeleteShader(vertexShader);
+    gl33::glDeleteShader(fragmentShader);
+    const GLint mvpLoc = gl33::glGetUniformLocation(program, "uMvp");
+
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    gl33::glGenVertexArrays(1, &vao);
+    gl33::glBindVertexArray(vao);
+    gl33::glGenBuffers(1, &vbo);
+    gl33::glBindBuffer(gl33::kGlArrayBuffer, vbo);
+    constexpr GLsizei kStride = 6 * sizeof(float);
+    gl33::glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, reinterpret_cast<void*>(0));
+    gl33::glEnableVertexAttribArray(0);
+    gl33::glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kStride, reinterpret_cast<void*>(3 * sizeof(float)));
+    gl33::glEnableVertexAttribArray(1);
+    gl33::glBindVertexArray(0);
+
+    Simulation3D sim;
+    std::atomic<bool> workerQuit{false};
+    std::thread worker(workerMain, &sim, &workerQuit);
+
+    Closure3D closure = Closure3D::Laminar;
+    double resolution = 10.0;
+    double viscosity = 0.05;
+    double lidVelocity = 1.0;
+    bool running = true;
+    sim.setRunning(running);
+    sim.requestRebuild(closure, static_cast<std::size_t>(resolution), viscosity, lidVelocity);
+
+    OrbitCamera camera;
+    camera.center = Vector3(0.5, 0.5, 0.5);
+    camera.distance = 2.6;
+    bool cameraDragging = false;
+    int lastMouseX = 0;
+    int lastMouseY = 0;
+
+    Snapshot3D snapshot;
+
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    glEnable(GL_DEPTH_TEST);
+    glLineWidth(1.5f);
+
+    MSG message{};
+    bool quit = false;
+    while (!quit) {
+        while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                quit = true;
+            }
+            if (message.message == WM_MOUSEWHEEL) {
+                const short delta = GET_WHEEL_DELTA_WPARAM(message.wParam);
+                camera.distance = std::max(1e-3, camera.distance * (delta > 0 ? 0.9 : 1.1));
+            }
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
+        if (quit) {
+            break;
+        }
+
+        g_input.mousePressed = g_pendingPress;
+        g_input.mouseReleased = g_pendingRelease;
+        g_input.textInput = g_pendingText;
+        g_pendingPress = false;
+        g_pendingRelease = false;
+        g_pendingText.clear();
+
+        glClearColor(0.06f, 0.07f, 0.08f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        ui.begin(g_width, g_height, g_input);
+
+        const int panelWidth = 260;
+        const int margin = 24;
+        ui.beginPanel(margin, margin, panelWidth, "AETHER - CAVIDADE 3D");
+
+        ui.label("Fechamento de turbulencia");
+        bool closureChanged = false;
+        for (int c = 0; c <= static_cast<int>(Closure3D::DES); ++c) {
+            const auto candidate = static_cast<Closure3D>(c);
+            std::string caption = (closure == candidate) ? "[x] " : "[ ] ";
+            caption += closureName3D(candidate);
+            if (ui.button(caption) && closure != candidate) {
+                closure = candidate;
+                closureChanged = true;
+            }
+        }
+
+        ui.separator();
+        ui.label("Parametros");
+        bool paramsChanged = false;
+        paramsChanged |= ui.slider("resolucao", &resolution, 6, 16);
+        paramsChanged |= ui.textField("viscosidade", &viscosity, 0.002, 0.5);
+        paramsChanged |= ui.textField("veloc. da tampa", &lidVelocity, 0.0, 5.0);
+        if (closureChanged || paramsChanged) {
+            sim.requestRebuild(closure, static_cast<std::size_t>(resolution), viscosity, lidVelocity);
+            running = false;
+            sim.setRunning(false);
+        }
+
+        ui.separator();
+        ui.label("Simulacao");
+        if (ui.button(running ? "PAUSAR" : "RODAR")) {
+            running = !running;
+            sim.setRunning(running);
+        }
+        if (ui.button("+1 PASSO")) {
+            sim.requestStepOnce();
+        }
+        if (ui.button("REINICIAR")) {
+            sim.requestRebuild(closure, static_cast<std::size_t>(resolution), viscosity, lidVelocity);
+            running = false;
+            sim.setRunning(false);
+        }
+
+        ui.separator();
+        ui.label("Diagnostico");
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "Re = %.0f", lidVelocity / std::max(viscosity, 1e-9));
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "malha: %zux%zux%zu", snapshot.n, snapshot.n, snapshot.n);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "passos: %lld", snapshot.steps);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "t = %.4f s", snapshot.time);
+        ui.label(buffer);
+        std::snprintf(buffer, sizeof(buffer), "div max = %.2e", snapshot.maxDivergence);
+        ui.label(buffer);
+        ui.label(snapshot.n > 0 ? "" : "(construindo...)");
+
+        ui.endPanel();
+
+        // Orbit camera: only drags started outside the panel rotate it, so
+        // adjusting a slider never fights with looking around.
+        if (g_input.mousePressed && !ui.wantsMouse()) {
+            cameraDragging = true;
+            lastMouseX = g_input.mouseX;
+            lastMouseY = g_input.mouseY;
+        }
+        if (g_input.mouseReleased) {
+            cameraDragging = false;
+        }
+        if (cameraDragging && g_input.mouseDown) {
+            camera.yaw += (g_input.mouseX - lastMouseX) * 0.01;
+            camera.pitch = std::clamp(camera.pitch + (g_input.mouseY - lastMouseY) * 0.01, -1.5, 1.5);
+            lastMouseX = g_input.mouseX;
+            lastMouseY = g_input.mouseY;
+        }
+
+        sim.trySnapshot(snapshot); // leaves `snapshot` as-is if the worker is busy
+
+        // --- 3D scene: wireframe box + velocity arrows from the snapshot ---
+        std::vector<float> vertexData;
+        const auto pushVertex3 = [&vertexData](double x, double y, double z, float r, float g, float b) {
+            vertexData.push_back(static_cast<float>(x));
+            vertexData.push_back(static_cast<float>(y));
+            vertexData.push_back(static_cast<float>(z));
+            vertexData.push_back(r);
+            vertexData.push_back(g);
+            vertexData.push_back(b);
+        };
+        {
+            const float c[3] = {0.5f, 0.5f, 0.55f};
+            const double corners[8][3] = {
+                {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1},
+            };
+            const int edges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                       {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+            for (const auto& e : edges) {
+                pushVertex3(corners[e[0]][0], corners[e[0]][1], corners[e[0]][2], c[0], c[1], c[2]);
+                pushVertex3(corners[e[1]][0], corners[e[1]][1], corners[e[1]][2], c[0], c[1], c[2]);
+            }
+        }
+        const auto boxVertexCount = static_cast<GLsizei>(vertexData.size() / 6);
+
+        if (snapshot.n > 0) {
+            const std::size_t n = snapshot.n;
+            const double cellSize = 1.0 / static_cast<double>(n);
+            double maxSpeed = 1e-9;
+            for (std::size_t idx = 0; idx < n * n * n; ++idx) {
+                const double speed = std::sqrt(snapshot.u[idx] * snapshot.u[idx] +
+                                                snapshot.v[idx] * snapshot.v[idx] +
+                                                snapshot.w[idx] * snapshot.w[idx]);
+                maxSpeed = std::max(maxSpeed, speed);
+            }
+            const double arrowScale = cellSize * 0.9 / maxSpeed;
+            std::size_t idx = 0;
+            for (std::size_t k = 0; k < n; ++k) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    for (std::size_t i = 0; i < n; ++i, ++idx) {
+                        const double cx = (static_cast<double>(i) + 0.5) * cellSize;
+                        const double cy = (static_cast<double>(j) + 0.5) * cellSize;
+                        const double cz = (static_cast<double>(k) + 0.5) * cellSize;
+                        const double uc = snapshot.u[idx];
+                        const double vc = snapshot.v[idx];
+                        const double wc = snapshot.w[idx];
+                        const double speed = std::sqrt(uc * uc + vc * vc + wc * wc);
+                        float r = 0.0f;
+                        float g = 0.0f;
+                        float b = 0.0f;
+                        colorForValue(speed / maxSpeed, r, g, b);
+                        pushVertex3(cx, cy, cz, r, g, b);
+                        pushVertex3(cx + uc * arrowScale, cy + vc * arrowScale, cz + wc * arrowScale, r, g, b);
+                    }
+                }
+            }
+        }
+        const auto arrowVertexCount = static_cast<GLsizei>(vertexData.size() / 6 - boxVertexCount);
+
+        gl33::glBindBuffer(gl33::kGlArrayBuffer, vbo);
+        gl33::glBufferData(gl33::kGlArrayBuffer, static_cast<gl33::GLsizeiptr>(vertexData.size() * sizeof(float)),
+                            vertexData.data(), gl33::kGlStaticDraw);
+
+        const double aspect = g_height > 0 ? static_cast<double>(g_width) / g_height : 1.0;
+        const double nearPlane = std::max(0.01 * camera.distance, 1e-3);
+        const double farPlane = camera.distance * 100.0 + 10.0;
+        const Matrix4x4 projection =
+            Matrix4x4::perspective(45.0 * 3.14159265358979323846 / 180.0, aspect, nearPlane, farPlane);
+        const Matrix4x4 view = Matrix4x4::lookAt(camera.eye(), camera.center, Vector3(0.0, 1.0, 0.0));
+        const Matrix4x4 mvp = projection * view;
+
+        gl33::glUseProgram(program);
+        gl33::glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.data());
+        gl33::glBindVertexArray(vao);
+        glDrawArrays(GL_LINES, 0, boxVertexCount);
+        glDrawArrays(GL_LINES, boxVertexCount, arrowVertexCount);
+        gl33::glBindVertexArray(0);
+
+        ui.end(); // panel overlay, drawn last so it sits on top of the scene
+
+        SwapBuffers(hdc);
+        Sleep(1);
+    }
+
+    workerQuit.store(true, std::memory_order_relaxed);
+    worker.join();
+
+    ui.shutdown();
+    gl33::glDeleteBuffers(1, &vbo);
+    gl33::glDeleteVertexArrays(1, &vao);
+    gl33::glDeleteProgram(program);
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(context);
+    ReleaseDC(window, hdc);
+    return 0;
+}
+
+} // namespace sim3d_mode
+
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "uso: aether_unified_viewer <modo> [args]\n");
@@ -1687,6 +2651,12 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(mode, "turbulence") == 0) {
         return turbulence_mode::run();
+    }
+    if (std::strcmp(mode, "sim") == 0) {
+        return sim_mode::run();
+    }
+    if (std::strcmp(mode, "sim3d") == 0) {
+        return sim3d_mode::run();
     }
 
     std::fprintf(stderr, "modo desconhecido: %s\n", mode);

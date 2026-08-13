@@ -1,6 +1,7 @@
 if(WIN32)
     add_library(aether_app_common STATIC
         src/Gl33.cpp
+        src/Ui.cpp
     )
 
     target_include_directories(aether_app_common PUBLIC
