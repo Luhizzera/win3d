@@ -1590,11 +1590,41 @@ Nenhum bug de lógica; o único problema encontrado foi a contração de FMA
 acima, corrigido e documentado. Build limpo, 6 suites C++ passando
 (`aether_gpu_tests` nova).
 
+### Bindings Python para o módulo GPU
+
+Fechado o item que mais destoava do resto do projeto: `PoissonOperatorCuda`
+existia, validada bit-exata, mas inacessível pela camada de orquestração
+Python - toda outra camada do engine (core, geometria, malha, solver,
+pós-processamento) já tinha bindings; GPU não. Isso quebrava o padrão
+arquitetural "hybrid C++/Python" que o projeto segue desde o início.
+
+`bindings/python/aether_gpu_bindings.cpp` segue o padrão de todo binding
+aqui - mas o **CMake é condicional**: `aether_gpu_py` só é adicionado se o
+target `aether_gpu` existir (ou seja, só se CUDA foi detectado), mesmo
+espírito de `if(pybind11_FOUND)` no CMake raiz.
+
+**O `python/aether/__init__.py` precisou de um segundo bloco de import,
+deliberadamente separado do primeiro**: as camadas core/geometria/malha/
+solver/pós-processamento continuam num único `try/except` que **propaga o
+erro** se qualquer uma faltar (são obrigatórias - o pacote não faz sentido
+sem elas). GPU entra num `try/except` próprio que **não propaga** - faltar
+o CUDA Toolkit é resultado normal, não build quebrado. Um sinalizador
+`aether.GPU_AVAILABLE` deixa o chamador checar sem precisar capturar
+`ImportError` ele mesmo, no mesmo espírito do `PoissonOperatorCuda::available()`
+já exposto no C++.
+
+**Validado end-to-end**: `GPU_AVAILABLE=True`, `apply()` num campo
+constante devolve exatamente zero em toda célula interior (Laplaciano de
+campo constante é zero) e `1.0` na célula fixada (identidade) - uma
+segunda confirmação de correção, independente do teste bit-exato do C++,
+por uma propriedade completamente diferente.
+
+Nenhum bug; os 6 suites C++ continuam passando, build limpo.
+
 **Ainda em aberto no Módulo 10**: solve de CG inteiramente residente na
 GPU; portar o preditor de momento de `StaggeredCavityBase3D` (o outro laço
 quente, agora compartilhado pelas seis cavidades 3D desde a faxina antes
-dos módulos 9-14 - portar uma vez beneficia as seis); bindings Python pro
-módulo GPU.
+dos módulos 9-14 - portar uma vez beneficia as seis).
 
 ## Marching cubes 3D: fecha o pré-requisito do renderizador de iso-superfícies
 

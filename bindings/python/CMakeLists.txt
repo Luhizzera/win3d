@@ -12,3 +12,12 @@ target_link_libraries(aether_solver_py PRIVATE aether_solver)
 
 pybind11_add_module(aether_postprocessing_py aether_postprocessing_bindings.cpp)
 target_link_libraries(aether_postprocessing_py PRIVATE aether_postprocessing)
+
+# aether_gpu only exists as a target when CMake found a CUDA compiler (see
+# the root CMakeLists.txt's own check_language(CUDA) guard) -- so this
+# binding is conditional the same way, rather than making the CUDA Toolkit
+# a hard requirement for the rest of the Python package.
+if(TARGET aether_gpu)
+    pybind11_add_module(aether_gpu_py aether_gpu_bindings.cpp)
+    target_link_libraries(aether_gpu_py PRIVATE aether_gpu)
+endif()

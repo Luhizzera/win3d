@@ -8,6 +8,12 @@ Import order matters: aether_core_py must load first because it registers
 aether::core::Vector3 with pybind11, and the geometry/mesh/solver bindings
 return or accept that type (and StructuredGrid3D, for the solver) without
 re-registering it themselves.
+
+engine/gpu (Module 10, CUDA) is the one layer imported *optionally*: the
+aether_gpu_py extension only exists at all on a machine where CMake found
+the CUDA Toolkit (see bindings/python/CMakeLists.txt's own TARGET guard),
+so a missing extension here is expected, not an error -- check the
+GPU_AVAILABLE flag below rather than assuming PoissonOperatorCuda works.
 """
 
 try:
@@ -58,6 +64,19 @@ except ImportError as exc:  # pragma: no cover
         "then make sure the build output directory is on PYTHONPATH."
     ) from exc
 
+# Separate, non-fatal try/except: unlike every extension above, not
+# building this one is a normal outcome (no CUDA Toolkit on this machine),
+# not a broken build -- so its absence must not take down the rest of the
+# package the way a missing core/geometry/mesh/solver/postprocessing
+# extension does above.
+try:
+    from aether_gpu_py import PoissonOperatorCuda
+
+    GPU_AVAILABLE = True
+except ImportError:
+    PoissonOperatorCuda = None
+    GPU_AVAILABLE = False
+
 __all__ = [
     "Vector3",
     "Tensor3x3",
@@ -100,4 +119,6 @@ __all__ = [
     "marching_squares_2d",
     "Triangle3D",
     "marching_cubes_3d",
+    "PoissonOperatorCuda",
+    "GPU_AVAILABLE",
 ]
