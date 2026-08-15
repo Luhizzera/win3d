@@ -38,20 +38,33 @@ utilizável, e por isso é o eixo das Fases 2-3 abaixo.
 
 ---
 
-## Fase 0 — Rede de proteção (barato, antes de mexer em muita coisa)
+## Fase 0 — Rede de proteção — PARCIAL, remoto suspenso (2026-08-14)
 
-**Objetivo**: CI que roda as 11 suítes a cada push.
+**Objetivo original**: CI que roda as 11 suítes a cada push.
 
-**Por que aqui**: as fases seguintes mexem em código numérico já validado.
-A suíte roda em 7 segundos; sem automação, uma regressão só aparece quando
-alguém lembra de rodar. O build já degrada corretamente sem CUDA (o
-`check_language(CUDA)` pula `engine/gpu`), então um runner comum serve —
-com a ressalva honesta de que `aether_gpu_tests` não será exercitado no CI
-e continua dependendo de execução local.
+**O que foi feito**: `.github/workflows/ci.yml` existe e está verificado até
+onde dá sem GitHub. O build limpo com `-DAETHER_ENABLE_CUDA=OFF` (o ambiente
+que um runner teria, e um caminho que nunca havia sido exercitado desde o
+Módulo 10) roda com 0 erros, 10 suítes registradas — `aether_gpu_tests`
+corretamente ausente — e 10 módulos de binding compilados.
 
-**Portão de conclusão**: um push com regressão deliberada é reprovado pelo
-CI; um push limpo passa. Não basta o workflow existir — tem que ser visto
-reprovando de verdade.
+**Metade do portão cumprida**: uma regressão numérica deliberada
+(normalização do `checkerboardIndex` de `2.0*fieldRms` para `1.0*fieldRms`)
+fez `aether_analysis_tests` falhar e o `ctest` sair com código 8 — ou seja,
+o push *seria* reprovado. Revertida, volta a 100% e código 0. Isso prova que
+a suíte detecta regressão sutil; é a parte que de fato importa.
+
+**Metade suspensa, por decisão explícita**: o projeto não usa GitHub por ora
+(13 commits nunca enviados; o repositório remoto responde 404). Sem push, o
+CI não roda, então o portão "ser visto reprovando no CI" fica **em aberto,
+não cumprido** — registrado assim de propósito, em vez de marcado como
+concluído.
+
+**Como retomar**: basta um `git push`; o workflow já está no repositório e
+dispara sozinho. Enquanto isso, a proteção equivalente é local e manual —
+rodar `ctest --test-dir build -C Release --no-tests=error` antes de commitar.
+Um hook de pre-commit automatizaria isso sem GitHub nenhum, se a fricção de
+lembrar virar problema.
 
 ---
 
