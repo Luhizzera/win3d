@@ -66,6 +66,12 @@ public:
 
     double maxDivergence() const;
 
+    // Divergence measured the way the projection actually conserves it: from
+    // Rhie-Chow face fluxes rather than from wide central differences of
+    // cell-centered velocities. See rhieChowFaceU() for why the two differ
+    // and which one is the honest number.
+    double maxFaceDivergence() const;
+
 private:
     std::size_t index(std::size_t i, std::size_t j) const { return i + j * nx_; }
 
@@ -83,6 +89,47 @@ private:
     // boundary cell itself, i.e. zero gradient) across any wall crossed.
     double neumannAt(const std::vector<double>& field, std::size_t i, std::size_t j, int di, int dj) const;
 
+    // **Rhie-Chow interpolation.** The mass flux through the face between
+    // cell (i,j) and (i+1,j), which is *not* the plain average of the two
+    // cell velocities.
+    //
+    // Why it is needed, stated precisely for this scheme: the pressure
+    // Poisson equation here is solved with the **compact** 5-point
+    // Laplacian, (p_E - 2p_P + p_W)/dx^2, but both the divergence that
+    // forms its right-hand side and the gradient that corrects the velocity
+    // use the **wide** central difference, (p_E - p_W)/(2dx). Composing two
+    // wide operators does not reproduce the compact one -- it produces
+    // (p_{i+2} - 2p_i + p_{i-2})/(4dx^2), which sees the even and odd
+    // sublattices as independent. That mismatch is exactly the classic
+    // collocated-grid checkerboard, documented in this class since it was
+    // written and finally *measured* by Module 12.2's checkerboardIndex.
+    //
+    // The Rhie-Chow flux replaces the interpolated pressure-gradient part
+    // with the compact face gradient:
+    //
+    //   u_e = (u_P + u_E)/2 + dt * [ (g_P + g_E)/2 - (p_E - p_P)/dx ]
+    //
+    // where g is the wide cell-centred gradient the correction step used.
+    // Working the divergence of those fluxes through algebraically gives
+    // exactly wide_div(u*) - dt * compact_lap(p) -- which is precisely the
+    // quantity the Poisson solve drives to zero. So the face divergence of
+    // the corrected field is zero to solver tolerance, while the wide
+    // cell-centred divergence is not, and never was: it measures a
+    // different operator than the one being solved.
+    //
+    // `dt` is the step size the correction used, kept in lastDt_ because
+    // the diagnostic needs it and callers do not pass one. Before the first
+    // step it is 0, which makes the correction term vanish and the flux
+    // fall back to plain interpolation -- correct, since an unstepped field
+    // has no pressure correction to be consistent with.
+    double rhieChowFaceU(const std::vector<double>& u, std::size_t i, std::size_t j, double dt) const;
+    double rhieChowFaceV(const std::vector<double>& v, std::size_t i, std::size_t j, double dt) const;
+
+    // Divergence of cell (i,j) from its four Rhie-Chow face fluxes, with the
+    // solid walls contributing exactly zero normal velocity.
+    double faceDivergenceAt(const std::vector<double>& u, const std::vector<double>& v, std::size_t i,
+                             std::size_t j, double dt) const;
+
     std::vector<double> applyLaplacian(const std::vector<double>& x) const;
     static double dot(const std::vector<double>& a, const std::vector<double>& b);
     void projectToDivergenceFree(std::vector<double>& uStar, std::vector<double>& vStar, double dt);
@@ -97,6 +144,7 @@ private:
     std::vector<double> v_;
     std::vector<double> p_;
     double time_ = 0.0;
+    double lastDt_ = 0.0; // step size of the most recent correction; see rhieChowFaceU()
 };
 
 } // namespace aether::solver

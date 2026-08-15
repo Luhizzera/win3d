@@ -1765,6 +1765,43 @@ void testLidDrivenCavityMassConservation() {
     }
 }
 
+// The same solver, measured with the operator the projection actually
+// conserves. maxDivergence() above uses wide central differences of the
+// cell velocities; the pressure Poisson equation is solved with the
+// *compact* Laplacian, and composing two wide operators does not reproduce
+// a compact one -- so that number was never measuring the quantity being
+// driven to zero. maxFaceDivergence() measures it from Rhie-Chow face
+// fluxes instead, and the algebra (worked through in the
+// LidDrivenCavitySolver2D header) says it must come out at solver
+// tolerance, not at 0.2.
+//
+// Measured before the bound below was chosen, across four cases: face
+// divergence lands at 2e-13..1e-12 while wide divergence sits at 0.18..0.28
+// on the identical fields -- eleven orders of magnitude apart. So the
+// solver was always conserving mass essentially exactly, and the "~0.2
+// divergence" this class has documented since it was written was a
+// property of the diagnostic, not of the flow.
+//
+// The bound is deliberately far above the measured value (the CG stopping
+// tolerance is 1e-10, so the achievable floor is set by the solve, not by
+// this class) and far below the wide-stencil number, so it would catch a
+// real regression while not being brittle about the last digits.
+void testLidDrivenCavityFaceDivergenceIsAtSolverTolerance() {
+    LidDrivenCavitySolver2D solver(32, 32, 1.0, 1.0, 0.1, 1.0);
+    const double dt = 0.3 * solver.stableTimeStep();
+    for (int s = 0; s < 200; ++s) {
+        solver.step(dt);
+    }
+    const double faceDiv = solver.maxFaceDivergence();
+    const double wideDiv = solver.maxDivergence();
+    std::printf("  [solver_tests] cavidade 2D: div por faces=%.3e, div stencil largo=%.3e\n", faceDiv,
+                wideDiv);
+    AETHER_CHECK(faceDiv < 1e-8);
+    // Guards against the two ever being silently made the same function:
+    // they measure different operators and must keep disagreeing.
+    AETHER_CHECK(wideDiv > 1e3 * faceDiv);
+}
+
 // At low Reynolds number (Re=10 here) a lid-driven cavity settles into a
 // single primary recirculating vortex: fluid dragged in the lid's
 // direction along the top, forced down the far wall, back in the opposite
@@ -2239,6 +2276,7 @@ int main() {
     testImplicitConvectionDiffusion1DJacobiHelpsOnlyWhenDiagonalVaries();
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testLidDrivenCavityMassConservation();
+    testLidDrivenCavityFaceDivergenceIsAtSolverTolerance();
     testLidDrivenCavityPrimaryVortexTopology();
     testMixingLengthChannelFlowMatchesLogLawSlope();
     testKEpsilonChannelFlowMatchesLogLawSlopeAndIsSymmetric();

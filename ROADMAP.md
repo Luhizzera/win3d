@@ -68,25 +68,78 @@ lembrar virar problema.
 
 ---
 
-## Fase 1 — Rhie-Chow nos solvers colocados 2D
+## Fase 1 — PREMISSA REFUTADA (2026-08-14). Rhie-Chow não é necessário aqui
 
-**Objetivo**: interpolação de Rhie-Chow em `TaylorGreenVortexSolver2D`,
-`LidDrivenCavitySolver2D` e nas três variantes 2D de turbulência.
+**O que a fase supunha**: que o `checkerboardIndex` de 0,020357 na cavidade
+2D media o desacoplo par-ímpar de grade colocada, e que Rhie-Chow o
+eliminaria. **Essa premissa estava errada, e foi escrita aqui sem ter sido
+verificada.**
 
-**Por que aqui**: é a lacuna numérica documentada há mais tempo no projeto
-(desde o primeiro solver de Navier-Stokes) e a única que **já tem métrica
-pronta** — o `checkerboardIndex` do Módulo 12.2 mede exatamente o desacoplo
-par-ímpar que Rhie-Chow existe para eliminar. Hoje o campo de pressão da
-cavidade 2D mede **0,020357**. É um alvo pequeno, bem definido e com
-resultado verificável antes/depois. Os solvers 3D staggered não precisam
-disso (a grade deslocada evita o problema estruturalmente).
+**Como foi refutada — estudo de refinamento de malha** (Re=100, tempo
+simulado fixo em 12,0 para comparar o mesmo estado físico):
 
-**Portão de conclusão**:
-1. `checkerboardIndex` do campo de pressão cai mensuravelmente frente ao
-   0,020357 de referência, medido no mesmo caso (20×20, Re=100, 300 passos).
-2. Taylor-Green continua batendo com o decaimento exato dentro da tolerância
-   atual — a correção não pode custar acurácia na solução analítica.
-3. As 11 suítes continuam passando.
+| n | h | residualRms | índice | ordem p |
+|---|---|---|---|---|
+| 16 | 0,0625 | 1,713e-03 | 0,028979 | — |
+| 24 | 0,0417 | 8,930e-04 | 0,014144 | 1,61 |
+| 32 | 0,0313 | 5,427e-04 | 0,008393 | 1,73 |
+| 48 | 0,0208 | 2,571e-04 | 0,003914 | 1,84 |
+| 64 | 0,0156 | 1,490e-04 | 0,002257 | 1,90 |
+
+**Um checkerboard genuíno é um artefato de amplitude fixa na escala da
+grade: não converge.** O que se mede aqui converge em O(h²) — ordem 1,90 e
+subindo em direção a 2. Logo é *estrutura física resolvida* perto dos cantos
+da tampa, ou seja, erro de discretização se comportando exatamente como
+deveria. Não há patologia a curar.
+
+**O que foi tentado e rejeitado**: uma projeção incremental com o termo
+Rhie-Chow no lado direito do Poisson. Ela *parecia* funcionar — o índice caía
+61%, de 0,020357 para 0,007961. Olhando numerador e denominador separados,
+porém:
+
+| | residualRms | fieldRms | índice | max\|p\| |
+|---|---|---|---|---|
+| original | 1,40e-03 | 3,45e-02 | 0,020357 | 0,148 |
+| "melhorada" | 1,22e-01 | 7,68e+00 | 0,007961 | 28,6 |
+
+O conteúdo absoluto de checkerboard ficou **87× pior**; o denominador cresceu
+223×, e só por isso a razão caiu. A análise de amplificação explica: com o
+preditor sem termo de pressão, o modo de pressão suave amplifica por
+1/sin²(k·h/2) a cada passo — a pressão inflou de 0,15 para 28,6 e o caso
+Re=400 divergiu para NaN em ~500 passos, tendo sido estável antes. Revertido.
+
+**Duas lições que valem mais que a fase**:
+1. **`checkerboardIndex` sozinho não serve como portão**: por ser normalizado,
+   baixa quando a pressão infla. Um portão que o use precisa fixar também o
+   numerador absoluto, ou a métrica é gameável — inclusive de boa-fé.
+2. **Convergência de malha é o que distingue artefato de erro físico.** Foi o
+   único teste que respondeu a pergunta, e devia ter vindo antes da
+   implementação, não depois.
+
+**O que ficou de real, e é valioso**: `maxFaceDivergence()`. A equação de
+Poisson usa o Laplaciano **compacto**, mas a divergência e o gradiente usavam
+o stencil **largo** — compor dois largos não reproduz o compacto. Medindo a
+divergência pelos fluxos de face Rhie-Chow (a álgebra dá exatamente
+`wide_div(u*) − dt·compact_lap(p)`, que é o que o Poisson zera):
+
+| caso | div stencil largo | div por faces |
+|---|---|---|
+| 20×16 Re=100 | 2,652e-01 | 1,012e-12 |
+| 20×20 Re=100 | 2,659e-01 | 1,156e-12 |
+| 32×32 Re=100 | 1,806e-01 | 1,994e-13 |
+| 24×24 Re=400 | 2,827e-01 | 7,253e-13 |
+
+**O solver sempre conservou massa quase exatamente.** A "divergência ~0,2"
+documentada nesta classe desde que foi escrita era propriedade do
+diagnóstico, não do escoamento. Coberto por
+`testLidDrivenCavityFaceDivergenceIsAtSolverTolerance`.
+
+**Fragilidade pré-existente registrada de passagem**: a cavidade a Re=400 roda
+com CFL = 1,0000 exato (sem margem) e Re de célula = 16,7 — muito acima do
+limite 2 da diferença central para convecção. Não foi introduzido por esta
+fase, mas é por isso que ela tolerou tão mal uma perturbação. Vale um fator
+de segurança em `stableTimeStep()` ou upwind na convecção, se casos de Re mais
+alto passarem a importar.
 
 ---
 

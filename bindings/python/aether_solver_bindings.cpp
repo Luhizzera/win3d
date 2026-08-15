@@ -85,6 +85,7 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("pressure", &LidDrivenCavitySolver2D::pressure)
         .def("time", &LidDrivenCavitySolver2D::time)
         .def("max_divergence", &LidDrivenCavitySolver2D::maxDivergence)
+        .def("max_face_divergence", &LidDrivenCavitySolver2D::maxFaceDivergence)
         .def("load_state", &LidDrivenCavitySolver2D::loadState, py::arg("u"), py::arg("v"), py::arg("p"),
              py::arg("time"));
 

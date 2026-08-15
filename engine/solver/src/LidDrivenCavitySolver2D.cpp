@@ -96,6 +96,56 @@ double LidDrivenCavitySolver2D::maxDivergence() const {
     return maxDiv;
 }
 
+double LidDrivenCavitySolver2D::rhieChowFaceU(const std::vector<double>& u, std::size_t i, std::size_t j,
+                                                double dt) const {
+    // Face between (i,j) and (i+1,j). Callers only ask for interior faces;
+    // the solid walls carry zero normal velocity and are handled by the
+    // divergence routines directly.
+    const std::size_t idxP = index(i, j);
+    const std::size_t idxE = index(i + 1, j);
+
+    const double gP = (neumannAt(p_, i, j, 1, 0) - neumannAt(p_, i, j, -1, 0)) / (2.0 * dx_);
+    const double gE = (neumannAt(p_, i + 1, j, 1, 0) - neumannAt(p_, i + 1, j, -1, 0)) / (2.0 * dx_);
+    const double compactFaceGradient = (p_[idxE] - p_[idxP]) / dx_;
+
+    return 0.5 * (u[idxP] + u[idxE]) + dt * (0.5 * (gP + gE) - compactFaceGradient);
+}
+
+double LidDrivenCavitySolver2D::rhieChowFaceV(const std::vector<double>& v, std::size_t i, std::size_t j,
+                                                double dt) const {
+    // Face between (i,j) and (i,j+1).
+    const std::size_t idxP = index(i, j);
+    const std::size_t idxN = index(i, j + 1);
+
+    const double gP = (neumannAt(p_, i, j, 0, 1) - neumannAt(p_, i, j, 0, -1)) / (2.0 * dy_);
+    const double gN = (neumannAt(p_, i, j + 1, 0, 1) - neumannAt(p_, i, j + 1, 0, -1)) / (2.0 * dy_);
+    const double compactFaceGradient = (p_[idxN] - p_[idxP]) / dy_;
+
+    return 0.5 * (v[idxP] + v[idxN]) + dt * (0.5 * (gP + gN) - compactFaceGradient);
+}
+
+double LidDrivenCavitySolver2D::faceDivergenceAt(const std::vector<double>& u, const std::vector<double>& v,
+                                                   std::size_t i, std::size_t j, double dt) const {
+    // Solid walls on all four sides: no flow penetrates any of them, so a
+    // boundary face's normal velocity is exactly 0 (the lid moves
+    // tangentially, which is a u-face quantity at the top, not a v-face one).
+    const double uE = (i + 1 < nx_) ? rhieChowFaceU(u, i, j, dt) : 0.0;
+    const double uW = (i > 0) ? rhieChowFaceU(u, i - 1, j, dt) : 0.0;
+    const double vN = (j + 1 < ny_) ? rhieChowFaceV(v, i, j, dt) : 0.0;
+    const double vS = (j > 0) ? rhieChowFaceV(v, i, j - 1, dt) : 0.0;
+    return (uE - uW) / dx_ + (vN - vS) / dy_;
+}
+
+double LidDrivenCavitySolver2D::maxFaceDivergence() const {
+    double maxDiv = 0.0;
+    for (std::size_t j = 0; j < ny_; ++j) {
+        for (std::size_t i = 0; i < nx_; ++i) {
+            maxDiv = std::max(maxDiv, std::fabs(faceDivergenceAt(u_, v_, i, j, lastDt_)));
+        }
+    }
+    return maxDiv;
+}
+
 std::vector<double> LidDrivenCavitySolver2D::applyLaplacian(const std::vector<double>& x) const {
     const double ax = 1.0 / (dx_ * dx_);
     const double ay = 1.0 / (dy_ * dy_);
@@ -132,6 +182,14 @@ void LidDrivenCavitySolver2D::projectToDivergenceFree(std::vector<double>& uStar
                                                         std::vector<double>& vStar, double dt) {
     const std::size_t n = uStar.size();
 
+    // The right-hand side uses the plain interpolated face divergence of
+    // uStar, which for this uniform grid is identical to the wide central
+    // difference of the cell values -- passing dt = 0 switches off the
+    // Rhie-Chow pressure term, which belongs to the *corrected* field, not
+    // to the predictor. (An incremental variant that put the Rhie-Chow term
+    // here as well was tried and rejected; see the note in this project's
+    // ROADMAP for why it amplified smooth pressure modes instead of only
+    // damping the checkerboard.)
     std::vector<double> rhs(n);
     for (std::size_t j = 0; j < ny_; ++j) {
         for (std::size_t i = 0; i < nx_; ++i) {
@@ -140,11 +198,7 @@ void LidDrivenCavitySolver2D::projectToDivergenceFree(std::vector<double>& uStar
                 rhs[idx] = 0.0;
                 continue;
             }
-            const double uE = dirichletAt(uStar, i, j, 1, 0, lidVelocityAt(i));
-            const double uW = dirichletAt(uStar, i, j, -1, 0, lidVelocityAt(i));
-            const double vN = dirichletAt(vStar, i, j, 0, 1, 0.0);
-            const double vS = dirichletAt(vStar, i, j, 0, -1, 0.0);
-            const double divergence = (uE - uW) / (2.0 * dx_) + (vN - vS) / (2.0 * dy_);
+            const double divergence = faceDivergenceAt(uStar, vStar, i, j, 0.0);
             // applyLaplacian() computes -nabla^2(p), so the right-hand side
             // of nabla^2(p) = div(uStar)/dt must be negated here (see the
             // sign bug this exact mistake caused in TaylorGreenVortexSolver2D).
@@ -242,6 +296,7 @@ void LidDrivenCavitySolver2D::step(double dt) {
     }
 
     projectToDivergenceFree(uStar, vStar, dt);
+    lastDt_ = dt; // the Rhie-Chow flux needs the dt the correction just used
     time_ += dt;
 }
 
