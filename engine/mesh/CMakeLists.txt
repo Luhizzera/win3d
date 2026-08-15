@@ -4,6 +4,7 @@ add_library(aether_mesh STATIC
     src/PolygonTriangulation2D.cpp
     src/DelaunayTetrahedralization3D.cpp
     src/RobustPredicates.cpp
+    src/TetrahedralMesh.cpp
 )
 
 target_include_directories(aether_mesh PUBLIC

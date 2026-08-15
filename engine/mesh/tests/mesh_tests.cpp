@@ -2,6 +2,7 @@
 #include "aether/mesh/DelaunayTriangulation2D.hpp"
 #include "aether/mesh/PolygonTriangulation2D.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
+#include "aether/mesh/TetrahedralMesh.hpp"
 #include "aether/testing/Check.hpp"
 
 #include <cmath>
@@ -542,9 +543,179 @@ void testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets() {
     AETHER_CHECK(result.unrecovered.size() == 6);      // measured: the heuristic never recovers these
 }
 
+// ---------------------------------------------------------------------------
+// TetrahedralMesh (Fase 2.1 do ROADMAP): face connectivity, the prerequisite
+// for any unstructured finite-volume solver.
+//
+// Every check below is an *identity*, not a tolerance on physics: these hold
+// for any valid tetrahedral mesh regardless of what is later solved on it,
+// which is what makes them able to catch the two bugs this code could
+// plausibly have (a misoriented face normal, or a face registered to only one
+// of the two cells that share it).
+// ---------------------------------------------------------------------------
+
+// A deterministic, genuinely 3D point cloud: a unit cube's 8 corners plus
+// interior points on a jittered lattice. Jittered rather than regular
+// because a perfect lattice is massively co-spherical, which is Delaunay's
+// degenerate tie case -- a worse test than a validation, exactly as
+// testDelaunayTriangulation2D already notes for the 2D case.
+DelaunayTetrahedralization3D buildJitteredCubeTetrahedralization(std::size_t interiorPerAxis) {
+    DelaunayTetrahedralization3D tets;
+    for (int corner = 0; corner < 8; ++corner) {
+        tets.addPoint((corner & 1) ? 1.0 : 0.0, (corner & 2) ? 1.0 : 0.0, (corner & 4) ? 1.0 : 0.0);
+    }
+    for (std::size_t i = 1; i <= interiorPerAxis; ++i) {
+        for (std::size_t j = 1; j <= interiorPerAxis; ++j) {
+            for (std::size_t k = 1; k <= interiorPerAxis; ++k) {
+                const double step = 1.0 / static_cast<double>(interiorPerAxis + 1);
+                const double x = static_cast<double>(i) * step;
+                const double y = static_cast<double>(j) * step;
+                const double z = static_cast<double>(k) * step;
+                const double jitter = 0.13 * step;
+                tets.addPoint(x + jitter * std::sin(7.0 * x + 3.0 * y),
+                              y + jitter * std::sin(5.0 * y + 2.0 * z),
+                              z + jitter * std::sin(3.0 * z + 4.0 * x));
+            }
+        }
+    }
+    tets.tetrahedralize();
+    return tets;
+}
+
+// **The discrete divergence theorem.** For any closed polyhedron the sum of
+// its outward face area vectors is identically zero. This is the single
+// strongest check available on face connectivity: it fails immediately if
+// any face normal points the wrong way, if a face is missing from a cell's
+// list, or if the owner/neighbour orientation convention is inconsistent --
+// and it holds independently of mesh quality, so it needs no tolerance
+// beyond roundoff.
+void testTetrahedralMeshClosesEveryCell() {
+    const DelaunayTetrahedralization3D tets = buildJitteredCubeTetrahedralization(3);
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    AETHER_CHECK(mesh.cellCount() > 0);
+
+    double worst = 0.0;
+    double smallestCellScale = 1e300;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        AETHER_CHECK(mesh.cellFaces(cell).size() == 4); // a tetrahedron has exactly four faces
+        worst = std::max(worst, mesh.cellAreaVectorSum(cell).norm());
+        // Normalizing by a cell's own area scale is what makes "zero"
+        // meaningful: an absolute bound would be trivially passed by a tiny
+        // sliver and unfairly strict on a large cell.
+        double areaScale = 0.0;
+        for (std::size_t faceIndex : mesh.cellFaces(cell)) {
+            areaScale += mesh.outwardAreaVector(cell, faceIndex).norm();
+        }
+        smallestCellScale = std::min(smallestCellScale, areaScale);
+    }
+    std::printf("  [mesh_tests] TetrahedralMesh: %zu celulas, pior |soma dos vetores de area| = %.3e\n",
+                mesh.cellCount(), worst);
+    AETHER_CHECK(worst < 1e-12 * smallestCellScale + 1e-14);
+}
+
+// Euler-style bookkeeping: every tetrahedron contributes four faces, and
+// each interior face is contributed by exactly two of them while each
+// boundary face is contributed by one. So 4*cells = 2*interior + boundary
+// must hold exactly, in integers. This catches a face that was created
+// twice (hash collision or key-ordering bug) or never matched up.
+void testTetrahedralMeshFaceCountsBalance() {
+    const DelaunayTetrahedralization3D tets = buildJitteredCubeTetrahedralization(3);
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    const std::size_t boundary = mesh.boundaryFaceCount();
+    const std::size_t interior = mesh.faceCount() - boundary;
+    std::printf("  [mesh_tests] TetrahedralMesh: %zu faces (%zu internas, %zu de contorno)\n",
+                mesh.faceCount(), interior, boundary);
+
+    AETHER_CHECK(4 * mesh.cellCount() == 2 * interior + boundary);
+    AETHER_CHECK(boundary > 0); // a bounded domain must have a boundary
+    AETHER_CHECK(interior > 0); // and this mesh is far too refined to have none
+
+    // Owner/neighbour must be a genuine pairing, never self-referential.
+    for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+        const auto& face = mesh.face(f);
+        AETHER_CHECK(face.owner < mesh.cellCount());
+        if (!mesh.isBoundaryFace(f)) {
+            AETHER_CHECK(face.neighbour < mesh.cellCount());
+            AETHER_CHECK(face.neighbour != face.owner);
+        }
+    }
+}
+
+// The tetrahedralization of a point set fills exactly its convex hull, and
+// here that hull is the unit cube (its eight corners are among the input
+// points, and every other point is inside). So the cell volumes must sum to
+// exactly 1 -- an independent check of the volume formula and of the claim
+// that the cells tile the domain without gaps or overlaps.
+void testTetrahedralMeshFillsTheCubeExactly() {
+    const DelaunayTetrahedralization3D tets = buildJitteredCubeTetrahedralization(3);
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    const double volume = mesh.totalVolume();
+    std::printf("  [mesh_tests] TetrahedralMesh: volume total = %.15f (esperado 1.0)\n", volume);
+    std::fflush(stdout);
+    AETHER_CHECK(nearlyEqual(volume, 1.0, 1e-12));
+}
+
+// The two sides of an interior face must see exactly opposite area vectors,
+// or flux would not be conserved between neighbours -- the property an FVM
+// discretization relies on to be conservative at all. Checked as exact
+// negation, since outwardAreaVector() flips one stored vector rather than
+// recomputing it.
+void testTetrahedralMeshFaceOrientationIsAntisymmetric() {
+    const DelaunayTetrahedralization3D tets = buildJitteredCubeTetrahedralization(2);
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    std::size_t checked = 0;
+    for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+        if (mesh.isBoundaryFace(f)) {
+            continue;
+        }
+        const auto& face = mesh.face(f);
+        const Vector3 fromOwner = mesh.outwardAreaVector(face.owner, f);
+        const Vector3 fromNeighbour = mesh.outwardAreaVector(face.neighbour, f);
+        AETHER_CHECK(fromOwner.x == -fromNeighbour.x);
+        AETHER_CHECK(fromOwner.y == -fromNeighbour.y);
+        AETHER_CHECK(fromOwner.z == -fromNeighbour.z);
+        ++checked;
+    }
+    AETHER_CHECK(checked > 0);
+}
+
+// The area vector must point from the owner towards the neighbour, not
+// merely along that line. Getting this backwards on some faces would still
+// satisfy the closure identity above (it sums over a cell, and a flipped
+// pair cancels within it), so it needs its own check -- otherwise every
+// flux computed later would carry the wrong sign on those faces.
+void testTetrahedralMeshAreaVectorsPointOwnerToNeighbour() {
+    const DelaunayTetrahedralization3D tets = buildJitteredCubeTetrahedralization(2);
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    std::size_t checked = 0;
+    for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+        if (mesh.isBoundaryFace(f)) {
+            continue;
+        }
+        const auto& face = mesh.face(f);
+        const Vector3 ownerToNeighbour = mesh.cellCentroid(face.neighbour) - mesh.cellCentroid(face.owner);
+        AETHER_CHECK(face.areaVector.dot(ownerToNeighbour) > 0.0);
+        ++checked;
+    }
+    std::printf("  [mesh_tests] TetrahedralMesh: %zu faces internas com orientacao owner->neighbour ok\n",
+                checked);
+    std::fflush(stdout);
+    AETHER_CHECK(checked > 0);
+}
+
 } // namespace
 
 int main() {
+    testTetrahedralMeshClosesEveryCell();
+    testTetrahedralMeshFaceCountsBalance();
+    testTetrahedralMeshFillsTheCubeExactly();
+    testTetrahedralMeshFaceOrientationIsAntisymmetric();
+    testTetrahedralMeshAreaVectorsPointOwnerToNeighbour();
     testBasicLayout();
     testCellIndexIsUnique();
     testNeighborBounds();
