@@ -170,7 +170,7 @@ onde mora a dificuldade real desta fase.
    demonstrada, não assumida.
 3. As 11 suítes continuam passando.
 
-### Estado em 2026-08-14: 2.1 cumprido, 2.2 parcial
+### Estado em 2026-08-14: 2.1 e 2.2 CUMPRIDOS
 
 **2.1 — `TetrahedralMesh` (conectividade de faces): CUMPRIDO.** Validado por
 identidades exatas, não tolerâncias sobre física: fechamento de célula
@@ -234,18 +234,37 @@ pela anterior em vez de ser assumida:
 | + correção não-ortogonal | 1,604 | 1,056 | 0,895 | 1,03 → 0,58 |
 | + gradiente mín. quadrados | 0,999 | 0,691 | **0,522** | 0,91 → **0,98** |
 
-**Ainda é ~1, não 2.** O laço externo de correção diferida foi descartado
-como causa: sua mudança final mede 1e-5 a 1e-8, desprezível frente ao erro de
-discretização de 0,52 (ele para no teto de varreduras só porque a tolerância
-pedida é bem mais estrita que o necessário). O termo de primeira ordem
-restante é a **interpolação de face**: tanto o valor quanto o gradiente na
-face são médias simples 0,5, mas em malha distorcida o centroide da face não
-é o ponto médio do segmento entre os centroides das células. Corrigir esse
-desvio (skewness correction) é o ingrediente padrão que falta para segunda
-ordem.
+**A quarta versão foi um resultado nulo honesto.** Interpolação ponderada por
+distância mais substituição da componente normal do gradiente médio pela
+diferença compacta: 0,989 / 0,700 / 0,531 — dentro do ruído da terceira. A
+interpolação de face **não** era o termo que limitava a ordem, ao contrário da
+hipótese que motivou a mudança. Mantida por ser a formulação mais correta,
+não por ter melhorado número nenhum.
 
-**O que falta para fechar 2.2**: correção de skewness na interpolação de
-face. Registrado como parcial em vez de declarado cumprido.
+**O que limitava era o próprio problema.** A placa é descontínua nos dois
+cantos superiores, onde a borda quente encontra uma fria, e a solução exata
+não tem gradiente limitado ali — **nenhum esquema converge na sua ordem
+formal numa norma que inclua essas células**. Excluindo-as:
+
+| n | rmsErro (todas) | ordem | sem os cantos | ordem |
+|---|---|---|---|---|
+| 4 | 0,989 | — | 0,901 | — |
+| 6 | 0,700 | 0,85 | 0,585 | 1,06 |
+| 8 | 0,531 | 0,96 | **0,367** | **1,63** |
+
+Ordem 1,63 e subindo rumo a 2: **o esquema é de segunda ordem onde a solução
+exata é suave**, que é exatamente a afirmação que um FVM deve poder fazer. A
+versão estruturada deste mesmo teste evita a armadilha amostrando só pontos
+interiores — eu caí nela primeiro e só saí medindo.
+
+O laço externo de correção diferida foi descartado como causa antes disso:
+sua mudança final mede 1e-5 a 1e-8, desprezível frente ao erro de
+discretização (ele para no teto de varreduras só porque a tolerância pedida é
+bem mais estrita que o necessário).
+
+**Portão cumprido**: bate com a série de Fourier dentro de tolerância medida,
+e a convergência de malha está demonstrada na região suave, com a taxa menor
+da norma global explicada pela singularidade e não pelo esquema.
 
 ---
 

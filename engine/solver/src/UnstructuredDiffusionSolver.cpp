@@ -53,8 +53,10 @@ void UnstructuredDiffusionSolver::rebuildCoefficients() {
                 continue;
             }
             const double coefficient = face.areaVector.normSquared() / areaDotD;
-            dirichletFaces_.push_back(
-                {face.owner, coefficient, boundaryValue_[f], face.areaVector - d * coefficient});
+            const double boundaryDistance = d.norm();
+            dirichletFaces_.push_back({face.owner, coefficient, boundaryValue_[f],
+                                        face.areaVector - d * coefficient, d / boundaryDistance,
+                                        boundaryDistance});
             diagonal_[face.owner] += coefficient;
             continue;
         }
@@ -65,8 +67,20 @@ void UnstructuredDiffusionSolver::rebuildCoefficients() {
             continue; // see above: a degenerate/misoriented face contributes nothing
         }
         const double coefficient = face.areaVector.normSquared() / areaDotD;
-        interiorFaces_.push_back(
-            {face.owner, face.neighbour, coefficient, face.areaVector - d * coefficient});
+        // Interpolation weight from the perpendicular distances of the two
+        // centroids to the face plane, not a flat 0.5: on a skewed mesh the
+        // two cells sit at different distances, and using 0.5 there is a
+        // first-order error in every face quantity built from it.
+        const double distance = d.norm();
+        const Vector3 unitNormal = face.areaVector / face.areaVector.norm();
+        const double ownerDistance = std::fabs((face.centroid - mesh_->cellCentroid(face.owner)).dot(unitNormal));
+        const double neighbourDistance =
+            std::fabs((mesh_->cellCentroid(face.neighbour) - face.centroid).dot(unitNormal));
+        const double distanceSum = ownerDistance + neighbourDistance;
+        const double ownerWeight = distanceSum > 0.0 ? neighbourDistance / distanceSum : 0.5;
+        interiorFaces_.push_back({face.owner, face.neighbour, coefficient,
+                                   face.areaVector - d * coefficient, d / distance, distance,
+                                   ownerWeight});
         diagonal_[face.owner] += coefficient;
         diagonal_[face.neighbour] += coefficient;
     }
@@ -215,13 +229,31 @@ std::vector<double> UnstructuredDiffusionSolver::nonOrthogonalCorrection(
 
     std::vector<double> correction(phi.size(), 0.0);
     for (const InteriorFace& face : interiorFaces_) {
-        const Vector3 faceGradient = (gradients[face.owner] + gradients[face.neighbour]) * 0.5;
+        // **Corrected face gradient.** The plain average approximates the
+        // gradient at the midpoint of the centroid segment, not at the face,
+        // which is an O(h) error on a skewed mesh -- and since
+        // A_nonorth is not perpendicular to d under the over-relaxed
+        // decomposition, that error leaks straight into the flux. The fix is
+        // to keep the averaged *tangential* part but replace the component
+        // along d by the compact difference (phi_N - phi_P)/|d|, which is the
+        // one direction the two cell values pin down accurately. Standard
+        // practice, and the remaining first-order term identified when the
+        // least-squares gradient alone left the order at ~1.
+        const Vector3 averaged =
+            gradients[face.owner] * face.ownerWeight + gradients[face.neighbour] * (1.0 - face.ownerWeight);
+        const double compactNormalDerivative = (phi[face.neighbour] - phi[face.owner]) / face.distance;
+        const Vector3 faceGradient =
+            averaged + face.unitD * (compactNormalDerivative - averaged.dot(face.unitD));
         const double flux = faceGradient.dot(face.nonOrthogonalArea);
         correction[face.owner] += flux;
         correction[face.neighbour] -= flux;
     }
     for (const DirichletFace& face : dirichletFaces_) {
-        correction[face.cell] += gradients[face.cell].dot(face.nonOrthogonalArea);
+        const Vector3& cellGradient = gradients[face.cell];
+        const double compactNormalDerivative = (face.value - phi[face.cell]) / face.distance;
+        const Vector3 faceGradient =
+            cellGradient + face.unitD * (compactNormalDerivative - cellGradient.dot(face.unitD));
+        correction[face.cell] += faceGradient.dot(face.nonOrthogonalArea);
     }
     return correction;
 }

@@ -268,6 +268,7 @@ struct UnstructuredPlateResult {
     std::size_t cellCount;
     std::size_t iterations;
     double outerChange;
+    double interiorRmsError;
 };
 
 UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
@@ -290,6 +291,16 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
 
     double weightedSquaredError = 0.0;
     double totalVolume = 0.0;
+    // The plate problem is discontinuous at the two top corners, where the hot
+    // edge meets a cold one: the exact solution has no bounded gradient there,
+    // so *any* scheme carries large local error and no scheme converges at its
+    // formal order in a norm that includes those cells. The structured test
+    // sidesteps this by sampling interior points only; here the same exclusion
+    // is measured explicitly, so the two numbers can be compared and the
+    // singularity's contribution separated from the discretization's.
+    double interiorSquaredError = 0.0;
+    double interiorVolume = 0.0;
+    constexpr double kCornerRadius = 0.15;
     for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
         const Vector3 c = mesh.cellCentroid(cell);
         const double expected = analyticalPlateTemperature(c.x, c.y, 1.0, 1.0, t0, 200);
@@ -297,10 +308,17 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
         const double volume = mesh.cellVolume(cell);
         weightedSquaredError += volume * error * error;
         totalVolume += volume;
+
+        const double toLeftCorner = std::sqrt(c.x * c.x + (1.0 - c.y) * (1.0 - c.y));
+        const double toRightCorner = std::sqrt((1.0 - c.x) * (1.0 - c.x) + (1.0 - c.y) * (1.0 - c.y));
+        if (std::min(toLeftCorner, toRightCorner) > kCornerRadius) {
+            interiorSquaredError += volume * error * error;
+            interiorVolume += volume;
+        }
     }
 
     return {std::sqrt(weightedSquaredError / totalVolume), solver.maxNonOrthogonality(), mesh.cellCount(),
-            iterations, solver.lastOuterChange()};
+            iterations, solver.lastOuterChange(), std::sqrt(interiorSquaredError / interiorVolume)};
 }
 
 // **The gate for ROADMAP Fase 2.** Two things are checked, and the second
@@ -318,22 +336,27 @@ void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
     std::fflush(stdout);
 
     double previousError = 0.0;
+    double previousInterior = 0.0;
     double previousH = 0.0;
     bool sawConvergence = false;
     double finestError = 0.0;
+    double finestInterior = 0.0;
+    double finestInteriorOrder = 0.0;
 
     for (std::size_t n : {4u, 6u, 8u}) {
         const double h = 1.0 / static_cast<double>(n);
         const UnstructuredPlateResult result = solveUnstructuredPlate(n);
         double order = 0.0;
+        double interiorOrder = 0.0;
         if (previousError > 0.0) {
             order = std::log(previousError / result.rmsError) / std::log(previousH / h);
+            interiorOrder = std::log(previousInterior / result.interiorRmsError) / std::log(previousH / h);
         }
         std::printf(
-            "    n=%zu  celulas=%5zu  rmsErro=%9.5f  ordem=%5.2f  naoOrtog.max=%.3f  varreduras=%2zu  "
-            "mudancaExterna=%.2e\n",
-            n, result.cellCount, result.rmsError, order, result.maxNonOrthogonality, result.iterations,
-            result.outerChange);
+            "    n=%zu  celulas=%5zu  rmsErro=%8.5f (ordem %4.2f)  semCantos=%8.5f (ordem %4.2f)  "
+            "naoOrtog=%.2f\n",
+            n, result.cellCount, result.rmsError, order, result.interiorRmsError, interiorOrder,
+            result.maxNonOrthogonality);
         std::fflush(stdout);
 
         if (previousError > 0.0) {
@@ -344,41 +367,51 @@ void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
             sawConvergence = true;
         }
         previousError = result.rmsError;
+        previousInterior = result.interiorRmsError;
         previousH = h;
         finestError = result.rmsError;
+        finestInterior = result.interiorRmsError;
+        finestInteriorOrder = interiorOrder;
     }
     AETHER_CHECK(sawConvergence);
 
-    // Absolute accuracy at the finest resolution, bound set from the measured
-    // 0.522 with margin, on a 0-100 temperature scale.
+    // **Gate for ROADMAP Fase 2.2, and how it was finally met.** Four
+    // versions were measured, each answering the question the previous one
+    // left open rather than being assumed:
     //
-    // **Honest status of this gate: partially met, and worth stating exactly
-    // which part.** Three versions were measured, each answering the previous
-    // one's open question rather than being assumed:
+    //   orthogonal only          2.879 -> 2.433 -> 2.365   order 0.42, 0.10
+    //   + non-orthogonal corr.   1.604 -> 1.056 -> 0.895   order 1.03, 0.58
+    //   + least-squares gradient 0.999 -> 0.691 -> 0.522   order 0.91, 0.98
+    //   + corrected face grad.   0.989 -> 0.700 -> 0.531   order 0.85, 0.96
     //
-    //   orthogonal only        2.879 -> 2.433 -> 2.365   order 0.42, 0.10
-    //   + non-orth. correction 1.604 -> 1.056 -> 0.895   order 1.03, 0.58
-    //   + least-squares grad.  0.999 -> 0.691 -> 0.522   order 0.91, 0.98
+    // The first plateaued outright. The second converged with the order
+    // drifting *down*. The third fixed that and held a stable ~0.95. The
+    // fourth -- distance-weighted interpolation plus replacing the averaged
+    // gradient's normal component with the compact difference -- came out
+    // **neutral**, within noise of the third. That was a genuine null
+    // result: the face interpolation was not the term capping the order,
+    // contrary to the hypothesis that motivated it. It is kept because it is
+    // the more correct formulation regardless, not because it improved a
+    // number.
     //
-    // The first plateaued outright. The second converged but with the order
-    // drifting *down*, suggesting another floor ahead. The third converges
-    // cleanly and, crucially, with a **stable** order that is no longer
-    // degrading -- which is what says the remaining error is honest
-    // discretization error rather than a neglected term.
+    // What *was* capping the order is the problem itself. The plate is
+    // discontinuous at its two top corners, where the hot edge meets a cold
+    // one, and the exact solution has no bounded gradient there -- so no
+    // scheme converges at its formal order in a norm that includes those
+    // cells. Excluding them (kCornerRadius above) the order climbs to 1.06
+    // then 1.63, heading for 2: the scheme is second-order where the exact
+    // solution is smooth, which is exactly the claim a finite-volume
+    // discretization should be able to make. The structured version of this
+    // test avoids the same trap by sampling interior points only.
     //
-    // It is nonetheless ~1, not the 2 a fully second-order scheme reaches.
-    // The outer deferred-correction loop is not the cause: its final change
-    // measures 1e-5..1e-8, negligible beside a 0.52 discretization error (it
-    // stops at the sweep cap only because the tolerance asked of it is far
-    // tighter than needed). The remaining first-order term is the **face
-    // interpolation**: both the face value and the face gradient are plain
-    // 0.5 averages, but on a skewed mesh the face centroid is not the
-    // midpoint of the segment joining the two cell centroids, and correcting
-    // for that offset is the standard remaining ingredient for second order.
-    //
-    // So this test asserts what is true -- monotone convergence at a stable
-    // first-order rate to sub-0.6 rms error -- and not second order.
+    // So the assertions below are split accordingly: the global norm must
+    // shrink (checked in the loop), and the smooth-region norm must both
+    // shrink and reach the measured accuracy with margin.
     AETHER_CHECK(finestError < 0.8);
+    AETHER_CHECK(finestInterior < 0.55);
+    // Order in the smooth region must be clearly better than first, which is
+    // what separates "converging" from "converging at the right rate".
+    AETHER_CHECK(finestInteriorOrder > 1.3);
 }
 
 // Steady 2D Laplace conduction on a plate with three sides at 0 and the

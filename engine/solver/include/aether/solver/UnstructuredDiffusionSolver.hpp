@@ -153,6 +153,9 @@ private:
         std::size_t neighbour;
         double coefficient;              // a_f = |A|^2 / (A . d)
         core::Vector3 nonOrthogonalArea; // A - (|A|^2/(A.d)) d, as seen from the owner
+        core::Vector3 unitD;             // normalised c_N - c_P
+        double distance;                 // |c_N - c_P|
+        double ownerWeight;              // distance-based interpolation weight for the owner
     };
 
     struct DirichletFace {
@@ -160,6 +163,8 @@ private:
         double coefficient; // |A|^2 / (A . d_b), with d_b = faceCentroid - cellCentroid
         double value;
         core::Vector3 nonOrthogonalArea;
+        core::Vector3 unitD;
+        double distance;
     };
 
     const mesh::TetrahedralMesh* mesh_;
