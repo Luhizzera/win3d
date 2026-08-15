@@ -56,6 +56,11 @@ try:
         marching_cubes_3d,
         marching_squares_2d,
     )
+    from aether_persistence_py import FieldArchive, HistoryEntry, ProjectHistory, load_grid, save_grid
+    from aether_optimization_py import NelderMead, OptimizationResult
+    from aether_analysis_py import FieldStatistics, checkerboard_index, compute_statistics, max_courant_number, summarize_field
+    from aether_ml_py import MultiLayerPerceptron
+    from aether_plugin_py import DiagnosticInfo, PluginHost
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "aether_*_py extensions not found. Build the C++ core first:\n"
@@ -119,6 +124,21 @@ __all__ = [
     "marching_squares_2d",
     "Triangle3D",
     "marching_cubes_3d",
+    "FieldArchive",
+    "HistoryEntry",
+    "ProjectHistory",
+    "save_grid",
+    "load_grid",
+    "NelderMead",
+    "OptimizationResult",
+    "FieldStatistics",
+    "compute_statistics",
+    "max_courant_number",
+    "checkerboard_index",
+    "summarize_field",
+    "MultiLayerPerceptron",
+    "PluginHost",
+    "DiagnosticInfo",
     "PoissonOperatorCuda",
     "GPU_AVAILABLE",
 ]

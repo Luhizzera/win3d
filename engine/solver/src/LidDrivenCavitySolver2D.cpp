@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace aether::solver {
 
@@ -10,6 +11,18 @@ LidDrivenCavitySolver2D::LidDrivenCavitySolver2D(std::size_t nx, std::size_t ny,
     : nx_(nx), ny_(ny), dx_(lengthX / static_cast<double>(nx)), dy_(lengthY / static_cast<double>(ny)),
       viscosity_(viscosity), lidVelocity_(lidVelocity), u_(nx * ny, 0.0), v_(nx * ny, 0.0),
       p_(nx * ny, 0.0) {}
+
+void LidDrivenCavitySolver2D::loadState(std::vector<double> u, std::vector<double> v, std::vector<double> p,
+                                         double time) {
+    const std::size_t expected = nx_ * ny_;
+    if (u.size() != expected || v.size() != expected || p.size() != expected) {
+        throw std::invalid_argument("LidDrivenCavitySolver2D::loadState: field size does not match nx*ny");
+    }
+    u_ = std::move(u);
+    v_ = std::move(v);
+    p_ = std::move(p);
+    time_ = time;
+}
 
 double LidDrivenCavitySolver2D::u(std::size_t i, std::size_t j) const { return u_[index(i, j)]; }
 double LidDrivenCavitySolver2D::v(std::size_t i, std::size_t j) const { return v_[index(i, j)]; }

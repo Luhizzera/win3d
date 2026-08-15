@@ -1893,6 +1893,511 @@ migração de código é estrutural (namespaces + dispatch), não numérica,
 então a validação relevante é "mesmo comportamento observável", não uma
 nova derivação analítica.
 
+## Módulo 11: persistência - FieldArchive (primeira etapa)
+
+Primeira etapa do Módulo 11 do roadmap (Database: projetos/malha/resultados/
+histórico). Nada disso existia antes - nenhuma serialização, nenhum formato
+de arquivo de projeto, nenhum mecanismo de histórico de resultados em
+qualquer camada do engine.
+
+**Decisão de escopo, sem parar pra perguntar**: diferente do Módulo 10 (onde
+CUDA tinha valor genuinamente insubstituível - throughput real de GPU que
+nenhuma alternativa sem dependência replica), aqui um formato caseiro não
+perde nada real frente a um motor relacional (SQLite, por exemplo) pro caso
+de uso deste projeto: usuário único, sem acesso concorrente, sem consultas
+relacionais complexas. O valor de um SQL de verdade (transações entre várias
+tabelas, concorrência) não se aplica. Então a escolha é sem dependência
+nova, consistente com a prática já estabelecida em todo o resto do projeto
+(módulo GPU foi a única exceção, e foi uma reversão deliberada e explícita
+do princípio "sem dependências externas", autorizada pelo usuário).
+
+`engine/persistence/include/aether/persistence/FieldArchive.hpp` - um
+container de checkpoint genérico e agnóstico de solver: um dicionário de
+metadados escalares nomeados (`double`) mais um dicionário de arrays de
+`double` nomeados, salvos/carregados de um único arquivo binário próprio
+(`AECF`, "Aether Checkpoint Format" - magic de 4 bytes + versão de 4 bytes,
+depois contagens e pares comprimento-prefixado/dados, sem compressão, sem
+tratamento de endianness já que o projeto só builda em Windows x64).
+Deliberadamente **não sabe nada** sobre malha staggered, fechamento de
+turbulência, ou qualquer outro detalhe de solver especifico - quem decide
+quais campos (`u`, `v`, `w`, `p`, `k`, `omega`, `nut`, ...) e quais
+parâmetros (`nx`, `ny`, `nz`, `dx`, `dy`, `dz`, `time`, `viscosity`, ...)
+salvar, e sob quais nomes, é o código chamador (o próprio solver, ou a
+camada de orquestração Python acima dele). Isso mantém o formato reutilizável
+por qualquer um dos solvers de `engine/solver` sem `FieldArchive` precisar
+crescer um caso especial por classe.
+
+**Validado com dado real de solver, não só vetores de teste**: roda-se
+`LidDrivenCavitySolver2D` por 25 passos, extrai-se `u`/`v`/`p` célula a
+célula pros arrays do archive junto com os parâmetros e o tempo simulado,
+salva, recarrega, e compara **bit a bit** contra os dados extraídos antes de
+salvar - equivalência exata é esperada porque `save()`/`load()` só copiam
+bytes crus de `std::vector<double>`, nenhuma transformação com perda em
+nenhum ponto do caminho. Também cobertos: rejeição de arquivo com magic
+errado (`std::runtime_error`, não um archive de lixo silencioso), e chave de
+metadado/campo ausente lançando (`std::map::at`, não um default silencioso
+de 0/vazio escondendo um bug do chamador).
+
+Bindings Python (`aether_persistence_py`, incondicional - sem dependência
+externa nova, então entra no mesmo bloco `try/except` obrigatório de
+core/geometria/malha/solver/pós-processamento em `python/aether/__init__.py`,
+diferente do bloco opcional do GPU) validados end-to-end: `FieldArchive`
+criado, salvo, recarregado, comparado exatamente, em Python puro.
+
+Build limpo, 7 suites C++ passando (`aether_persistence_tests` nova).
+
+**Ainda em aberto depois da primeira etapa**: retomar (`resume`) um solver
+*vivo* a partir de um checkpoint - `LidDrivenCavitySolver2D` (e os outros
+solvers) não tinham setter pra injetar dados de campo externos de volta, só
+getters. Um índice/histórico de múltiplos checkpoints (só um arquivo por vez,
+sem noção de "projeto" com vários runs). Persistência de malha
+(`StructuredGrid3D` sem nenhum caminho de serialização). Os três itens foram
+fechados na sequência abaixo, ainda no Módulo 11, antes de avançar pro
+Módulo 12.
+
+### Módulo 11.2-11.4: resume de solver, histórico de checkpoints, malha estruturada
+
+**`loadState()` em dois solvers**: `LidDrivenCavitySolver2D::loadState(u, v,
+p, time)` (público) e `StaggeredCavityBase3D::loadState(u, v, w, p, time)`
+(protegido de propósito - só o fechamento **laminar** o expõe publicamente,
+via `using StaggeredCavityBase3D::loadState;` em
+`StaggeredLidDrivenCavitySolver3D`. Os cinco fechamentos turbulentos
+carregam estado adicional (k, epsilon, omega, nut, ...) que este método não
+conhece; expô-lo neles resumiria só parte do estado silenciosamente, então
+ficou fora de escopo desta etapa, documentado no próprio header.
+
+**A validação é mais forte que um simples round-trip**: roda-se um solver
+por N passos sem interrupção (`A`); em paralelo, roda-se um segundo por N/2
+passos, salva o checkpoint, recarrega num terceiro solver **recém-criado**
+via `loadState()`, e continua por mais N/2 passos (`C`). Como toda a
+aritmética é determinística e `stableTimeStep()` deriva o `dt` do próprio
+estado do campo, um estado restaurado bit-exato necessariamente escolhe o
+mesmo `dt` e dá o mesmo passo - `C` e `A` devem terminar **idênticos bit a
+bit**, não só numericamente próximos. Confirmado nos dois casos (2D e 3D
+laminar), em C++ e reconfirmado via Python (inclusive o caso 3D, que exercita
+o binding pybind11 apontando pra um método herdado via `using`-declaration
+de uma classe base protegida - funciona porque `using` não cria uma nova
+função, só reintroduz o nome com o mesmo tipo ponteiro-para-membro).
+
+**`ProjectHistory`**: um índice ordenado, persistido em disco, de múltiplos
+checkpoints dentro de um diretório - a metade "histórico"/"projetos" do nome
+do módulo que `FieldArchive` sozinho não cobria (um archive por vez, sem
+noção de várias execuções). Deliberadamente magro: não guarda nada em
+memória além do necessário para a chamada atual - `entries()` relê o arquivo
+de índice do disco a cada chamada, então duas instâncias apontando pro
+mesmo diretório sempre concordam (o arquivo é a fonte da verdade, não
+estado em memória) - validado explicitamente reabrindo com uma **segunda**
+instância depois de gravar 3 checkpoints com a primeira, em C++ e Python.
+Mesmo estilo binário de `FieldArchive` (magic `AEHI`, campos com
+comprimento prefixado), pelos mesmos motivos.
+
+**Persistência de `StructuredGrid3D`**: a classe não guarda nenhum dado por
+célula (só o par de cantos min/max e nx/ny/nz), então não precisava de nada
+além dos metadados escalares que `FieldArchive` já oferece - `saveGrid()`/
+`loadGrid()` são só duas funções livres que nomeiam as seis chaves (min/max
+x/y/z) mais nx/ny/nz. Uma correção real e pequena feita nessa etapa: a
+classe **nunca guardava o canto `max` original**, só `min` e o `spacing`
+derivado (`(max-min)/n`) - reconstruir `max` a partir de `spacing` não
+inverte essa divisão bit a bit, então isso quebraria round-trip exato.
+Corrigido guardando `max_` como membro de verdade e expondo `min()`/`max()`
+- agora `saveGrid`/`loadGrid` reconstroem via os mesmos argumentos de
+construtor do original, não por álgebra invertida, e o round-trip é exato
+por construção, não por sorte. (`TriangleMesh` já tinha OBJ/STL desde o
+Módulo 2 - só a malha estruturada estava sem nenhum caminho de persistência.)
+
+Bindings Python para tudo isso (`load_state`, `ProjectHistory`,
+`HistoryEntry`, `save_grid`/`load_grid`, `StructuredGrid3D.min()`/`.max()`)
+- validados end-to-end nos três casos, incluindo o resume 3D via `using`-
+declaration mencionado acima. Build limpo, 7 suites C++ passando
+(`aether_persistence_tests` cresceu de 4 pra 8 testes). Nenhum bug
+encontrado nesta etapa - a única correção foi a lacuna do `max()` acima, e
+foi achada projetando o round-trip exato, não por um teste falhando.
+
+Com isso o Módulo 11 fecha: resultados (`FieldArchive`), histórico/projetos
+(`ProjectHistory`), e malha (`StructuredGrid3D` + o `TriangleMesh` que já
+existia) - os três nomeados no roadmap original.
+
+## Módulo 12: IA - otimizador sem derivadas (primeira etapa)
+
+O roadmap descreve o Módulo 12 como quatro frentes bem diferentes: analítico,
+otimizador, modelo substituto (surrogate) e conversacional. Perguntado qual
+entrava primeiro, o usuário escolheu **otimizador** - a única das quatro que
+não reabre a pergunta de dependência externa (modelo substituto pediria uma
+lib de ML ou uma rede neural feita à mão; conversacional pediria uma API de
+LLM externa, a decisão de dependência mais pesada das quatro). Otimizador
+segue a mesma tradição de método numérico que CG/GMRES/BiCGSTAB já
+estabeleceram neste projeto: um algoritmo clássico, implementado do zero.
+
+`engine/optimization/NelderMead` - o método simplex downhill de Nelder &
+Mead (1965): minimização sem derivadas de uma função objetivo escalar
+n-dimensional. Escolhido porque trata o objetivo como uma caixa-preta pura -
+exatamente o que se precisa pra otimizar *sobre a própria saída de um solver
+de CFD* (roda o solver, lê alguma grandeza derivada, isso é o custo) sem
+nunca precisar da derivada do solver em relação aos seus parâmetros. Mantém
+n+1 vértices formando um simplex no espaço de parâmetros; a cada iteração
+troca o pior vértice por reflexão através do centroide dos demais, expande
+mais se a reflexão foi uma melhora grande, ou contrai em direção ao centroide
+se não foi melhora nenhuma - encolhendo o simplex inteiro só quando nem
+reflexão nem contração ajudam.
+
+**Validado em três níveis, do mais sintético ao mais real**:
+1. Um paraboloide com mínimo exato conhecido por conta própria (não
+   recordado de tabela) - `(x-3)²+(y+2)²`, mínimo em `(3,-2)`.
+2. A função de Rosenbrock, o benchmark padrão de otimizadores sem
+   derivadas - `100(y-x²)²+(1-x)²`, mínimo em `(1,1)` derivável por cálculo
+   direto (não é uma tabela de literatura, é uma forma fechada verificável
+   na mão). Convergiu em 105 iterações a ~5e-9 do mínimo exato, apesar do
+   vale estreito e curvo que torna essa função notoriamente difícil pra
+   métodos sem derivada.
+3. **O ponto real do Módulo 12**: um problema inverso genuíno sobre um
+   solver já validado, não só funções sintéticas. Mesmo setup 1D de
+   Poiseuille via `SteadyDiffusionSolver` que o Módulo 4 já validou (ambos
+   os contornos em x fixados em 0, termo de fonte representando
+   `-(1/mu)*dp/dx`), com a fórmula discreta exata já conhecida:
+   `value(i) = (source*h²/2)*i*(nx-1-i)`. Aqui a pergunta roda ao contrário -
+   dado um valor-alvo numa célula, qual termo de fonte o produz? - e a
+   resposta do otimizador é conferida contra a inversa em forma fechada
+   dessa mesma fórmula, não só contra "o resíduo ficou pequeno". Resultado:
+   fonte encontrada bate com a fonte verdadeira até `1e-4` (na prática, exata
+   até a precisão impressa), em 34 iterações.
+
+Bindings Python (`aether_optimization_py`, incondicional - sem dependência
+externa nova) usando `pybind11/functional.h` pra aceitar uma função Python
+qualquer como objetivo - validado end-to-end nos três casos, incluindo o
+problema inverso chamando de volta pro próprio `SteadyDiffusionSolver` a
+partir de uma lambda Python.
+
+Build limpo, 8 suites C++ passando (`aether_optimization_tests` nova).
+Nenhum bug encontrado.
+
+**Ainda em aberto depois do otimizador**: as outras três frentes (analítico,
+surrogate, conversacional). O analítico foi fechado na sequência abaixo,
+ainda no Módulo 12.
+
+### Módulo 12.2: diagnósticos analíticos (FlowDiagnostics)
+
+Segunda frente do Módulo 12: "analítico" - diagnóstico automático sobre
+resultados já calculados. Deliberadamente **não** é aprendizado de máquina
+de nenhum tipo, só aritmética exata derivada da definição de cada
+grandeza - sem risco de recall de literatura (número de Courant é uma
+definição, não um fato recordado; o índice de checkerboard abaixo é
+definido neste próprio módulo, não emprestado de tabela nenhuma).
+
+`engine/analysis/FlowDiagnostics`:
+- `computeStatistics` - min/max/média de um campo.
+- `maxCourantNumber` - CFL multi-dimensional `dt*(|u|/dx+|v|/dy)`, o mesmo
+  tipo de limite que `stableTimeStep()` de cada solver 2D/3D já garante
+  implicitamente por construção; esta função deixa medir diretamente sobre
+  um campo já resolvido, em vez de só confiar que o solver cumpriu o limite.
+- **`checkerboardIndex`** - o diagnóstico novo desta etapa: mede o quanto um
+  campo estruturado 2D exibe o clássico padrão de "checkerboard" (desacoplo
+  par-ímpar) de grids colocated - exatamente a limitação que os próprios
+  comentários de classe do `TaylorGreenVortexSolver2D`/
+  `LidDrivenCavitySolver2D` documentam desde que foram criados, mas que
+  nunca tinha sido de fato *medida* até agora. Definido e provado no próprio
+  header, não emprestado: em cada célula interior, comparar o valor da
+  célula com a média dos 4 vizinhos dá um resíduo que é **exatamente 0**
+  para qualquer campo localmente linear (em particular constante) e, para
+  um checkerboard perfeito `campo(i,j)=A*(-1)^(i+j)`, é **exatamente
+  2*campo(i,j)** em toda célula interior (cada vizinho tem o sinal oposto).
+  Normalizando o RMS desse resíduo por 2x o RMS de variação do próprio
+  campo dá **exatamente 0** pra um campo suave/constante e **exatamente 1**
+  pra um checkerboard perfeito - ambos checados diretamente nos testes, não
+  só afirmados.
+- `summarizeField` - uma linha formatada de relatório (nome + estatísticas).
+
+**Validado em três níveis, do sintético ao real**: extremos exatos
+(constante e rampa linear → 0.0; checkerboard perfeito → 1.000000000000,
+conferido até a 12ª casa) e depois **sobre um campo de pressão real** de
+`LidDrivenCavitySolver2D` após 300 passos - suavizar esse campo com uma
+passada de média de 4 vizinhos deve *necessariamente* reduzir o índice
+medido (a suavização remove exatamente o tipo de alternância de sinal
+célula-a-célula que o índice detecta), uma afirmação real e checável, não
+só "o número mudou". Medido: `raw=0.020357`, `smoothed=0.017186` - a
+cavidade real tem alguma estrutura de checkerboard mensurável, como o
+projeto já documentava qualitativamente, agora quantificado pela primeira
+vez.
+
+Bindings Python (`aether_analysis_py`, incondicional) validados
+end-to-end nos quatro casos, incluindo o índice de checkerboard sobre o
+campo de pressão real extraído via `solver.pressure(i,j)`.
+
+Build limpo, 9 suites C++ passando (`aether_analysis_tests` nova). Nenhum
+bug encontrado.
+
+**Ainda em aberto depois do analítico**: surrogate model e conversacional.
+Perguntado qual seguir - e com qual decisão de dependência no caso do
+surrogate - o usuário escolheu **surrogate, rede neural feita à mão**: sem
+depender de PyTorch/TensorFlow/scikit-learn, mesma tradição de método
+numérico do CG/GMRES/Nelder-Mead. Diferente do CUDA no Módulo 10, aqui a
+alternativa sem dependência não perde nada real - uma rede pequena feita à
+mão custa código, não throughput, então não é um fork genuíno como o do
+CUDA foi.
+
+### Módulo 12.3: surrogate model (MultiLayerPerceptron feito à mão)
+
+`engine/ml/MultiLayerPerceptron` - um perceptron multicamadas clássico
+(tanh nas camadas ocultas, saída linear para regressão), com
+retropropagação + gradiente descendente implementados a partir da própria
+definição do algoritmo, não uma casca sobre lib de terceiros. Pensado como
+*surrogate*: treinar sobre a saída de um solver de CFD como função de algum
+parâmetro barato, pra depois responder sem rodar o solver de novo - o
+motor não tem opinião sobre o que entrada/saída significam, mesmo design
+de "quem chama decide o sentido" do `FieldArchive` e do objetivo do
+`NelderMead`.
+
+**Validado em três níveis, do mais rigoroso ao mais real**:
+1. **Checagem numérica de gradiente** - o padrão-ouro pra provar que uma
+   implementação de retropropagação está matematicamente correta: compara
+   o gradiente analítico contra diferença finita central da própria função
+   de perda, sem nenhuma referência externa. Erro máximo medido: `2.29e-11`.
+2. **XOR** - a prova clássica de que a camada oculta realmente funciona, não
+   só que os pesos de saída se ajustaram: os quatro pontos do XOR não são
+   linearmente separáveis (nenhuma reta separa as duas classes - verificável
+   direto plotando os 4 pontos), então uma rede sem camada oculta funcional
+   não resolve isso, seja qual for o ajuste dos pesos de saída. Um bug que
+   desativasse silenciosamente a não-linearidade passaria numa regressão
+   linear qualquer mas falharia aqui. **Um problema real apareceu no
+   caminho**: com taxa de aprendizado 0.5 a perda divergia pra NaN por
+   volta da época 2000 - não um bug de retropropagação (a checagem de
+   gradiente acima já prova isso, erro de 2e-11), só gradiente descendente
+   em lote cheio dando passo grande demais. Medido antes de decidir, como
+   sempre neste projeto: `lr=0.1` leva a perda a exatamente `0.000000` (5
+   casas decimais) já na época 2000.
+3. **O ponto real desta etapa**: treinar sobre saída real de solver, não só
+   curva sintética, e conferir generalização em pontos nunca vistos no
+   treino. Reusa o mesmo setup de Poiseuille via `SteadyDiffusionSolver` já
+   validado (`value(15,0,0)=source*1.05`, exatamente linear) - treinado
+   numa grade grosseira de fontes, testado em quatro fontes intermediárias
+   nunca vistas no treino, comparado tanto contra a saída real do solver
+   quanto contra a fórmula fechada. Erro do surrogate ficou abaixo de
+   `0.05` nos quatro pontos de teste (ex.: fonte=1.4 → surrogate=1.4505,
+   solver=1.4700).
+
+Bindings Python (`aether_ml_py`, incondicional) validados end-to-end nos
+dois casos (XOR e o surrogate real), incluindo o treino chamado inteiramente
+a partir do Python.
+
+Build limpo, 10 suites C++ passando (`aether_ml_tests` nova). O único
+"bug" encontrado foi a divergência por taxa de aprendizado alta demais -
+não um erro de implementação, e corrigido pela mesma disciplina de "medir
+antes de decidir" já estabelecida no projeto.
+
+**Ainda em aberto depois do surrogate**: só a frente conversacional. Ao
+contrário de toda decisão anterior deste módulo, essa realmente precisava de
+uma escolha do usuário - não dá pra ter conversação sem algum LLM gerando o
+lado em linguagem natural. Perguntado entre LLM local (Ollama, na própria
+RTX 5080) e API de nuvem (Anthropic/OpenAI, com custo e credenciais), o
+usuário escolheu **local**.
+
+### Módulo 12.4: interface conversacional (Ollama local)
+
+Ollama não estava instalado; instalado via winget (mesmo padrão do CUDA
+Toolkit no Módulo 10, autorizado explicitamente antes de mudar o sistema),
+com o modelo `llama3.2` (~2GB) baixado localmente.
+
+`python/aether/conversational.py` - camada de chat com uso de ferramentas
+sobre o pacote `aether`, falando com o servidor Ollama local
+(`http://localhost:11434`) via `urllib` puro da biblioteca padrão, sem
+instalar o pacote `ollama`/`openai` - mesmo instinto de "não adicionar
+dependência que não se paga" do resto do projeto.
+
+**O ponto mais importante do design**: o LLM nunca calcula uma grandeza
+física ele mesmo. Ele só decide *qual* função do `aether` chamar e *com
+quais* argumentos; o número sempre vem de rodar o solver/diagnóstico de
+verdade neste processo. `AetherAssistant.ask()` devolve tanto a resposta em
+linguagem natural quanto os resultados brutos das chamadas de ferramenta,
+justamente pra permitir conferir o número reportado contra a saída real do
+engine em vez de confiar no texto do modelo - a mesma desconfiança de
+"resultado plausível mas não verificado" que este projeto já aplica ao
+próprio código numérico.
+
+**Validado com uma verificação independente, não só "a resposta pareceu
+certa"**: perguntado "qual a divergência máxima de uma cavidade 20x20,
+Re=100, depois de 500 passos?", o modelo escolheu corretamente chamar
+`run_lid_driven_cavity(nx=20, ny=20, reynolds_number=100, steps=500)`. O
+resultado da ferramenta foi então comparado contra uma **recomputação
+independente** - rodar o mesmo `LidDrivenCavitySolver2D` com os mesmos
+argumentos, fora do fluxo do assistente - e bateu **exatamente**
+(`max_divergence=0.2659442248467858`, `simulated_time=25.00000000000022`,
+`checkerboard_index=0.019675414016952587`, os três idênticos bit a bit).
+**Um achado real, não antecipado, apareceu testando com uma pergunta
+puramente conceitual** ("o que é um número de Reynolds, numa frase?"): o
+`llama3.2` (modelo pequeno, 3B parâmetros) chamou a ferramenta mesmo assim,
+e escolheu parâmetros enormes - `nx=128, ny=64, steps=10000` numa primeira
+tentativa, `nx=100, ny=100, steps=1000` numa segunda. A primeira travou um
+núcleo de CPU por minutos rodando de verdade uma simulação de 8192 células
+por 10000 passos - uma tarefa cara e legítima em si, só que irrelevante e
+não pedida. Isso não é um bug no motor (o solver rodou exatamente como
+deveria) nem na integração (a ferramenta foi chamada e executada
+corretamente) - é uma limitação real de modelos locais pequenos: não dá
+pra confiar que eles só peçam trabalho de tamanho razoável.
+
+**Correção**: `_MAX_CAVITY_CELL_STEPS` - um limite de `nx*ny*steps` (2
+milhões, ~10x acima do exemplo de 20x20x500 já validado) que a própria
+ferramenta aplica antes de rodar qualquer coisa, devolvendo um erro
+estruturado pro modelo em vez de executar. Testado de novo com a mesma
+pergunta conceitual: o modelo pediu `nx=100,ny=100,steps=1000`
+(10.000.000 > 2.000.000), a ferramenta recusou com uma mensagem clara, e o
+modelo respondeu a pergunta conceitual normalmente usando conhecimento
+próprio, sem travar nem quebrar o processo. Isso muda o que este módulo
+prova: não "o modelo nunca chama a ferramenta à toa" (isso seria falso),
+mas "o sistema continua seguro e funcional mesmo quando o modelo pede algo
+inadequado" - uma garantia mais honesta e mais útil.
+
+Nenhum bug de implementação - o "achado" foi sobre o comportamento do
+modelo, corrigido com uma salvaguarda no lado da ferramenta, que é onde
+esse tipo de proteção precisa morar quando quem decide os parâmetros é um
+LLM. Este módulo não tem suíte C++/ctest (é camada Python pura, dependente
+de um servidor Ollama rodando localmente - inadequado pro mesmo ctest
+incondicional das outras 10 suítes), validado via script direto como todos
+os bindings Python deste projeto sempre foram.
+
+**Com isso o Módulo 12 está completo**: as quatro frentes do roadmap
+(otimizador, analítico, surrogate, conversacional) todas têm uma primeira
+etapa implementada e validada.
+
+## Módulo 13: API - servidor REST (primeira etapa)
+
+O roadmap descreve o Módulo 13 como "API (Python/C++/REST/plugins)".
+**Decisão de escopo, sem precisar perguntar** (diferente de todo fork do
+Módulo 12): a API Python (bindings pra toda camada do engine) e a API C++
+(os headers públicos de cada biblioteca) já existem e são exercitadas o
+projeto inteiro - REST é a única peça do módulo que ainda não tinha nada
+construído. "Plugins" fica pro Módulo 14, que o próprio roadmap já nomeia
+como módulo separado, não uma sub-parte deste.
+
+**Refatoração antes de construir**: `_run_lid_driven_cavity` e sua
+salvaguarda de tamanho, que viviam dentro de `conversational.py`, foram
+extraídas pra `python/aether/tasks.py` - um módulo de operações
+compartilhado entre a camada conversacional (Módulo 12.4) e agora o REST,
+em vez de cada front-end duplicar "como rodar uma cavidade e virar isso em
+algo serializável". Uma implementação, uma salvaguarda, dois front-ends.
+
+`python/aether/rest_api.py` - servidor HTTP com `http.server` da biblioteca
+padrão (`ThreadingHTTPServer` + `BaseHTTPRequestHandler`), sem
+Flask/FastAPI/uvicorn - mesmo instinto de "não adicionar dependência que
+não se paga" que `conversational.py` já usou pra falar com o Ollama via
+`urllib` puro em vez do pacote `requests`. Rotas da primeira etapa:
+- `GET /health` - checagem de vida.
+- `POST /simulate/lid-driven-cavity` - roda `aether.tasks.run_lid_driven_cavity`.
+- `POST /diagnostics/field-statistics` - roda `aether.tasks.field_statistics`.
+
+Erros de entrada (JSON inválido, campo faltando, tamanho de simulação acima
+da salvaguarda) viram HTTP 400 com uma mensagem clara, nunca um 500 - a
+mesma disciplina de "erro claro na fronteira, não propagar exceção crua"
+que o C++ deste projeto já segue em toda parte.
+
+**Validado com requisições HTTP reais**, servidor rodando numa thread
+background, comparando contra computação independente (mesma disciplina do
+Módulo 12.4): `/health` retorna `{"status":"ok"}`; `/simulate/lid-driven-cavity`
+com `nx=20,ny=20,Re=100,steps=500` bate **exatamente** com uma execução
+direta do mesmo `LidDrivenCavitySolver2D` fora do servidor
+(`max_divergence`, `simulated_time`, `checkerboard_index` idênticos bit a
+bit); uma requisição com `nx=200,ny=200,steps=1000` é rejeitada com 400
+pela mesma salvaguarda do Módulo 12.4 (`nx*ny*steps` acima do limite);
+`/diagnostics/field-statistics` bate com `compute_statistics` direto; rota
+desconhecida vira 404; corpo JSON malformado vira 400 com mensagem clara
+em vez de um 500 cru. Reconfirmado que `conversational.py` continua
+funcionando integralmente após a extração pra `tasks.py`.
+
+Nenhum bug encontrado. Sem mudança em C++ nesta etapa - as 10 suítes
+continuam passando sem alteração.
+
+**Ainda em aberto no Módulo 13**: autenticação/autorização (a primeira
+etapa não tem nenhuma - adequado pra uso local, não pra expor a rede
+externa), mais rotas cobrindo os outros solvers/otimizador/ferramentas de
+persistência, e documentação OpenAPI/schema formal.
+
+## Módulo 14: sistema de plugins (último módulo do roadmap)
+
+Carregar bibliotecas dinâmicas em tempo de execução que estendem o engine
+sem recompilá-lo - a capacidade genuinamente nova deste módulo.
+
+**A decisão de projeto mais importante, e ela não é negociável: a fronteira
+de plugin é C puro, não C++.** Um plugin é compilado separadamente do
+engine - potencialmente por outro compilador, outra versão do mesmo
+compilador, ou o mesmo compilador com flags diferentes (CRT debug vs
+release, outro `/std`, outro modelo de exceções). Tipos C++ não têm ABI
+estável em nenhum desses cenários: passar um `std::vector` ou `std::string`
+por uma fronteira de biblioteca cujos dois lados discordam do layout é
+comportamento indefinido, que tipicamente se manifesta como corrupção de
+heap em vez de um erro limpo. Só C puro - structs POD, tipos primitivos,
+ponteiros de função - tem ABI estável e documentada aqui. Então a fronteira
+é C (`engine/plugin/include/aether/plugin/PluginAbi.h`) e toda a
+conveniência C++ vive do lado do engine (`PluginHost`).
+
+Corolários do mesmo raciocínio, cada um documentado na própria ABI:
+nenhuma memória cruza a fronteira exigindo que o outro lado a libere
+(campos são emprestados, strings devolvidas por plugin têm duração
+estática); e nenhuma exceção C++ pode escapar de um plugin (desenrolar a
+pilha entre runtimes incompatíveis não é definido).
+
+**Versionamento de ABI com recusa dura, não aviso**: `PluginHost::load()`
+compara `abiVersion` **antes de ler qualquer outro campo** do struct - se a
+versão diverge, o layout pode divergir também, e todo acesso seguinte seria
+comportamento indefinido. Por isso é recusa, não "avisa e continua".
+
+**Ponto de extensão desta primeira etapa**: diagnósticos escalares nomeados
+sobre um campo (`const double*, size_t -> double`) - o menor ponto de
+extensão genuinamente útil (é exatamente o formato das funções do
+`engine/analysis`, então um plugin adiciona um diagnóstico que o engine
+nunca embarcou) mantendo a ABI trivialmente segura: nada é alocado,
+liberado ou mutado através da fronteira.
+
+`plugins/example_diagnostics/` é **escrito em C, não C++** - de propósito,
+provando o ponto: um plugin precisa só de um compilador C e de um header
+deste projeto, nenhuma compatibilidade de runtime C++ com o engine. Fica
+fora de `engine/` porque é a forma que o plugin de um terceiro teria.
+
+**Validado carregando bibliotecas de verdade, não simulando**:
+- O plugin de exemplo é carregado por caminho em runtime e seus dois
+  diagnósticos (`rms`, `peak_to_peak`) devolvem valores **idênticos bit a
+  bit** a reimplementações independentes escritas no próprio teste (mesma
+  disciplina de "reimplementação independente como verificação cruzada" do
+  `aether_gpu_tests`). Igualdade exata é o esperado: atravessar a fronteira
+  de biblioteca não altera aritmética.
+- **A recusa por versão de ABI é provada carregando um plugin real e
+  incompatível** (`plugins/bad_version_plugin/`, bem-formado em tudo exceto
+  a versão que reporta). Afirmar que a checagem existe no código passaria
+  mesmo se o guard comparasse o campo errado ou só avisasse - carregar de
+  verdade é o único jeito de exercitar o caminho de recusa ponta a ponta.
+  Confirmado também que a recusa é completa: nada do plugin rejeitado fica
+  registrado.
+- Dois modos de falha genuinamente diferentes, testados separadamente:
+  biblioteca que **não abre** (caminho inexistente) e biblioteca que **abre
+  perfeitamente mas não é um plugin** (`kernel32.dll`) - cada uma com sua
+  mensagem própria. Um teste anterior meu usava um segundo nome inventado
+  pro segundo caso, o que só re-testava "não abre" enquanto alegava testar
+  outra coisa; corrigido pra carregar uma biblioteca de sistema real.
+- Múltiplos hosts e múltiplos plugins coexistindo, checado explicitamente
+  porque o destrutor descarrega bibliotecas - errar a posse ali apareceria
+  como crash na saída de escopo, não como asserção falhando.
+
+Portável por opção, não por acidente: `LoadLibrary`/`GetProcAddress` no
+Windows, `dlopen`/`dlsym` no POSIX. Os *apps* deste projeto são Win32, mas
+toda biblioteca `engine/` sempre foi C++ portável, e o caminho POSIX custa
+três linhas - mais barato que fazer de `engine/plugin` a primeira
+biblioteca do engine presa ao Windows.
+
+Bindings Python (`aether_plugin_py`) validados end-to-end: uma DLL escrita
+em C, carregada em runtime a partir do Python, produzindo valores idênticos
+bit a bit a uma recomputação independente em Python puro - e a recusa de
+ABI incompatível atravessando corretamente como `RuntimeError`.
+
+Build limpo, 11 suítes C++ passando (`aether_plugin_tests` nova). Nenhum
+bug encontrado.
+
+**Ainda em aberto no Módulo 14**: plugins só podem adicionar diagnósticos
+de campo (não novos solvers ou modelos de turbulência - cada um exigiria
+seu próprio ponto de extensão na ABI); nenhum sandboxing (um plugin roda
+no processo do engine com privilégios totais - aceitável para plugins de
+confiança, não para código arbitrário de terceiros); e descoberta
+automática por diretório (hoje é carregamento por caminho explícito).
+
+**Com isso os 14 módulos do roadmap original têm uma primeira etapa
+implementada e validada.**
+
 ## Build (C++ core + bindings)
 
 Requer CMake >= 3.20, um compilador C++20 (MSVC, GCC ou Clang) e, para os

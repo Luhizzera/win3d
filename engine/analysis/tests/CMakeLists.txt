@@ -1,0 +1,4 @@
+add_executable(aether_analysis_tests flow_diagnostics_tests.cpp)
+target_link_libraries(aether_analysis_tests PRIVATE aether_analysis aether_solver aether_testing)
+
+add_test(NAME aether_analysis_tests COMMAND aether_analysis_tests)

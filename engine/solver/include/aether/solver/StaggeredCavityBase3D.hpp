@@ -62,6 +62,18 @@ public:
     double maxDivergence() const;
 
 protected:
+    // Overwrites u/v/w/p and the simulated time with externally supplied
+    // data -- the counterpart to reading them out to save a checkpoint (see
+    // engine/persistence/FieldArchive). Protected, not public: only the
+    // *laminar* closure (no extra turbulence fields) can safely expose this
+    // as-is via a `using` declaration -- the five turbulent closures each
+    // carry additional state (k, epsilon, omega, nut, ...) this method
+    // knows nothing about, so exposing it on them directly would silently
+    // resume only part of their state. Throws std::invalid_argument if any
+    // field's size doesn't match the grid's own u_/v_/w_/p_ sizes.
+    void loadState(std::vector<double> u, std::vector<double> v, std::vector<double> w, std::vector<double> p,
+                   double time);
+
     StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
                            double lengthZ, double viscosity, double lidVelocity);
     ~StaggeredCavityBase3D() = default;

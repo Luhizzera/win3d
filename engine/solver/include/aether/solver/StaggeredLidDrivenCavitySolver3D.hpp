@@ -54,6 +54,12 @@ public:
            double viscosity, double lidVelocity);
 
     void step(double dt);
+
+    // Safe to expose as-is (unlike the five turbulent closures): this
+    // class carries no state beyond what StaggeredCavityBase3D::loadState
+    // already covers (u, v, w, p, time) -- no eddy-viscosity field or other
+    // closure-specific state to also restore.
+    using StaggeredCavityBase3D::loadState;
 };
 
 } // namespace aether::solver

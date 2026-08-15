@@ -25,6 +25,8 @@ public:
     std::size_t nz() const { return nz_; }
     std::size_t cellCount() const { return nx_ * ny_ * nz_; }
 
+    const core::Vector3& min() const { return min_; }
+    const core::Vector3& max() const { return max_; }
     const core::Vector3& spacing() const { return spacing_; }
     double cellVolume() const { return spacing_.x * spacing_.y * spacing_.z; }
 
@@ -39,6 +41,7 @@ public:
 
 private:
     core::Vector3 min_;
+    core::Vector3 max_;
     core::Vector3 spacing_;
     std::size_t nx_;
     std::size_t ny_;

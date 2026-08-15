@@ -53,6 +53,17 @@ public:
     double pressure(std::size_t i, std::size_t j) const;
     double time() const { return time_; }
 
+    // Overwrites the full state (velocity, pressure, simulated time) with
+    // externally supplied data -- the counterpart to reading u()/v()/
+    // pressure()/time() out to save a checkpoint (see
+    // engine/persistence/FieldArchive). Throws std::invalid_argument if any
+    // field's size doesn't match nx*ny. Deliberately not validated any
+    // further than size (e.g. no divergence check): the caller is
+    // responsible for supplying a state that actually came from a solver
+    // with the same grid, the same way a constructor doesn't validate the
+    // physical plausibility of its parameters either.
+    void loadState(std::vector<double> u, std::vector<double> v, std::vector<double> p, double time);
+
     double maxDivergence() const;
 
 private:

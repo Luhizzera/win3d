@@ -8,7 +8,7 @@ using aether::core::Vector3;
 
 StructuredGrid3D::StructuredGrid3D(const Vector3& min, const Vector3& max, std::size_t nx,
                                     std::size_t ny, std::size_t nz)
-    : min_(min), nx_(nx), ny_(ny), nz_(nz) {
+    : min_(min), max_(max), nx_(nx), ny_(ny), nz_(nz) {
     if (nx == 0 || ny == 0 || nz == 0) {
         throw std::invalid_argument("StructuredGrid3D: nx, ny, nz must all be > 0");
     }

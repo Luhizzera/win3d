@@ -1,0 +1,4 @@
+add_executable(aether_optimization_tests optimization_tests.cpp)
+target_link_libraries(aether_optimization_tests PRIVATE aether_optimization aether_solver aether_testing)
+
+add_test(NAME aether_optimization_tests COMMAND aether_optimization_tests)

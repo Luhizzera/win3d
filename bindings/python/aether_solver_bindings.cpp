@@ -84,7 +84,9 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("v", &LidDrivenCavitySolver2D::v)
         .def("pressure", &LidDrivenCavitySolver2D::pressure)
         .def("time", &LidDrivenCavitySolver2D::time)
-        .def("max_divergence", &LidDrivenCavitySolver2D::maxDivergence);
+        .def("max_divergence", &LidDrivenCavitySolver2D::maxDivergence)
+        .def("load_state", &LidDrivenCavitySolver2D::loadState, py::arg("u"), py::arg("v"), py::arg("p"),
+             py::arg("time"));
 
     py::class_<StaggeredNavierStokesSolver3D>(m, "StaggeredNavierStokesSolver3D")
         .def(py::init<std::size_t, std::size_t, std::size_t, double, double, double, double>(),
@@ -112,7 +114,9 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("w", &StaggeredLidDrivenCavitySolver3D::w)
         .def("pressure", &StaggeredLidDrivenCavitySolver3D::pressure)
         .def("time", &StaggeredLidDrivenCavitySolver3D::time)
-        .def("max_divergence", &StaggeredLidDrivenCavitySolver3D::maxDivergence);
+        .def("max_divergence", &StaggeredLidDrivenCavitySolver3D::maxDivergence)
+        .def("load_state", &StaggeredLidDrivenCavitySolver3D::loadState, py::arg("u"), py::arg("v"), py::arg("w"),
+             py::arg("p"), py::arg("time"));
 
     py::class_<MixingLengthLidDrivenCavitySolver3D>(m, "MixingLengthLidDrivenCavitySolver3D")
         .def(py::init<std::size_t, std::size_t, std::size_t, double, double, double, double, double>(),

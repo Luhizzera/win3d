@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace aether::solver {
 
@@ -13,6 +14,18 @@ StaggeredCavityBase3D::StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std
       dz_(lengthZ / static_cast<double>(nz)), viscosity_(viscosity), lidVelocity_(lidVelocity),
       u_((nx + 1) * ny * nz, 0.0), v_(nx * (ny + 1) * nz, 0.0), w_(nx * ny * (nz + 1), 0.0),
       p_(nx * ny * nz, 0.0) {}
+
+void StaggeredCavityBase3D::loadState(std::vector<double> u, std::vector<double> v, std::vector<double> w,
+                                       std::vector<double> p, double time) {
+    if (u.size() != u_.size() || v.size() != v_.size() || w.size() != w_.size() || p.size() != p_.size()) {
+        throw std::invalid_argument("StaggeredCavityBase3D::loadState: field size does not match the grid");
+    }
+    u_ = std::move(u);
+    v_ = std::move(v);
+    w_ = std::move(w);
+    p_ = std::move(p);
+    time_ = time;
+}
 
 double StaggeredCavityBase3D::lidVelocityAt(double x, double y) const {
     constexpr double kPi = 3.14159265358979323846;

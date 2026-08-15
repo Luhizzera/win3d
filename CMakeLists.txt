@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(Aether LANGUAGES CXX)
+# C is enabled alongside C++ for Module 14: the plugin ABI is pure C (see
+# engine/plugin/include/aether/plugin/PluginAbi.h for why that is not
+# negotiable), and the example plugins under plugins/ are written in C to
+# demonstrate that a plugin needs no C++ runtime compatibility with the
+# engine at all. No engine library itself is C.
+project(Aether LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +42,14 @@ add_subdirectory(engine/geometry)
 add_subdirectory(engine/mesh)
 add_subdirectory(engine/solver)
 add_subdirectory(engine/postprocessing)
+add_subdirectory(engine/persistence)
+add_subdirectory(engine/optimization)
+add_subdirectory(engine/analysis)
+add_subdirectory(engine/ml)
+add_subdirectory(engine/plugin)
+# Example plugins (Module 14). Built as standalone shared libraries that
+# nothing links against -- the engine discovers them by path at run time.
+add_subdirectory(plugins)
 if(AETHER_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
     add_subdirectory(engine/gpu)
 endif()

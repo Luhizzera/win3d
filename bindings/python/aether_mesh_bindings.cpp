@@ -20,6 +20,8 @@ PYBIND11_MODULE(aether_mesh_py, m) {
         .def("ny", &StructuredGrid3D::ny)
         .def("nz", &StructuredGrid3D::nz)
         .def("cell_count", &StructuredGrid3D::cellCount)
+        .def("min", &StructuredGrid3D::min)
+        .def("max", &StructuredGrid3D::max)
         .def("spacing", &StructuredGrid3D::spacing)
         .def("cell_volume", &StructuredGrid3D::cellVolume)
         .def("cell_index", &StructuredGrid3D::cellIndex)

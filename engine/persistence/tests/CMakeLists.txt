@@ -1,0 +1,4 @@
+add_executable(aether_persistence_tests persistence_tests.cpp)
+target_link_libraries(aether_persistence_tests PRIVATE aether_persistence aether_solver aether_testing)
+
+add_test(NAME aether_persistence_tests COMMAND aether_persistence_tests)
