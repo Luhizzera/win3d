@@ -267,6 +267,7 @@ struct UnstructuredPlateResult {
     double maxNonOrthogonality;
     std::size_t cellCount;
     std::size_t iterations;
+    double outerChange;
 };
 
 UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
@@ -299,7 +300,7 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
     }
 
     return {std::sqrt(weightedSquaredError / totalVolume), solver.maxNonOrthogonality(), mesh.cellCount(),
-            iterations};
+            iterations, solver.lastOuterChange()};
 }
 
 // **The gate for ROADMAP Fase 2.** Two things are checked, and the second
@@ -328,9 +329,11 @@ void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
         if (previousError > 0.0) {
             order = std::log(previousError / result.rmsError) / std::log(previousH / h);
         }
-        std::printf("    n=%zu  celulas=%5zu  rmsErro=%9.5f  ordem=%5.2f  naoOrtog.max=%.3f  varreduras=%zu\n",
-                    n, result.cellCount, result.rmsError, order, result.maxNonOrthogonality,
-                    result.iterations);
+        std::printf(
+            "    n=%zu  celulas=%5zu  rmsErro=%9.5f  ordem=%5.2f  naoOrtog.max=%.3f  varreduras=%2zu  "
+            "mudancaExterna=%.2e\n",
+            n, result.cellCount, result.rmsError, order, result.maxNonOrthogonality, result.iterations,
+            result.outerChange);
         std::fflush(stdout);
 
         if (previousError > 0.0) {
@@ -347,26 +350,35 @@ void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
     AETHER_CHECK(sawConvergence);
 
     // Absolute accuracy at the finest resolution, bound set from the measured
-    // 0.895 with margin, on a 0-100 temperature scale.
+    // 0.522 with margin, on a 0-100 temperature scale.
     //
-    // **Honest status of this gate.** The error demonstrably converges
-    // (1.604 -> 1.056 -> 0.895 for n = 4/6/8), which it did *not* before the
-    // non-orthogonal correction was added -- that version plateaued at ~2.36.
-    // But the observed order is ~1.0 then ~0.6, not the 2 a well-built
-    // finite-volume scheme should reach, and the order is drifting down
-    // rather than settling. Known suspects, in order of likelihood:
-    //   1. The Green-Gauss gradient is only first-order accurate on a skewed
-    //      mesh; a least-squares gradient is the standard second-order fix.
-    //   2. The face value is a plain 0.5 average, but on a skewed mesh the
-    //      face centroid is not the midpoint of the two cell centroids.
-    //   3. maxNonOrthogonality is ~1.5 on these meshes, so the corrected term
-    //      is large and its own error is not negligible.
-    //   4. The three meshes are not a strictly self-similar family (the jitter
-    //      amplitude scales with the lattice step), which makes the measured
-    //      order noisier than a clean refinement study would give.
-    // Recorded rather than papered over: this test asserts what is true
-    // (monotone convergence to sub-1.0 rms error), not second order.
-    AETHER_CHECK(finestError < 1.5);
+    // **Honest status of this gate: partially met, and worth stating exactly
+    // which part.** Three versions were measured, each answering the previous
+    // one's open question rather than being assumed:
+    //
+    //   orthogonal only        2.879 -> 2.433 -> 2.365   order 0.42, 0.10
+    //   + non-orth. correction 1.604 -> 1.056 -> 0.895   order 1.03, 0.58
+    //   + least-squares grad.  0.999 -> 0.691 -> 0.522   order 0.91, 0.98
+    //
+    // The first plateaued outright. The second converged but with the order
+    // drifting *down*, suggesting another floor ahead. The third converges
+    // cleanly and, crucially, with a **stable** order that is no longer
+    // degrading -- which is what says the remaining error is honest
+    // discretization error rather than a neglected term.
+    //
+    // It is nonetheless ~1, not the 2 a fully second-order scheme reaches.
+    // The outer deferred-correction loop is not the cause: its final change
+    // measures 1e-5..1e-8, negligible beside a 0.52 discretization error (it
+    // stops at the sweep cap only because the tolerance asked of it is far
+    // tighter than needed). The remaining first-order term is the **face
+    // interpolation**: both the face value and the face gradient are plain
+    // 0.5 averages, but on a skewed mesh the face centroid is not the
+    // midpoint of the segment joining the two cell centroids, and correcting
+    // for that offset is the standard remaining ingredient for second order.
+    //
+    // So this test asserts what is true -- monotone convergence at a stable
+    // first-order rate to sub-0.6 rms error -- and not second order.
+    AETHER_CHECK(finestError < 0.8);
 }
 
 // Steady 2D Laplace conduction on a plate with three sides at 0 and the

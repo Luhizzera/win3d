@@ -70,9 +70,119 @@ void UnstructuredDiffusionSolver::rebuildCoefficients() {
         diagonal_[face.owner] += coefficient;
         diagonal_[face.neighbour] += coefficient;
     }
+
+    buildGradientStencils();
+}
+
+void UnstructuredDiffusionSolver::buildGradientStencils() {
+    const std::size_t n = mesh_->cellCount();
+    gradientStencil_.assign(n, {});
+    gradientMatrixInverse_.assign(n, {});
+
+    // Accumulate the symmetric normal-equation matrix M = sum_i w_i d_i (x) d_i
+    // per cell, alongside the stencil entries the right-hand side needs.
+    struct Sym {
+        double xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+    };
+    std::vector<Sym> matrices(n);
+
+    const auto accumulate = [](Sym& m, const Vector3& d, double w) {
+        m.xx += w * d.x * d.x;
+        m.xy += w * d.x * d.y;
+        m.xz += w * d.x * d.z;
+        m.yy += w * d.y * d.y;
+        m.yz += w * d.y * d.z;
+        m.zz += w * d.z * d.z;
+    };
+
+    for (std::size_t f = 0; f < mesh_->faceCount(); ++f) {
+        const auto& face = mesh_->face(f);
+        if (mesh_->isBoundaryFace(f)) {
+            // Only a Dirichlet face carries information about the gradient;
+            // an insulated one asserts the normal derivative is zero, which
+            // this least-squares fit would misread as "the value there
+            // equals the cell value", biasing the tangential components too.
+            if (!boundaryIsDirichlet_[f]) {
+                continue;
+            }
+            const Vector3 d = face.centroid - mesh_->cellCentroid(face.owner);
+            const double lengthSquared = d.normSquared();
+            if (lengthSquared == 0.0) {
+                continue;
+            }
+            const double w = 1.0 / lengthSquared;
+            gradientStencil_[face.owner].push_back({kBoundaryStencil, boundaryValue_[f], d * w});
+            accumulate(matrices[face.owner], d, w);
+            continue;
+        }
+
+        const Vector3 d = mesh_->cellCentroid(face.neighbour) - mesh_->cellCentroid(face.owner);
+        const double lengthSquared = d.normSquared();
+        if (lengthSquared == 0.0) {
+            continue;
+        }
+        const double w = 1.0 / lengthSquared;
+        gradientStencil_[face.owner].push_back({face.neighbour, 0.0, d * w});
+        gradientStencil_[face.neighbour].push_back({face.owner, 0.0, -d * w});
+        // (-d) (x) (-d) == d (x) d, so both cells accumulate the same term.
+        accumulate(matrices[face.owner], d, w);
+        accumulate(matrices[face.neighbour], d, w);
+    }
+
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        const Sym& m = matrices[cell];
+        // Cofactors of a symmetric 3x3.
+        const double c11 = m.yy * m.zz - m.yz * m.yz;
+        const double c12 = m.xz * m.yz - m.xy * m.zz;
+        const double c13 = m.xy * m.yz - m.yy * m.xz;
+        const double det = m.xx * c11 + m.xy * c12 + m.xz * c13;
+
+        // Rank-deficient when the neighbour directions are too close to
+        // coplanar to pin all three components -- scaled by the matrix's own
+        // magnitude so the test is dimensionless rather than an absolute
+        // threshold that would depend on the mesh's units.
+        const double scale = m.xx + m.yy + m.zz;
+        if (scale <= 0.0 || std::fabs(det) < 1e-12 * scale * scale * scale) {
+            gradientMatrixInverse_[cell].valid = false;
+            continue;
+        }
+
+        const double inverseDet = 1.0 / det;
+        SymmetricInverse& inverse = gradientMatrixInverse_[cell];
+        inverse.xx = c11 * inverseDet;
+        inverse.xy = c12 * inverseDet;
+        inverse.xz = c13 * inverseDet;
+        inverse.yy = (m.xx * m.zz - m.xz * m.xz) * inverseDet;
+        inverse.yz = (m.xy * m.xz - m.xx * m.yz) * inverseDet;
+        inverse.zz = (m.xx * m.yy - m.xy * m.xy) * inverseDet;
+        inverse.valid = true;
+    }
 }
 
 std::vector<Vector3> UnstructuredDiffusionSolver::computeGradients(const std::vector<double>& phi) const {
+    std::vector<Vector3> gradients(phi.size());
+    std::vector<Vector3> fallback;
+    for (std::size_t cell = 0; cell < phi.size(); ++cell) {
+        if (!gradientMatrixInverse_[cell].valid) {
+            if (fallback.empty()) {
+                fallback = computeGradientsGreenGauss(phi);
+            }
+            gradients[cell] = fallback[cell];
+            continue;
+        }
+        Vector3 rhs;
+        for (const GradientStencilEntry& entry : gradientStencil_[cell]) {
+            const double neighbourValue =
+                entry.neighbour == kBoundaryStencil ? entry.boundaryValue : phi[entry.neighbour];
+            rhs += entry.weightedDelta * (neighbourValue - phi[cell]);
+        }
+        gradients[cell] = gradientMatrixInverse_[cell].apply(rhs);
+    }
+    return gradients;
+}
+
+std::vector<Vector3> UnstructuredDiffusionSolver::computeGradientsGreenGauss(
+    const std::vector<double>& phi) const {
     // Green-Gauss: grad(phi)_P = (1/V_P) * sum_f phi_f A_f_out. The face
     // value is a plain average for interior faces, the prescribed value on a
     // Dirichlet face, and phi_P itself on an insulated face (zero gradient
@@ -226,6 +336,7 @@ std::size_t UnstructuredDiffusionSolver::solveConjugateGradient(std::size_t maxI
         for (std::size_t i = 0; i < n; ++i) {
             maxChange = std::max(maxChange, std::fabs(phi_[i] - previousPhi[i]));
         }
+        lastOuterChange_ = maxChange;
         if (maxChange < tolerance) {
             break;
         }

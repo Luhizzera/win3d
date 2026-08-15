@@ -208,21 +208,44 @@ Green-Gauss, termo explícito no lado direito, matriz segue SPD):
 | 6 | 1,056 | 1,03 |
 | 8 | **0,895** | 0,58 |
 
-Erro ~2,6× menor e **convergindo de verdade**. Mas a ordem observada é ~1,0
-caindo para ~0,6, não os 2 que um FVM bem construído deve atingir.
-Suspeitos, em ordem de probabilidade:
-1. O gradiente Green-Gauss é só de primeira ordem em malha distorcida; um
-   gradiente por mínimos quadrados é a correção padrão para segunda ordem.
-2. O valor de face é média simples 0,5, mas em malha distorcida o centroide
-   da face não é o ponto médio entre os centroides das células.
-3. Não-ortogonalidade ~1,5 é alta, então o próprio termo corrigido é grande
-   e seu erro não é desprezível.
-4. As três malhas não formam família estritamente auto-similar (a amplitude
-   do jitter escala com o passo), o que deixa a ordem medida mais ruidosa.
+Erro ~2,6× menor e convergindo, mas com a ordem **caindo** (1,03 → 0,58) —
+sinal de outro piso adiante. O suspeito principal era o gradiente
+Green-Gauss, que só tem primeira ordem em malha distorcida. Trocado por
+mínimos quadrados ponderados por 1/|d|² (matriz normal 3×3 pré-computada por
+célula, com Green-Gauss de reserva para as raras células de estêncil
+deficiente):
 
-**O que falta para fechar 2.2**: gradiente por mínimos quadrados (suspeito 1,
-o mais provável) e uma família de malhas auto-similar para medir a ordem sem
-ruído. Registrado como parcial em vez de declarado cumprido.
+| n | rmsErro (mín. quadrados) | ordem |
+|---|---|---|
+| 4 | 0,999 | — |
+| 6 | 0,691 | 0,91 |
+| 8 | **0,522** | **0,98** |
+
+Erro mais 1,7× menor e — o que mais importa — a ordem agora é **estável em
+~0,95** em vez de degradar. Isso é o que diz que o erro restante é
+discretização honesta, não termo negligenciado.
+
+**Resumo das três versões medidas**, cada uma respondendo a pergunta aberta
+pela anterior em vez de ser assumida:
+
+| versão | n=4 | n=6 | n=8 | ordem |
+|---|---|---|---|---|
+| só ortogonal | 2,879 | 2,433 | 2,365 | 0,42 → 0,10 |
+| + correção não-ortogonal | 1,604 | 1,056 | 0,895 | 1,03 → 0,58 |
+| + gradiente mín. quadrados | 0,999 | 0,691 | **0,522** | 0,91 → **0,98** |
+
+**Ainda é ~1, não 2.** O laço externo de correção diferida foi descartado
+como causa: sua mudança final mede 1e-5 a 1e-8, desprezível frente ao erro de
+discretização de 0,52 (ele para no teto de varreduras só porque a tolerância
+pedida é bem mais estrita que o necessário). O termo de primeira ordem
+restante é a **interpolação de face**: tanto o valor quanto o gradiente na
+face são médias simples 0,5, mas em malha distorcida o centroide da face não
+é o ponto médio do segmento entre os centroides das células. Corrigir esse
+desvio (skewness correction) é o ingrediente padrão que falta para segunda
+ordem.
+
+**O que falta para fechar 2.2**: correção de skewness na interpolação de
+face. Registrado como parcial em vez de declarado cumprido.
 
 ---
 

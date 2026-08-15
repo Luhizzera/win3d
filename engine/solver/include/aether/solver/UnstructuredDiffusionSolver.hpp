@@ -84,10 +84,17 @@ public:
     std::size_t solveConjugateGradient(std::size_t maxIterations = 20000, double tolerance = 1e-10,
                                         std::size_t maxOuterSweeps = 50);
 
-    // Green-Gauss gradient at each cell from the current solution. Exposed
-    // because it is the quantity the non-orthogonal correction is built
-    // from, so a caller checking this class's accuracy can inspect it.
+    // Gradient at each cell from the current solution. Exposed because it is
+    // the quantity the non-orthogonal correction is built from, so a caller
+    // checking this class's accuracy can inspect it.
     std::vector<core::Vector3> cellGradients() const;
+
+    // Largest per-cell change across the final outer sweep. The number that
+    // says whether the deferred-correction loop actually converged or merely
+    // ran out of sweeps -- without it, a solve that stopped at the iteration
+    // cap is indistinguishable from one that settled, and the two mean very
+    // different things about the result.
+    double lastOuterChange() const { return lastOuterChange_; }
 
     double value(std::size_t cell) const { return phi_.at(cell); }
     std::size_t cellCount() const { return phi_.size(); }
@@ -103,11 +110,43 @@ private:
     std::vector<double> applyOperator(const std::vector<double>& x) const;
     static double dot(const std::vector<double>& a, const std::vector<double>& b);
     void rebuildCoefficients();
+    void buildGradientStencils();
 
     // The non-orthogonal flux the implicit part cannot represent, evaluated
     // from the previous iterate and accumulated per cell.
     std::vector<double> nonOrthogonalCorrection(const std::vector<double>& phi) const;
+
+    // Green-Gauss: cheap, but only first-order accurate on a skewed mesh --
+    // kept as the fallback for the rare cell whose least-squares stencil is
+    // rank-deficient (too few, or nearly coplanar, neighbours).
+    std::vector<core::Vector3> computeGradientsGreenGauss(const std::vector<double>& phi) const;
+
+    // Inverse-distance-weighted least squares: fits the gradient that best
+    // reproduces the measured differences to every neighbour, minimising
+    // sum_i w_i (grad(phi)_P . d_i - (phi_i - phi_P))^2 with w_i = 1/|d_i|^2.
+    // Unlike Green-Gauss it stays second-order on a skewed mesh, which is
+    // why it exists here: the Green-Gauss version's convergence order
+    // stalled around 0.6-1.0 instead of reaching 2.
     std::vector<core::Vector3> computeGradients(const std::vector<double>& phi) const;
+
+    struct GradientStencilEntry {
+        std::size_t neighbour; // kBoundaryStencil when the "neighbour" is a Dirichlet face
+        double boundaryValue;
+        core::Vector3 weightedDelta; // w_i * d_i
+    };
+    static constexpr std::size_t kBoundaryStencil = static_cast<std::size_t>(-1);
+
+    // Inverse of the symmetric 3x3 normal-equation matrix, stored as its six
+    // unique components (xx, xy, xz, yy, yz, zz). Geometry only, so it is
+    // built once alongside the face coefficients.
+    struct SymmetricInverse {
+        double xx = 0.0, xy = 0.0, xz = 0.0, yy = 0.0, yz = 0.0, zz = 0.0;
+        bool valid = false; // false => stencil was rank-deficient, use Green-Gauss for this cell
+        core::Vector3 apply(const core::Vector3& v) const {
+            return {xx * v.x + xy * v.y + xz * v.z, xy * v.x + yy * v.y + yz * v.z,
+                    xz * v.x + yz * v.y + zz * v.z};
+        }
+    };
 
     struct InteriorFace {
         std::size_t owner;
@@ -131,6 +170,9 @@ private:
     std::vector<double> boundaryValue_;
     std::vector<double> diagonal_;
     std::vector<double> phi_;
+    double lastOuterChange_ = 0.0;
+    std::vector<std::vector<GradientStencilEntry>> gradientStencil_;
+    std::vector<SymmetricInverse> gradientMatrixInverse_;
 };
 
 } // namespace aether::solver
