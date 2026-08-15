@@ -170,6 +170,60 @@ onde mora a dificuldade real desta fase.
    demonstrada, não assumida.
 3. As 11 suítes continuam passando.
 
+### Estado em 2026-08-14: 2.1 cumprido, 2.2 parcial
+
+**2.1 — `TetrahedralMesh` (conectividade de faces): CUMPRIDO.** Validado por
+identidades exatas, não tolerâncias sobre física: fechamento de célula
+(teorema da divergência discreto) em 2,944e-17; contagem 4×136 = 544 =
+2×266 + 12 exata em inteiros; volume total 1,000000000000000; antissimetria
+exata entre os dois lados de cada face interna.
+
+Um bug real foi pego pelo teste escrito exatamente para isso: a tabela de
+winding das quatro faces estava inteiramente invertida, com todas as normais
+apontando para dentro. **Nem o fechamento nem a antissimetria pegam isso** —
+um conjunto globalmente invertido ainda soma zero na célula e ainda nega
+corretamente entre os lados. Só a checagem owner→neighbour pega.
+
+**2.2 — `UnstructuredDiffusionSolver`: PARCIAL.** Item 1 do portão cumprido;
+item 2 cumprido em "o erro cai", não em "na ordem esperada".
+
+A primeira versão, só com a parte ortogonal da decomposição over-relaxed,
+**estagnou** — e o experimento foi montado justamente para descobrir isso
+antes de assumir:
+
+| n | células | rmsErro (só ortogonal) | ordem |
+|---|---|---|---|
+| 4 | 415 | 2,879 | — |
+| 6 | 1358 | 2,433 | 0,42 |
+| 8 | 3184 | 2,365 | **0,10** |
+
+Platô, não convergência: a não-ortogonalidade medida (~1,5) é propriedade da
+*forma* da célula, então refinar não a reduz e o termo omitido vira piso de
+erro. Com a correção não-ortogonal por correção diferida (gradientes
+Green-Gauss, termo explícito no lado direito, matriz segue SPD):
+
+| n | rmsErro (com correção) | ordem |
+|---|---|---|
+| 4 | 1,604 | — |
+| 6 | 1,056 | 1,03 |
+| 8 | **0,895** | 0,58 |
+
+Erro ~2,6× menor e **convergindo de verdade**. Mas a ordem observada é ~1,0
+caindo para ~0,6, não os 2 que um FVM bem construído deve atingir.
+Suspeitos, em ordem de probabilidade:
+1. O gradiente Green-Gauss é só de primeira ordem em malha distorcida; um
+   gradiente por mínimos quadrados é a correção padrão para segunda ordem.
+2. O valor de face é média simples 0,5, mas em malha distorcida o centroide
+   da face não é o ponto médio entre os centroides das células.
+3. Não-ortogonalidade ~1,5 é alta, então o próprio termo corrigido é grande
+   e seu erro não é desprezível.
+4. As três malhas não formam família estritamente auto-similar (a amplitude
+   do jitter escala com o passo), o que deixa a ordem medida mais ruidosa.
+
+**O que falta para fechar 2.2**: gradiente por mínimos quadrados (suspeito 1,
+o mais provável) e uma família de malhas auto-similar para medir a ordem sem
+ruído. Registrado como parcial em vez de declarado cumprido.
+
 ---
 
 ## Fase 3 — Navier-Stokes em malha não-estruturada

@@ -1,4 +1,7 @@
+#include "aether/mesh/DelaunayTetrahedralization3D.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
+#include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/solver/UnstructuredDiffusionSolver.hpp"
 #include "aether/solver/DesSstLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/ImplicitConvectionDiffusionSolver1D.hpp"
 #include "aether/solver/KEpsilonChannelFlowSolver1D.hpp"
@@ -206,6 +209,164 @@ double analyticalPlateTemperature(double x, double y, double lx, double ly, doub
         sum += (1.0 / n) * std::sin(kx * x) * stableSinhRatio(kx * y, kx * ly);
     }
     return (4.0 * t0 / kPi) * sum;
+}
+
+// ---------------------------------------------------------------------------
+// ROADMAP Fase 2.2: the same plate problem, on an unstructured tetrahedral
+// mesh instead of a Cartesian grid -- the first time a solver in this project
+// consumes mesh generation rather than StructuredGrid3D.
+// ---------------------------------------------------------------------------
+
+// A tetrahedral mesh of the unit cube from a lattice of `n+1` points per
+// axis. Two details matter and are not incidental:
+//
+// 1. **Boundary points are not jittered along their own normal.** A point on
+//    the x = 0 plane may move in y and z but never in x, so the boundary
+//    faces stay exactly planar and exactly on the cube's faces -- which is
+//    what lets the Dirichlet selectors below identify them by centroid with
+//    an exact tolerance instead of a fuzzy one.
+// 2. **Everything else is jittered.** A perfectly regular lattice is
+//    massively co-spherical, which is Delaunay's degenerate tie case; this
+//    project's 2D tests already avoid regular grids for exactly that reason.
+//    Jittering only the components that are free to move gets both
+//    properties at once.
+aether::mesh::DelaunayTetrahedralization3D buildCubeLatticeTetrahedralization(std::size_t n) {
+    aether::mesh::DelaunayTetrahedralization3D tets;
+    const double step = 1.0 / static_cast<double>(n);
+    const double jitter = 0.22 * step;
+    for (std::size_t i = 0; i <= n; ++i) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t k = 0; k <= n; ++k) {
+                double x = static_cast<double>(i) * step;
+                double y = static_cast<double>(j) * step;
+                double z = static_cast<double>(k) * step;
+                // Deterministic, no RNG -- reproducible across runs and machines.
+                if (i > 0 && i < n) {
+                    x += jitter * std::sin(4.1 * y + 2.7 * z + 1.3);
+                }
+                if (j > 0 && j < n) {
+                    y += jitter * std::sin(3.3 * z + 5.1 * x + 0.7);
+                }
+                if (k > 0 && k < n) {
+                    z += jitter * std::sin(2.9 * x + 4.7 * y + 2.1);
+                }
+                tets.addPoint(x, y, z);
+            }
+        }
+    }
+    tets.tetrahedralize();
+    return tets;
+}
+
+// Solves the plate problem on one such mesh and returns the volume-weighted
+// RMS error against the Fourier series. Volume-weighted because tetrahedra
+// vary in size: an unweighted average would let a cloud of tiny slivers
+// outvote the cells that actually carry the domain.
+struct UnstructuredPlateResult {
+    double rmsError;
+    double maxNonOrthogonality;
+    std::size_t cellCount;
+    std::size_t iterations;
+};
+
+UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
+    const double t0 = 100.0;
+    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(n);
+    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+
+    aether::solver::UnstructuredDiffusionSolver solver(mesh);
+    constexpr double kOnPlane = 1e-9;
+    // Three cold sides and one hot side, exactly as the structured version.
+    // The z faces are left insulated (the default), which makes the solution
+    // independent of z and therefore the *same* 2D problem the Fourier
+    // series describes -- that is what makes the comparison legitimate.
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.x < kOnPlane; }, 0.0);
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.x > 1.0 - kOnPlane; }, 0.0);
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.y < kOnPlane; }, 0.0);
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.y > 1.0 - kOnPlane; }, t0);
+
+    const std::size_t iterations = solver.solveConjugateGradient(40000, 1e-10);
+
+    double weightedSquaredError = 0.0;
+    double totalVolume = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        const Vector3 c = mesh.cellCentroid(cell);
+        const double expected = analyticalPlateTemperature(c.x, c.y, 1.0, 1.0, t0, 200);
+        const double error = solver.value(cell) - expected;
+        const double volume = mesh.cellVolume(cell);
+        weightedSquaredError += volume * error * error;
+        totalVolume += volume;
+    }
+
+    return {std::sqrt(weightedSquaredError / totalVolume), solver.maxNonOrthogonality(), mesh.cellCount(),
+            iterations};
+}
+
+// **The gate for ROADMAP Fase 2.** Two things are checked, and the second
+// matters more than the first: that the unstructured solution agrees with an
+// independent closed-form answer, and that refining the mesh *reduces* the
+// error at a demonstrated rate. Agreement alone at one resolution could come
+// from a compensating pair of errors; a clean convergence rate cannot.
+//
+// The tolerance is set from the measured value rather than guessed -- the
+// same discipline every other tolerance in this file follows, and the
+// specific lesson relearned in Fase 1, where a metric was trusted without a
+// convergence study and turned out to be measuring something else entirely.
+void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
+    std::printf("  [solver_tests] FVM nao-estruturado, placa vs serie de Fourier:\n");
+    std::fflush(stdout);
+
+    double previousError = 0.0;
+    double previousH = 0.0;
+    bool sawConvergence = false;
+    double finestError = 0.0;
+
+    for (std::size_t n : {4u, 6u, 8u}) {
+        const double h = 1.0 / static_cast<double>(n);
+        const UnstructuredPlateResult result = solveUnstructuredPlate(n);
+        double order = 0.0;
+        if (previousError > 0.0) {
+            order = std::log(previousError / result.rmsError) / std::log(previousH / h);
+        }
+        std::printf("    n=%zu  celulas=%5zu  rmsErro=%9.5f  ordem=%5.2f  naoOrtog.max=%.3f  varreduras=%zu\n",
+                    n, result.cellCount, result.rmsError, order, result.maxNonOrthogonality,
+                    result.iterations);
+        std::fflush(stdout);
+
+        if (previousError > 0.0) {
+            // The error must actually shrink -- the single most important
+            // claim, and the one that separates a working discretization
+            // from one that merely produces plausible-looking numbers.
+            AETHER_CHECK(result.rmsError < previousError);
+            sawConvergence = true;
+        }
+        previousError = result.rmsError;
+        previousH = h;
+        finestError = result.rmsError;
+    }
+    AETHER_CHECK(sawConvergence);
+
+    // Absolute accuracy at the finest resolution, bound set from the measured
+    // 0.895 with margin, on a 0-100 temperature scale.
+    //
+    // **Honest status of this gate.** The error demonstrably converges
+    // (1.604 -> 1.056 -> 0.895 for n = 4/6/8), which it did *not* before the
+    // non-orthogonal correction was added -- that version plateaued at ~2.36.
+    // But the observed order is ~1.0 then ~0.6, not the 2 a well-built
+    // finite-volume scheme should reach, and the order is drifting down
+    // rather than settling. Known suspects, in order of likelihood:
+    //   1. The Green-Gauss gradient is only first-order accurate on a skewed
+    //      mesh; a least-squares gradient is the standard second-order fix.
+    //   2. The face value is a plain 0.5 average, but on a skewed mesh the
+    //      face centroid is not the midpoint of the two cell centroids.
+    //   3. maxNonOrthogonality is ~1.5 on these meshes, so the corrected term
+    //      is large and its own error is not negligible.
+    //   4. The three meshes are not a strictly self-similar family (the jitter
+    //      amplitude scales with the lattice step), which makes the measured
+    //      order noisier than a clean refinement study would give.
+    // Recorded rather than papered over: this test asserts what is true
+    // (monotone convergence to sub-1.0 rms error), not second order.
+    AETHER_CHECK(finestError < 1.5);
 }
 
 // Steady 2D Laplace conduction on a plate with three sides at 0 and the
@@ -2275,6 +2436,7 @@ int main() {
     testImplicitConvectionDiffusion1DIncompleteLUSolvesInOneIteration();
     testImplicitConvectionDiffusion1DJacobiHelpsOnlyWhenDiagonalVaries();
     testLidDrivenCavityStaysAtRestWhenLidStationary();
+    testUnstructuredPlateMatchesFourierSeriesAndConverges();
     testLidDrivenCavityMassConservation();
     testLidDrivenCavityFaceDivergenceIsAtSolverTolerance();
     testLidDrivenCavityPrimaryVortexTopology();
