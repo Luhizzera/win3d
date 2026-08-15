@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    # windows-latest, not ubuntu: apps/common and apps/unified_viewer are Win32
+    # + OpenGL (windows.h, wglCreateContext, opengl32), so a Linux runner cannot
+    # build the whole project. Every engine/ library is portable C++ and would
+    # build on Linux, but validating that would need a "skip apps" option that
+    # does not exist yet -- noted as follow-up rather than half-done here.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Installing pybind11 means CI also compiles the six binding modules,
+      # which are otherwise never exercised by ctest. Without it CMake would
+      # silently skip bindings/python and the build would still pass -- real
+      # coverage lost for one cheap step.
+      - name: Install pybind11
+        run: python -m pip install --upgrade pip pybind11
+
+      - name: Configure
+        run: |
+          $cmakeDir = python -m pybind11 --cmakedir
+          cmake -S . -B build -Dpybind11_DIR="$cmakeDir"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      # --no-tests=error is the point of this step, not a detail: without it,
+      # a configuration that silently stops registering tests reports success
+      # with zero tests run. This project already lost weeks of "passing" test
+      # runs to exactly that class of bug once (every assert() was a no-op
+      # under NDEBUG in Release builds), so a green CI that ran nothing is a
+      # failure mode worth spending one flag to make impossible.
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+
+      # engine/gpu is skipped on CI (no CUDA Toolkit on the runner -- the root
+      # CMakeLists' check_language(CUDA) guard handles that by design), so
+      # aether_gpu_tests does not run here and still depends on a local run.
+      # Printed rather than assumed, so the gap is visible in every log.
+      - name: Report which suites ran
+        if: always()
+        run: ctest --test-dir build -C Release --show-only=json-v1 | python -c "import json,sys; d=json.load(sys.stdin); names=[t['name'] for t in d['tests']]; print(f'{len(names)} suites registradas:'); [print(' -', n) for n in names]"
