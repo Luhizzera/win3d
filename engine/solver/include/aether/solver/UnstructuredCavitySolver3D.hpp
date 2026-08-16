@@ -54,8 +54,20 @@ public:
     // velocity on the moving one. Passing it as a function keeps the class
     // free of any assumption that the domain is a cube: the same solver runs
     // on an STL-derived mesh by selecting different faces.
-    UnstructuredCavitySolver3D(const mesh::TetrahedralMesh& mesh, double viscosity,
-                                std::function<core::Vector3(const core::Vector3&)> wallVelocity);
+    // `isOutlet` marks boundary faces where fluid may *leave* the domain.
+    // Without it every boundary is a solid wall: no mass can cross any
+    // boundary face, which is fine for a closed cavity and structurally
+    // impossible for external flow. An outlet face instead carries a
+    // prescribed pressure (Dirichlet, so it enters the Poisson operator's
+    // diagonal and right-hand side) and a zero-gradient velocity, letting
+    // the projection push mass out through it.
+    //
+    // An *inlet* needs nothing new: it is a wall with a non-zero prescribed
+    // velocity, which `wallVelocity` already expresses.
+    UnstructuredCavitySolver3D(
+        const mesh::TetrahedralMesh& mesh, double viscosity,
+        std::function<core::Vector3(const core::Vector3&)> wallVelocity,
+        std::function<bool(const core::Vector3&)> isOutlet = {}, double outletPressure = 0.0);
 
     void step(double dt);
 
@@ -75,7 +87,15 @@ public:
 
     // Largest |sum of face mass fluxes| / cellVolume. The quantity the
     // projection actually drives to zero -- see the class comment.
+    // Includes outlet faces, which do carry flux.
     double maxFaceDivergence() const;
+
+    // Net mass flux through every non-wall boundary face: negative where
+    // fluid enters, positive where it leaves. For a steady incompressible
+    // flow the two must cancel, which is the global check that outlets
+    // actually work -- a per-cell divergence can be zero everywhere while
+    // the domain as a whole still gains or loses mass.
+    double netBoundaryFlux() const;
 
 private:
     struct InteriorFace {
@@ -96,6 +116,7 @@ private:
         core::Vector3 wallVelocity;
         double laplacianCoefficient; // for the viscous wall flux
         double distance;
+        bool isOutlet = false;
     };
 
     void buildFaces();
@@ -113,10 +134,13 @@ private:
     // Conjugate Gradient applies unchanged.
     std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt) const;
     std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt) const;
+    double boundaryMassFlux(const BoundaryFace& face) const;
 
     const mesh::TetrahedralMesh* mesh_;
     double viscosity_;
     std::function<core::Vector3(const core::Vector3&)> wallVelocity_;
+    std::function<bool(const core::Vector3&)> isOutlet_;
+    double outletPressure_ = 0.0;
 
     std::vector<InteriorFace> interiorFaces_;
     std::vector<BoundaryFace> boundaryFaces_;
@@ -142,6 +166,7 @@ private:
     double time_ = 0.0;
     double lastDt_ = 0.0;
     double maxWallSpeed_ = 0.0;
+    bool hasOutlet_ = false;
 };
 
 } // namespace aether::solver

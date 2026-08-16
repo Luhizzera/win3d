@@ -11,11 +11,19 @@ using mesh::TetrahedralMesh;
 
 UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     const TetrahedralMesh& mesh, double viscosity,
-    std::function<Vector3(const Vector3&)> wallVelocity)
-    : mesh_(&mesh), viscosity_(viscosity), wallVelocity_(std::move(wallVelocity)) {
+    std::function<Vector3(const Vector3&)> wallVelocity,
+    std::function<bool(const Vector3&)> isOutlet, double outletPressure)
+    : mesh_(&mesh), viscosity_(viscosity), wallVelocity_(std::move(wallVelocity)),
+      isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure) {
     velocity_.assign(mesh.cellCount(), Vector3{});
     pressure_.assign(mesh.cellCount(), 0.0);
     buildFaces();
+    for (const BoundaryFace& face : boundaryFaces_) {
+        if (face.isOutlet) {
+            hasOutlet_ = true;
+            break;
+        }
+    }
     buildGradientStencils();
 }
 
@@ -38,12 +46,18 @@ void UnstructuredCavitySolver3D::buildFaces() {
             boundary.wallVelocity = wallVelocity_(face.centroid);
             boundary.laplacianCoefficient = face.areaVector.normSquared() / areaDotD;
             boundary.distance = d.norm();
+            boundary.isOutlet = isOutlet_ && isOutlet_(face.centroid);
             maxWallSpeed_ = std::max(maxWallSpeed_, boundary.wallVelocity.norm());
+            if (boundary.isOutlet) {
+                // Pressure is prescribed here, so unlike a wall this face DOES
+                // enter the Poisson operator -- and it is what makes the
+                // operator non-singular without pinning a reference cell.
+                poissonDiagonal_[face.owner] += boundary.laplacianCoefficient;
+            }
             boundaryFaces_.push_back(boundary);
-            // No pressure coefficient: the pressure boundary condition is
-            // zero-gradient at a solid wall, so a boundary face contributes
-            // nothing to the Poisson operator -- exactly as the structured
-            // cavity solvers treat their walls.
+            // A solid wall contributes nothing to the Poisson operator: the
+            // pressure condition there is zero-gradient, exactly as the
+            // structured cavity solvers treat their walls.
             continue;
         }
 
@@ -195,15 +209,19 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
 std::vector<double> UnstructuredCavitySolver3D::applyPoissonOperator(const std::vector<double>& x) const {
     // Same operator Fase 2.2 validated, with cell 0 pinned to remove the
     // pure-Neumann null space (every boundary here is a solid wall).
+    // Cell 0 is pinned ONLY when every boundary is a wall. With an outlet
+    // the prescribed pressure already fixes the level, and pinning as well
+    // would over-constrain the system -- two incompatible references.
+    const bool pinReference = !hasOutlet_;
     std::vector<double> result(x.size());
     for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = cell == 0 ? x[cell] : poissonDiagonal_[cell] * x[cell];
+        result[cell] = (pinReference && cell == 0) ? x[cell] : poissonDiagonal_[cell] * x[cell];
     }
     for (const InteriorFace& face : interiorFaces_) {
-        if (face.owner != 0) {
+        if (!pinReference || face.owner != 0) {
             result[face.owner] -= face.laplacianCoefficient * x[face.neighbour];
         }
-        if (face.neighbour != 0) {
+        if (!pinReference || face.neighbour != 0) {
             result[face.neighbour] -= face.laplacianCoefficient * x[face.owner];
         }
     }
@@ -219,6 +237,9 @@ std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(const std
     // A wall face stiffens its cell's equation even though the wall value
     // itself is known and belongs on the right-hand side.
     for (const BoundaryFace& face : boundaryFaces_) {
+        if (face.isOutlet) {
+            continue; // zero-gradient: no viscous flux through an outlet
+        }
         result[face.cell] += viscosity_ * face.laplacianCoefficient * x[face.cell];
     }
     for (const InteriorFace& face : interiorFaces_) {
@@ -282,15 +303,26 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
         rhs[interiorFaces_[i].owner] -= starFluxes[i] / dt;
         rhs[interiorFaces_[i].neighbour] += starFluxes[i] / dt;
     }
-    // Solid walls: no flow penetrates, so a boundary face contributes no
-    // mass flux at all.
-    rhs[0] = 0.0;
+    // Boundary contributions: a prescribed-velocity face (wall or inlet)
+    // injects its known flux, and an outlet both carries flux and pins the
+    // pressure level through its Dirichlet coefficient.
+    for (const BoundaryFace& face : boundaryFaces_) {
+        const double flux = face.isOutlet ? velocityStar[face.cell].dot(face.areaVector)
+                                          : face.wallVelocity.dot(face.areaVector);
+        rhs[face.cell] -= flux / dt;
+        if (face.isOutlet) {
+            rhs[face.cell] += face.laplacianCoefficient * outletPressure_;
+        }
+    }
+    if (!hasOutlet_) {
+        rhs[0] = 0.0;
+    }
 
     std::vector<double> residual(n);
     {
         const std::vector<double> applied = applyPoissonOperator(pressure_);
         for (std::size_t i = 0; i < n; ++i) {
-            residual[i] = i == 0 ? 0.0 : rhs[i] - applied[i];
+            residual[i] = (!hasOutlet_ && i == 0) ? 0.0 : rhs[i] - applied[i];
         }
     }
     std::vector<double> direction = residual;
@@ -314,7 +346,7 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
         const double alpha = residualDotResidual / directionDotApplied;
         double newResidualDotResidual = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            if (i != 0) {
+            if (hasOutlet_ || i != 0) {
                 pressure_[i] += alpha * direction[i];
                 residual[i] -= alpha * applied[i];
             }
@@ -322,7 +354,7 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
         }
         const double beta = newResidualDotResidual / residualDotResidual;
         for (std::size_t i = 0; i < n; ++i) {
-            direction[i] = i == 0 ? 0.0 : residual[i] + beta * direction[i];
+            direction[i] = (!hasOutlet_ && i == 0) ? 0.0 : residual[i] + beta * direction[i];
         }
         residualDotResidual = newResidualDotResidual;
     }
@@ -349,6 +381,20 @@ void UnstructuredCavitySolver3D::step(double dt) {
         flux[face.neighbour] += upwind * massFlux;
     }
 
+    // Convective transport across the boundary. Without this, momentum enters
+    // through an inlet and has no way to leave: it accumulates in the outlet
+    // cells until the solution diverges. Found exactly that way -- the channel
+    // case went to NaN while the closed cavity, which has no boundary flux at
+    // all, was unaffected.
+    for (const BoundaryFace& face : boundaryFaces_) {
+        const double massFlux =
+            face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
+        // Upwind as everywhere else: outflow carries the cell value away,
+        // inflow brings the prescribed boundary value in.
+        const Vector3 upwind = massFlux >= 0.0 ? velocity_[face.cell] : face.wallVelocity;
+        flux[face.cell] -= upwind * massFlux;
+    }
+
     // --- Viscous diffusion, **implicit**. Per component,
     //   (V/dt + nu L) u* = (V/dt) (u^n + dt * convection / V) + nu * wall terms
     // so no diffusive stability bound applies at all. The three components
@@ -365,6 +411,9 @@ void UnstructuredCavitySolver3D::step(double dt) {
     // The wall velocity is known, so its viscous flux is a source rather than
     // part of the operator. This is where the lid drives the flow.
     for (const BoundaryFace& face : boundaryFaces_) {
+        if (face.isOutlet) {
+            continue;
+        }
         const double coefficient = viscosity_ * face.laplacianCoefficient;
         component[0][face.cell] += coefficient * face.wallVelocity.x;
         component[1][face.cell] += coefficient * face.wallVelocity.y;
@@ -390,12 +439,35 @@ void UnstructuredCavitySolver3D::step(double dt) {
     time_ += dt;
 }
 
+double UnstructuredCavitySolver3D::boundaryMassFlux(const BoundaryFace& face) const {
+    // A wall passes nothing. An outlet extrapolates the cell velocity with a
+    // zero gradient, which is what lets mass leave.
+    if (!face.isOutlet) {
+        return 0.0;
+    }
+    return velocity_[face.cell].dot(face.areaVector);
+}
+
+double UnstructuredCavitySolver3D::netBoundaryFlux() const {
+    double net = 0.0;
+    for (const BoundaryFace& face : boundaryFaces_) {
+        // Inflow through a prescribed-velocity wall counts too: that is how
+        // an inlet enters the balance.
+        net += face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
+    }
+    return net;
+}
+
 double UnstructuredCavitySolver3D::maxFaceDivergence() const {
     std::vector<double> divergence(velocity_.size(), 0.0);
     const std::vector<double> fluxes = faceMassFluxes(velocity_, pressure_, lastDt_);
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         divergence[interiorFaces_[i].owner] += fluxes[i];
         divergence[interiorFaces_[i].neighbour] -= fluxes[i];
+    }
+    for (const BoundaryFace& face : boundaryFaces_) {
+        divergence[face.cell] +=
+            face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
     }
     double worst = 0.0;
     for (std::size_t cell = 0; cell < divergence.size(); ++cell) {

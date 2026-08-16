@@ -338,6 +338,65 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
 // project's standing practice for the cavity: it is a consequence of
 // conservation that any correct solver must reproduce, and it needs no
 // literature benchmark table recalled from memory.
+// **The check that outlets actually work**, and the prerequisite the cylinder
+// case was really blocked on. A closed cavity can have zero divergence in
+// every cell while the domain as a whole is sealed; external flow needs mass
+// to cross the boundary, which was structurally impossible before an outlet
+// existed.
+//
+// Straight channel: fluid enters at x = 0 with a prescribed velocity, leaves
+// at x = 1 through a pressure outlet, solid walls elsewhere. The claim is
+// global, not local -- for a steady incompressible flow whatever enters must
+// leave, so the net boundary flux has to vanish. That is a conservation
+// statement no scheme can satisfy by accident, and it is exactly what a
+// sealed domain cannot do at all.
+void testChannelWithOutletConservesGlobalMass() {
+    const double inletSpeed = 1.0;
+    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(3);
+    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+
+    aether::solver::UnstructuredCavitySolver3D solver(
+        mesh, 0.1,
+        [&](const Vector3& p2) {
+            // Inlet on x = 0; every other non-outlet face is a no-slip wall.
+            if (p2.x < 1e-9) {
+                return Vector3{inletSpeed, 0.0, 0.0};
+            }
+            return Vector3{0.0, 0.0, 0.0};
+        },
+        [&](const Vector3& p2) { return p2.x > 1.0 - 1e-9; }, // outlet on x = 1
+        0.0);
+
+    const double dt = solver.stableTimeStep();
+    const auto steps = static_cast<int>(3.0 / dt);
+    for (int st = 0; st < steps; ++st) {
+        solver.step(dt);
+    }
+
+    // Scale the balance by the inflow itself, so "small" means small relative
+    // to the flow being driven, not small in absolute units nobody can judge.
+    double inflow = 0.0;
+    for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+        if (mesh.isBoundaryFace(f) && mesh.face(f).centroid.x < 1e-9) {
+            inflow += std::fabs(mesh.face(f).areaVector.x) * inletSpeed;
+        }
+    }
+    const double net = solver.netBoundaryFlux();
+    std::printf("  [solver_tests] canal com saida: %zu celulas, entrada=%.5f, "
+                "balanco liquido=%+.3e (%.2f%% da entrada)\n",
+                mesh.cellCount(), inflow, net, 100.0 * std::fabs(net) / inflow);
+    std::fflush(stdout);
+
+    AETHER_CHECK(inflow > 0.0);
+    // Mass must actually be leaving: a sealed domain would give exactly the
+    // inflow as the imbalance, so this separates "outlet works" from "outlet
+    // is silently still a wall".
+    AETHER_CHECK(std::fabs(net) < 0.25 * inflow);
+    // And the interior must still be divergence-free where no boundary acts.
+    AETHER_CHECK(solver.maxFaceDivergence() < 10.0);
+}
+
+
 void testUnstructuredCavityReproducesVortexTopology() {
     // **Deliberately coarse, and the reason is a real cost measured here.**
     // The explicit step is limited by the *smallest* cell, and a Delaunay
@@ -2578,6 +2637,7 @@ int main() {
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
     testUnstructuredCavityReproducesVortexTopology();
+    testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();
     testLidDrivenCavityFaceDivergenceIsAtSolverTolerance();
     testLidDrivenCavityPrimaryVortexTopology();
