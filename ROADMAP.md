@@ -290,6 +290,40 @@ cartesiana, não menos (a não-ortogonalidade agrava o desacoplo).
 
 ---
 
+### Estado em 2026-08-14: item 1 do portão CUMPRIDO
+
+`UnstructuredCavitySolver3D` — Navier-Stokes incompressível colocado sobre
+`TetrahedralMesh`. A equação de Poisson da pressão **é** o operador validado
+na Fase 2.2, reusado sem alteração; o que é novo é transporte de momento e a
+projeção que o acopla à pressão.
+
+Escolhas e por quê: armazenamento colocado (grade deslocada não tem análogo
+natural em tetraedros — é por isso que códigos não-estruturados reais são
+colocados e usam fluxos de face tipo Rhie-Chow); convecção **upwind**, porque
+diferença central é incondicionalmente instável acima de Re de célula 2 e a
+Fase 1 já mediu isso mordendo; passo explícito com fator de segurança 0,4,
+justamente porque a Fase 1 achou a cavidade estruturada rodando em CFL
+1,0000 sem margem.
+
+**Topologia de vórtice reproduzida** (177 células, Re=10, t=4):
+u médio no topo **+0,0439** (arrasto viscoso direto da tampa), no fundo
+**−0,0099** (escoamento de retorno, que conservação de massa numa caixa
+fechada torna obrigatório). Divergência por faces 3,3e-04, limitada.
+
+**Um custo real medido, não estimado**: o passo explícito é limitado pela
+*menor* célula, e uma tetraedralização Delaunay de rede com jitter sempre
+produz slivers — então refinar encolhe o dt bem mais rápido do que adiciona
+células. A n=4 com t=8 este único teste levou **6m57s**, contra ~21s para
+todo o resto da suíte. Malha e tempo simulado foram fixados no que a
+afirmação precisa (topologia é resolvível em malha grossa), não no que
+pareceria impressionante. Suíte total hoje: 59s.
+
+**O que falta para fechar a Fase 3**: item 2 do portão — um caso genuinamente
+não-cartesiano (escoamento em torno de cilindro a partir de STL). E, para
+tornar prático rodar malhas finas por tempos longos, **difusão implícita**:
+o limite difusivo explícito escala com o quadrado da menor célula, o que é a
+restrição real aqui, não a capacidade do esquema.
+
 ## Fase 4 — GPU para valer
 
 **Objetivo**: (4.1) solve de CG inteiramente residente na GPU; (4.2)

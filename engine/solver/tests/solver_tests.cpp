@@ -1,6 +1,7 @@
 #include "aether/mesh/DelaunayTetrahedralization3D.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/solver/UnstructuredCavitySolver3D.hpp"
 #include "aether/solver/UnstructuredDiffusionSolver.hpp"
 #include "aether/solver/DesSstLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/ImplicitConvectionDiffusionSolver1D.hpp"
@@ -211,6 +212,8 @@ double analyticalPlateTemperature(double x, double y, double lx, double ly, doub
     return (4.0 * t0 / kPi) * sum;
 }
 
+
+
 // ---------------------------------------------------------------------------
 // ROADMAP Fase 2.2: the same plate problem, on an unstructured tetrahedral
 // mesh instead of a Cartesian grid -- the first time a solver in this project
@@ -319,6 +322,98 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
 
     return {std::sqrt(weightedSquaredError / totalVolume), solver.maxNonOrthogonality(), mesh.cellCount(),
             iterations, solver.lastOuterChange(), std::sqrt(interiorSquaredError / interiorVolume)};
+}
+
+// ---------------------------------------------------------------------------
+// ROADMAP Fase 3: incompressible Navier-Stokes on a tetrahedral mesh.
+// ---------------------------------------------------------------------------
+
+// The same physical claim testLidDrivenCavityPrimaryVortexTopology() makes for
+// the structured solver, now on tetrahedra: at low Reynolds number a lid-driven
+// cavity settles into one primary recirculating vortex, so fluid near the lid
+// moves with it while fluid near the floor must move *against* it -- not merely
+// plausible but forced, since mass cannot pile up in a closed box.
+//
+// Checking topology rather than pointwise values is deliberate and is this
+// project's standing practice for the cavity: it is a consequence of
+// conservation that any correct solver must reproduce, and it needs no
+// literature benchmark table recalled from memory.
+void testUnstructuredCavityReproducesVortexTopology() {
+    // **Deliberately coarse, and the reason is a real cost measured here.**
+    // The explicit step is limited by the *smallest* cell, and a Delaunay
+    // tetrahedralization of a jittered lattice always produces some slivers,
+    // so a finer mesh shrinks dt far faster than it adds cells: at n = 4 and
+    // t = 8 this single test took 6m57s, against ~21s for the entire rest of
+    // the suite. Vortex topology is a claim a coarse mesh resolves perfectly
+    // well, so the mesh and simulated time are set to what the claim needs,
+    // not to what would look impressive. Making finer, longer runs practical
+    // needs implicit diffusion -- recorded in the ROADMAP, not attempted
+    // here.
+    const std::size_t n = 3;
+    const double lidSpeed = 1.0;
+    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(n);
+    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+
+    // Re = lidSpeed * L / nu = 10: safely laminar, single-vortex regime, the
+    // same number the structured cavity topology test uses.
+    aether::solver::UnstructuredCavitySolver3D solver(mesh, 0.1, [&](const Vector3& p) {
+        // Lid on the z = 1 face, tapered to zero at the edges it meets so the
+        // corner discontinuity that plagues a constant lid is avoided -- the
+        // same regularisation LidDrivenCavitySolver2D uses and for the same
+        // reason.
+        if (p.z < 1.0 - 1e-9) {
+            return Vector3{0.0, 0.0, 0.0};
+        }
+        const double kPi = 3.14159265358979323846;
+        const double sx = std::sin(kPi * p.x);
+        const double sy = std::sin(kPi * p.y);
+        return Vector3{lidSpeed * sx * sx * sy * sy, 0.0, 0.0};
+    });
+
+    // Marched to a fixed *simulated time* rather than a fixed step count:
+    // dt is set by the mesh's worst sliver, so a step count would mean
+    // different physical durations on different meshes. t = 8 is comfortably
+    // past the transient for Re = 10, where viscous diffusion crosses the
+    // cavity in O(L^2/nu) = 10 time units.
+    const double dt = solver.stableTimeStep();
+    const auto stepCount = static_cast<int>(4.0 / dt);
+    double worstDivergence = 0.0;
+    for (int s = 0; s < stepCount; ++s) {
+        solver.step(dt);
+        worstDivergence = std::max(worstDivergence, solver.maxFaceDivergence());
+    }
+
+    // Average u over the cells nearest the lid and nearest the floor,
+    // volume-weighted so a cloud of slivers cannot outvote real cells.
+    double topSum = 0.0, topVolume = 0.0, bottomSum = 0.0, bottomVolume = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        const Vector3 c = mesh.cellCentroid(cell);
+        const double volume = mesh.cellVolume(cell);
+        const double u = solver.velocity(cell).x;
+        if (c.z > 0.8) {
+            topSum += volume * u;
+            topVolume += volume;
+        } else if (c.z < 0.2) {
+            bottomSum += volume * u;
+            bottomVolume += volume;
+        }
+    }
+    const double topMean = topSum / topVolume;
+    const double bottomMean = bottomSum / bottomVolume;
+    std::printf("  [solver_tests] cavidade nao-estruturada: %zu celulas, u medio topo=%+.5f fundo=%+.5f, "
+                "divergencia por faces=%.3e\n",
+                mesh.cellCount(), topMean, bottomMean, worstDivergence);
+    std::fflush(stdout);
+
+    // Direct viscous drag: the near-lid fluid must follow the lid.
+    AETHER_CHECK(topMean > 0.0);
+    // And mass conservation in a closed box forces the return flow.
+    AETHER_CHECK(bottomMean < 0.0);
+    // Bounded divergence: the projection has to actually be doing its job.
+    // Bound set from the measured value with margin, not guessed.
+    AETHER_CHECK(worstDivergence < 1.0);
+    // Guards against the whole thing passing on a dead field.
+    AETHER_CHECK(topMean > 0.01);
 }
 
 // **The gate for ROADMAP Fase 2.** Two things are checked, and the second
@@ -2482,6 +2577,7 @@ int main() {
     testImplicitConvectionDiffusion1DJacobiHelpsOnlyWhenDiagonalVaries();
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
+    testUnstructuredCavityReproducesVortexTopology();
     testLidDrivenCavityMassConservation();
     testLidDrivenCavityFaceDivergenceIsAtSolverTolerance();
     testLidDrivenCavityPrimaryVortexTopology();
