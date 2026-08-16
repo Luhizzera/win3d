@@ -61,27 +61,39 @@ public:
     // explicit-convection projection scheme is an intermediate quantity, so
     // unstructured codes fix a small number of correctors per step.
     //
-    // **How many is a property of the mesh.** Measured on a straight channel
-    // at t = 2, as net boundary flux against inflow -- a quantity that is
-    // zero for any exactly-solved incompressible flow, so every digit of it
-    // is projection residual:
+    // Measured on the closed cavity, as the peak face divergence the
+    // projection leaves behind, with the vortex topology identical in every
+    // case:
     //
-    //             mesh                4 corr.    16 corr.   64 corr.
-    //   lattice, non-orth. 0.707     2.6e-13    2.7e-12    2.7e-12
-    //   jittered,  "       1.651     2.7e-04    1.3e-07    7.1e-14
+    //    1 corrector  ->  diverges (2.9e+88)
+    //    2            ->  2.284e-02      minimum stable count
+    //    4            ->  7.129e-03      the default; +0.8s on a 25s suite
+    //    8            ->  8.560e-04
+    //   16            ->  1.286e-04
     //
-    // The residual falls by roughly half per corrector, so the count needed
-    // for a given accuracy grows with the mesh's non-orthogonality: four is
-    // already exact on a near-orthogonal mesh and leaves 1e-04 of the inflow
-    // unaccounted on a jittered one. Marching longer does not help -- t = 2,
-    // 4 and 8 all sit at 1e-04 -- because this is an iteration that has not
-    // converged, not a transient that has not decayed.
+    // The residual falls by roughly half per corrector, which is what says
+    // the deferred correction is converging rather than fighting something,
+    // so **this diagnostic reports how many correctors were paid for, not a
+    // property of the scheme**. One corrector is not merely inaccurate but
+    // unstable, which is why the count is not simply minimised.
     //
-    // Four is the default because it is what the existing suite is
-    // calibrated against and it costs 3% of suite time; it is **not** a
-    // claim that four is enough for a given mesh. lastPressureChange() is
-    // the number that answers that, and this being a constructor argument
-    // is what lets a caller act on the answer.
+    // **A caution about reading too much into that table, learned the hard
+    // way.** It was first measured on the *channel*, where four correctors
+    // left 2.7e-04 of the inflow unaccounted against 7.1e-14 at sixty-four,
+    // and that was read as the corrector count being a property of the mesh's
+    // non-orthogonality. It was not: the outlet's prescribed pressure was
+    // missing from the least-squares gradient stencil, so the correction was
+    // being built from a bad gradient exactly where it mattered. With that
+    // fixed (DIVIDA_TECNICA.md 2.3) the channel closes to 1e-13 at **two**
+    // correctors on every mesh tried, up to non-orthogonality 2.24. What is
+    // left above is the closed cavity, which has no Dirichlet face anywhere
+    // and pins a reference cell instead -- a genuinely harder problem for
+    // this iteration, and the reason the default is four rather than two.
+    //
+    // Four is therefore the default because it is what the suite is
+    // calibrated against; it is **not** a claim that four is enough for a
+    // given mesh. lastPressureChange() answers that, and this being a
+    // constructor argument is what lets a caller act on the answer.
     static constexpr std::size_t kDefaultPressureCorrectors = 4;
 
     // `lidVelocity(position)` gives the prescribed wall velocity at a

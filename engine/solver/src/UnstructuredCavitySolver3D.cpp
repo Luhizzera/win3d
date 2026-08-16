@@ -42,13 +42,16 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     });
     buildBoundaryConditions();
 
-    // Interior neighbours only. A solid wall carries a zero-gradient
-    // condition for pressure, so including it as a stencil entry would
-    // assert "the wall value equals the cell value", biasing the fit. An
-    // outlet's pressure *is* known and could legitimately join the fit; it is
-    // left out for now because that is a behaviour change with its own
-    // measurement to make, recorded as DIVIDA_TECNICA.md 2.3.
-    buildGradientStencils(/*useBoundaryValues=*/false);
+    // Interior neighbours **and the outlet**, which is the whole content of
+    // the flag. A solid wall carries a zero-gradient condition for pressure,
+    // so including it would assert "the wall value equals the cell value" and
+    // bias the fit -- that face carries no information about the gradient.
+    // An outlet is the opposite case: its pressure is prescribed, exactly
+    // like the hot and cold faces the diffusion solver has always included.
+    // Leaving it out was a third way the two copies had silently diverged
+    // (DIVIDA_TECNICA.md 2.3); setBoundaryFaceValue() above already answers
+    // "does this face have a value", and only an outlet says yes.
+    buildGradientStencils(/*useBoundaryValues=*/true);
     boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
 }
 

@@ -233,49 +233,58 @@ def test_channel_mass_balance(mesh):
     accident, and the one a sealed domain cannot satisfy at all -- so it is
     also the check that the outlet is not silently still a wall.
 
-    **And it is the number that pays for these bindings.** The first run of
-    this file failed here: the default four non-orthogonal correctors left
-    2.7e-04 of the inflow unaccounted on a jittered mesh, where the C++
-    suite's own channel case closes to 1e-13. Diagnosing that took three
-    Python scripts and no rebuilds -- ruling out dropped faces (there are
-    none), ruling out an undecayed transient (t = 2, 4 and 8 all sit at
-    1e-04), and finally sweeping the corrector count, which is what showed
-    the residual halving per corrector. That investigation is exactly the one
-    DIVIDA_TECNICA.md 5.2 said the bindings existed to make cheap.
+    **And it is the number that paid for these bindings, twice.** The first
+    run of this file failed here: four non-orthogonal correctors left 2.7e-04
+    of the inflow unaccounted on this jittered mesh, where the C++ suite's own
+    channel closed to 1e-13. Diagnosing that took three Python scripts and no
+    rebuilds -- ruling out dropped faces (there are none), ruling out an
+    undecayed transient (t = 2, 4 and 8 all sat at 1e-04), and finally
+    sweeping the corrector count, which showed the residual halving per
+    corrector and led to the count becoming a constructor argument.
 
-    So this checks the *relationship* rather than a single number: more
-    correctors must mean a smaller imbalance, and enough of them must reach
-    machine precision. A fixed threshold at the default count would have
-    encoded the mesh this test happens to build.
+    That reading was incomplete, and the second measurement is the better
+    one. The correction was converging slowly because it was being built from
+    a *bad gradient*: the outlet's prescribed pressure was missing from the
+    least-squares stencil, which is DIVIDA_TECNICA.md 2.3. With the outlet in
+    the fit, this case closes to 1e-13 at the default corrector count -- and
+    at two -- on every mesh tried up to non-orthogonality 2.24.
+
+    So the check is now the strong one: **the balance closes at the default**,
+    with no knob-turning. The corrector sweep stays, one line lower, because
+    a regression in 2.3 would show up first as the old behaviour returning --
+    the balance getting worse at a low corrector count and recovering at a
+    high one.
     """
-    print("canal com saida: balanco global de massa vs. correctores")
+    print("canal com saida: balanco global de massa")
 
     results = []
-    for correctors in (4, 16, 64):
+    for correctors in (2, 4, 16):
         solver, inflow = run_channel(mesh, correctors)
         net = solver.net_boundary_flux()
         results.append((correctors, abs(net), solver))
         print(f"       {correctors:2d} correctores: balanco={net:+.3e} "
               f"({100.0 * abs(net) / inflow:.4f}% da entrada), "
-              f"mudanca de pressao={solver.last_pressure_change():.2e}")
+              f"mudanca de pressao={solver.last_pressure_change():.2e}, "
+              f"estencilDeficiente={solver.deficient_stencil_count()}")
 
     check(inflow > 0.0, f"a entrada esta de fato injetando massa ({inflow:.5f})")
 
-    # Monotone in the corrector count: this is the claim that the deferred
-    # correction is converging rather than fighting something, and it is what
-    # makes the count a knob instead of a mystery.
-    check(results[1][1] < results[0][1],
-          f"16 correctores fecham melhor que 4 ({results[1][1]:.2e} < {results[0][1]:.2e})")
-    check(results[2][1] < results[1][1],
-          f"64 correctores fecham melhor que 16 ({results[2][1]:.2e} < {results[1][1]:.2e})")
-    check(results[2][1] < 1e-9 * inflow,
-          f"com correctores suficientes fecha em precisao de maquina ({results[2][1]:.2e})")
+    for correctors, imbalance, _ in results:
+        check(imbalance < 1e-9 * inflow,
+              f"fecha em precisao de maquina com {correctors} correctores ({imbalance:.2e})")
 
-    # The diagnostic has to agree with the outcome, or it is not a diagnostic:
-    # the run that closed the balance must also report the smaller residual
-    # pressure change.
-    check(results[2][2].last_pressure_change() < results[0][2].last_pressure_change(),
-          "last_pressure_change acompanha o balanco que ele deve prever")
+    # The projection has to report itself converged, not merely happen to
+    # produce a small imbalance -- a diagnostic that disagrees with the
+    # outcome is worse than none.
+    check(all(s.last_pressure_change() < 1e-6 for _, _, s in results),
+          "last_pressure_change confirma a convergencia em todos os casos")
+
+    # And the outlet pressure must actually be reaching the gradient fit:
+    # without it these cells are exactly the ones with too few neighbours.
+    solver = results[1][2]
+    check(solver.deficient_stencil_count() < mesh.cell_count() // 8,
+          f"poucos estencils deficientes com a saida no ajuste "
+          f"({solver.deficient_stencil_count()} de {mesh.cell_count()})")
 
 
 def test_mesh_outlives_python_reference():

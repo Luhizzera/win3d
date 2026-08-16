@@ -222,26 +222,57 @@ ponto de integração — pós-processamento, persistência, visualização.
 **O que fazer**: decidir qual é a representação canônica e fazer a outra
 construir sobre ela. Não manter as duas.
 
-### 2.3 Pressão da saída fica de fora do ajuste de mínimos quadrados [notada ao resolver 1.3]
+### 2.3 ~~Pressão da saída fica de fora do ajuste de mínimos quadrados~~ — RESOLVIDO em 2026-08-16
 
-`buildGradientStencils(useBoundaryValues)` é chamado com `false` no solver de
-NS, então **nenhuma** face de contorno entra no estêncil de gradiente. Para
-parede isso é certo e o motivo está no código: gradiente nulo afirma que a
-*derivada normal* some, e o ajuste leria isso como "o valor na face é igual ao
-da célula", enviesando também as componentes tangenciais. Mas a saída tem
+`buildGradientStencils(useBoundaryValues)` era chamado com `false` no solver
+de NS, então **nenhuma** face de contorno entrava no estêncil de gradiente.
+Para parede isso é certo e o motivo está no código: gradiente nulo afirma que
+a *derivada normal* some, e o ajuste leria isso como "o valor na face é igual
+ao da célula", enviesando também as componentes tangenciais. Mas a saída tem
 pressão prescrita — é Dirichlet, exatamente como as faces quentes e frias da
-placa, que a difusão inclui.
+placa, que a difusão sempre incluiu.
 
-**Por que importa**: é a causa direta dos 21 de 177 estêncils deficientes do
-canal (item 1.3). Incluir a saída completaria o posto de boa parte deles, e
-essas células são justamente as que decidem quanto o escoamento leva embora.
-Enquanto ficarem de fora, o recuo Green-Gauss — de primeira ordem — carrega
-12% do domínio.
+**Resolvido**: uma linha (`true` em vez de `false`). O callback registrado por
+`setBoundaryFaceValue()` já responde "esta face tem valor?", e só a saída diz
+que sim — parede continua fora, pelo motivo certo.
 
-**Por que não foi feito junto**: é mudança de comportamento com medição
-própria a fazer, e empilhá-la sobre três outras no mesmo passo tira a
-atribuição de cada uma. É uma linha (`true` em vez de `false`) mais a medição
-do perfil de saída antes e depois.
+**Medido, e o efeito é muito maior do que "completar alguns estêncils".**
+Canal, medido a correctores suficientes para isolar o efeito do atraso da
+correção:
+
+| malha | estêncil deficiente | u médio na saída |
+|---|---|---|
+| C++ n=3 (suíte) | 21 → **14** | 0,98698 → **0,99916** |
+| Python n=3 jitter 0,25 | 22 → **15** | 0,91759 → **0,96881** |
+| Python n=4 jitter 0,25 | 30 → **19** | 1,02152 → **0,99941** |
+
+As três malhas movem o `u` da saída **em direção a 1,0**, que é a velocidade
+de bulk que a conservação de massa impõe num canal — e nas duas mais finas
+chega a 0,999. Nenhuma delas foi ajustada para isso; é o gradiente de pressão
+na saída deixando de ser inventado.
+
+**E dissolveu o item 5.4.** O canal precisava de 64 correctores não-ortogonais
+para fechar o balanço de massa em 1e-13; com a saída no ajuste ele fecha em
+1e-13 com **dois**, em toda malha testada até não-ortogonalidade 2,24:
+
+| correctores | antes (naoOrtog 1,651) | depois |
+|---|---|---|
+| 2 | — | +3,1e-13 |
+| 4 | +2,7e-04 | +3,6e-13 |
+| 64 | −7,1e-14 | +9,9e-14 |
+
+A correção diferida não estava convergindo devagar por causa da malha: estava
+sendo construída a partir de um gradiente ruim exatamente onde importava. **A
+lição é a de sempre neste projeto, num terceiro disfarce** — o número que
+parecia medir a malha estava medindo um erro nosso. Item 1.3 (gradiente zero
+silencioso), 2.3 (saída fora do ajuste) e o sintoma registrado como 5.4 eram
+a mesma causa vista de três ângulos.
+
+**O que continua valendo do 5.4**: a cavidade *fechada* — que não tem face de
+Dirichlet nenhuma e fixa uma célula de referência no lugar — ainda mostra a
+queda geométrica com o número de correctores (2,28e-02 com 2, 7,13e-03 com 4,
+1,29e-04 com 16). É um problema genuinamente mais difícil para essa iteração,
+e é a razão do default ser 4 e não 2.
 
 ---
 
@@ -308,6 +339,31 @@ o limite.
 **O que fazer**: se malhas finas com escoamento rápido passarem a importar,
 tratamento implícito ou semi-implícito da convecção. Não urgente enquanto o
 limite convectivo for folgado.
+
+### 4.3 NaN sem aviso em malha muito distorcida [encontrada ao medir o 2.3]
+
+Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
+(contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
+**NaN no passo 20 de 1333**, com as sementes 17 e 3 — passo 20 e 21,
+respectivamente.
+
+**Não é o 2.3 nem nenhuma mudança desta sessão**: medido com e sem a saída no
+estêncil, o NaN acontece no mesmo passo, com os mesmos dígitos. É
+pré-existente; foi a facilidade de varrer malhas em Python que o expôs.
+
+**Por que não é sliver óbvio**: volume mínimo 4,7e-04 com razão máximo/mínimo
+de 32 — pior que os testes, mas não degenerado. A não-ortogonalidade (2,07 e
+2,23) é comparável à de malhas com jitter 0,35, que rodam sem problema. Então
+a explicação fácil não serve, e a causa é desconhecida.
+
+**Por que importa**: é o modo de falha que o item 4.1 já registra para os
+solvers estruturados — **NaN, não aviso**. Um usuário com geometria real vai
+encontrar malhas piores que jitter 0,35, e o que ele vai receber é um campo
+inutilizável sem nenhuma indicação de onde começou.
+
+**O que fazer**: instrumentar o passo 19→20 desse caso (qual campo perde
+finitude primeiro: preditor, pressão ou fluxo de face) antes de propor
+qualquer correção. Depois, no mínimo, detectar e recusar em vez de propagar.
 
 ---
 
@@ -390,24 +446,6 @@ permitir. Passou a ser avaliado uma vez por face e cacheado. Números da suíte
 idênticos; o canal de 5016 passos roda em 1,4 s a partir de Python (0,28
 ms/passo).
 
-### 5.4 Projeção com contagem fixa de correctores, não com critério de convergência [aberta pelo 5.2]
-
-`kDefaultPressureCorrectors = 4` é uma contagem fixa. A medição acima mostra
-que o número necessário é propriedade da malha: o resíduo cai cerca de metade
-por corrector, então malha mais torta precisa de mais, e não há valor fixo
-correto.
-
-**Por que ainda não é remendo**: o diagnóstico existe (`lastPressureChange()`)
-e o botão existe (argumento de construtor), então hoje isso é uma escolha
-informada, não um erro silencioso. Era erro silencioso antes.
-
-**O que fazer**: parar por critério — iterar até a mudança de pressão cair
-abaixo de uma tolerância *relativa* à escala da pressão, com teto. O laço
-`solveDeferredCorrection()` já para por tolerância; o que falta é a tolerância
-ser relativa em vez de 1e-10 absoluto, que nas cavidades quase nunca dispara
-cedo. Medir o custo antes de adotar: o canal torto precisou de 64 correctores,
-que é 16× o custo de projeção daquele caso.
-
 ### 5.3 Caso da cavidade não-estruturada em malha grosseira por custo
 
 n=3 (177 células) e t=4 foram escolhidos para caber no tempo de suíte, não
@@ -418,6 +456,28 @@ afirmação quantitativa não seria.
 convergência de malha de verdade fora da suíte de testes.
 
 ---
+
+### 5.4 ~~Projeção com contagem fixa de correctores~~ — REDUZIDO em 2026-08-16, a evidência era do 2.3
+
+Registrado quando o canal precisava de 64 correctores não-ortogonais para
+fechar o balanço de massa, e lido como "o número necessário é propriedade da
+malha". **Não era**: com a pressão da saída no ajuste de mínimos quadrados
+(item 2.3) o mesmo canal fecha em 1e-13 com dois correctores, em toda malha
+testada até não-ortogonalidade 2,24. A correção estava sendo construída a
+partir de um gradiente ruim, não lutando com a geometria.
+
+**O que sobra**: a cavidade fechada, sem nenhuma face de Dirichlet, ainda cai
+geometricamente com o número de correctores (2,28e-02 / 7,13e-03 / 1,29e-04
+para 2 / 4 / 16). Uma contagem fixa continua sendo um botão em vez de um
+critério, e `solveDeferredCorrection()` já para por tolerância — falta ela ser
+relativa à escala da pressão em vez de 1e-10 absoluto, que quase nunca dispara
+cedo.
+
+**Por que não é urgente**: o diagnóstico existe (`lastPressureChange()`) e o
+botão existe (argumento de construtor), então hoje é escolha informada e não
+erro silencioso. E a evidência que fazia isso parecer urgente já foi explicada
+por outra coisa — o que é, por si, motivo para não agir sobre a próxima
+suspeita antes de medi-la.
 
 ## 6. Continua sendo pesquisa, não dívida
 
@@ -442,10 +502,9 @@ Por dependência, não por tamanho:
 2. ~~**2.1** (extrair base compartilhada)~~ — FEITO
 3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
 4. ~~**5.2** (bindings)~~ — FEITO, e já pagou: encontrou 5.4 na primeira execução
-5. **2.3** (pressão da saída no estêncil) — uma linha mais a medição; com os
-   bindings prontos vira um experimento em minutos em vez de um ciclo de build
-6. **5.4** (critério de parada da projeção) — o botão e o diagnóstico existem;
-   falta a tolerância relativa e a medição de custo
+5. ~~**2.3** (pressão da saída no estêncil)~~ — FEITO, e dissolveu o 5.4
+6. **4.3** (NaN em malha distorcida) — instrumentar antes de propor correção;
+   é o único modo de falha silencioso que sobrou nesta camada
 7. **3.2** (solução manufaturada) — mede o que hoje é inferido
 8. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
 9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
