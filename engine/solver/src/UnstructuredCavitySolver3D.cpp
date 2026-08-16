@@ -194,14 +194,26 @@ double UnstructuredCavitySolver3D::stableTimeStep() const {
     // cavity running at CFL exactly 1.0000 with no margin at all, which is
     // why a small perturbation tipped it into NaN.
     //
-    // **This factor is also the knob on a measured tradeoff.** Switching from
-    // the length-scale proxy to the criterion above cut the cavity test from
-    // 58.8s to 21.8s with the flow topology unchanged (u mean +0.0439/-0.0099
-    // before, +0.0457/-0.0098 after), but face divergence rose from 3.3e-04
-    // to 6.4e-02: a larger step leaves more for each projection to remove.
-    // Both are honest consequences of a bigger dt, not a defect introduced by
-    // the criterion. Halve this factor if mass conservation matters more than
-    // wall-clock for a given run -- it stays far cheaper than the proxy was.
+    // **What this factor buys, measured rather than guessed.** Sweeping it
+    // on the cavity (177 cells, Re = 10, t = 4):
+    //
+    //   x1.00   8953 steps   divergence 6.42e-02   u_top +0.04568   0.2s
+    //   x0.50  17906 steps   divergence 3.56e-02   u_top +0.04483   0.5s
+    //   x0.25  35812 steps   divergence 1.88e-02   u_top +0.04438   0.9s
+    //
+    // Divergence scales **linearly with dt**: it is the projection's
+    // splitting error, not a defect, and halving the step halves it. That
+    // also settles what looked like a regression when this criterion
+    // replaced the old length-scale proxy -- the proxy's much smaller
+    // divergence (3.3e-04) was bought purely by taking ~200x smaller steps,
+    // at ~200x the cost. Same tradeoff curve, just a different point on it;
+    // the criterion's value is that the point is now chosen deliberately
+    // instead of dictated by a bad estimate of cell size.
+    //
+    // 0.4 is the default because the velocity field is already converged to
+    // three digits there (u_top moves by 3% across a 4x change in dt), so
+    // paying 4x the wall-clock buys accuracy the topology claim does not
+    // need. Lower it when the *pressure/divergence* field is what matters.
     return 0.4 * std::min(diffusiveLimit, convectiveLimit);
 }
 
