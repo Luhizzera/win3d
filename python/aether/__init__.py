@@ -24,6 +24,8 @@ try:
         DelaunayTriangulation2D,
         PolygonTriangulation2D,
         StructuredGrid3D,
+        TetrahedralFace,
+        TetrahedralMesh,
     )
     from aether_solver_py import (
         DesSstLidDrivenCavitySolver3D,
@@ -48,6 +50,8 @@ try:
         SteadyDiffusionSolver,
         TaylorGreenVortexSolver2D,
         TransientDiffusionSolver,
+        UnstructuredCavitySolver3D,
+        UnstructuredDiffusionSolver,
     )
     from aether_postprocessing_py import (
         Segment2D,
@@ -97,6 +101,8 @@ __all__ = [
     "DelaunayTriangulation2D",
     "PolygonTriangulation2D",
     "DelaunayTetrahedralization3D",
+    "TetrahedralMesh",
+    "TetrahedralFace",
     "DiffusionProblem",
     "Face",
     "SteadyDiffusionSolver",
@@ -119,6 +125,8 @@ __all__ = [
     "SmagorinskyLesLidDrivenCavitySolver3D",
     "DesSstLidDrivenCavitySolver3D",
     "ImplicitConvectionDiffusionSolver1D",
+    "UnstructuredDiffusionSolver",
+    "UnstructuredCavitySolver3D",
     "Streamline2D",
     "Segment2D",
     "marching_squares_2d",

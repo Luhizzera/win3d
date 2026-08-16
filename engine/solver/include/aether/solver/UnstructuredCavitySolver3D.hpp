@@ -56,6 +56,34 @@ namespace aether::solver {
 //   honest diagnostic.
 class UnstructuredCavitySolver3D : public UnstructuredFvmBase {
 public:
+    // Non-orthogonal correctors per projection, rather than iterating the
+    // deferred correction to convergence every step: the pressure of an
+    // explicit-convection projection scheme is an intermediate quantity, so
+    // unstructured codes fix a small number of correctors per step.
+    //
+    // **How many is a property of the mesh.** Measured on a straight channel
+    // at t = 2, as net boundary flux against inflow -- a quantity that is
+    // zero for any exactly-solved incompressible flow, so every digit of it
+    // is projection residual:
+    //
+    //             mesh                4 corr.    16 corr.   64 corr.
+    //   lattice, non-orth. 0.707     2.6e-13    2.7e-12    2.7e-12
+    //   jittered,  "       1.651     2.7e-04    1.3e-07    7.1e-14
+    //
+    // The residual falls by roughly half per corrector, so the count needed
+    // for a given accuracy grows with the mesh's non-orthogonality: four is
+    // already exact on a near-orthogonal mesh and leaves 1e-04 of the inflow
+    // unaccounted on a jittered one. Marching longer does not help -- t = 2,
+    // 4 and 8 all sit at 1e-04 -- because this is an iteration that has not
+    // converged, not a transient that has not decayed.
+    //
+    // Four is the default because it is what the existing suite is
+    // calibrated against and it costs 3% of suite time; it is **not** a
+    // claim that four is enough for a given mesh. lastPressureChange() is
+    // the number that answers that, and this being a constructor argument
+    // is what lets a caller act on the answer.
+    static constexpr std::size_t kDefaultPressureCorrectors = 4;
+
     // `lidVelocity(position)` gives the prescribed wall velocity at a
     // boundary face centroid -- zero on a solid wall, the lid's tangential
     // velocity on the moving one. Passing it as a function keeps the class
@@ -71,10 +99,25 @@ public:
     //
     // An *inlet* needs nothing new: it is a wall with a non-zero prescribed
     // velocity, which `wallVelocity` already expresses.
+    // `pressureCorrectors` is the number of non-orthogonal correctors the
+    // projection runs per step. It is a constructor argument rather than a
+    // constant because **how many are needed is a property of the mesh, not
+    // of the solver**, and that was measured rather than assumed -- see
+    // kDefaultPressureCorrectors below for the table. lastPressureChange()
+    // reports whether the count used was enough.
+    //
+    // Clamped up to 2: a single corrector does not merely leave a larger
+    // residual, it is unstable (the cavity case reaches 2.9e+88), because the
+    // correction never catches the pressure it is correcting. Refusing 1
+    // outright rather than clamping was the alternative; clamping wins
+    // because the only way to ask for 1 is to be guessing, and the failure
+    // it produces is a NaN field several thousand steps later rather than an
+    // error at the call.
     UnstructuredCavitySolver3D(
         const mesh::TetrahedralMesh& mesh, double viscosity,
         std::function<core::Vector3(const core::Vector3&)> wallVelocity,
-        std::function<bool(const core::Vector3&)> isOutlet = {}, double outletPressure = 0.0);
+        std::function<bool(const core::Vector3&)> isOutlet = {}, double outletPressure = 0.0,
+        std::size_t pressureCorrectors = kDefaultPressureCorrectors);
 
     void step(double dt);
 
@@ -95,6 +138,13 @@ public:
     // projection actually drives to zero -- see the class comment.
     // Includes outlet faces, which do carry flux.
     double maxFaceDivergence() const;
+
+    // Largest per-cell pressure change across the final corrector of the
+    // last step. The number that says whether the projection converged or
+    // merely ran out of correctors -- the same role lastOuterChange() plays
+    // for the diffusion solver, and the reason the corrector count can be
+    // chosen from evidence instead of guessed.
+    double lastPressureChange() const { return lastPressureChange_; }
 
     // Net mass flux through every non-wall boundary face: negative where
     // fluid enters, positive where it leaves. For a steady incompressible
@@ -117,31 +167,6 @@ private:
                                         const std::vector<double>& pressure, double dt) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
 
-    // Non-orthogonal correctors per projection, rather than iterating the
-    // deferred correction to convergence every step. The pressure of an
-    // explicit-convection projection scheme is an intermediate quantity --
-    // what has to converge is the *time march*, not each individual solve --
-    // so unstructured codes fix a small number of correctors per step.
-    //
-    // **Four, and the number was measured rather than picked.** Cavity test,
-    // max face divergence against the corrector count, with the topology
-    // result (u at the lid, u at the floor) identical in every case:
-    //
-    //     1  ->  diverges (2.9e+88)      the correction never catches the
-    //                                    pressure it is correcting
-    //     2  ->  2.284e-02               minimum stable count
-    //     3  ->  1.322e-02
-    //     4  ->  7.129e-03               chosen: +0.8s on a 25s suite
-    //     8  ->  8.560e-04
-    //    16  ->  1.286e-04
-    //
-    // Two things are worth reading off that table. The residual halves per
-    // corrector -- geometric, which is what says the deferred correction is
-    // converging rather than fighting something -- so **this diagnostic
-    // reports how many correctors were paid for, not a property of the
-    // scheme**. And one corrector is not merely inaccurate but unstable,
-    // which is why the count is not simply minimised.
-    static constexpr std::size_t kPressureCorrectors = 4;
 
     // (V_P/dt + nu * sum_f a_f) x_P - nu * sum_f a_f x_N: the same Laplacian
     // with a shifted diagonal, which is what makes the viscous term implicit.
@@ -172,6 +197,8 @@ private:
     std::vector<core::Vector3> velocity_;
     std::vector<double> pressure_;
     double time_ = 0.0;
+    std::size_t pressureCorrectors_;
+    double lastPressureChange_ = 0.0;
     double lastDt_ = 0.0;
     double maxWallSpeed_ = 0.0;
     bool hasOutlet_ = false;

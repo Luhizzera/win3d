@@ -36,3 +36,35 @@ if(TARGET aether_gpu)
     pybind11_add_module(aether_gpu_py aether_gpu_bindings.cpp)
     target_link_libraries(aether_gpu_py PRIVATE aether_gpu)
 endif()
+
+# The binding modules were, until now, only ever *compiled* -- CI installs
+# pybind11 precisely so they get built, but nothing imported them. That
+# catches a signature error and nothing else: a binding can compile and still
+# return a dangling pointer, drop a default argument, or mis-order
+# constructor parameters. This registers a Python-level suite with ctest so
+# the surface is exercised the same way every C++ layer is.
+#
+# The two arguments are the directory the extension modules were written to
+# (a generator expression, since a multi-config generator only knows it at
+# build time) and the source tree's Python package, whose own import list is
+# part of what is being tested.
+if(AETHER_BUILD_TESTS)
+    if(DEFINED Python_EXECUTABLE)
+        set(aether_python "${Python_EXECUTABLE}")
+    elseif(DEFINED PYTHON_EXECUTABLE)
+        set(aether_python "${PYTHON_EXECUTABLE}")
+    endif()
+
+    if(aether_python)
+        add_test(NAME aether_python_bindings_tests
+                 COMMAND "${aether_python}"
+                         "${CMAKE_SOURCE_DIR}/python/tests/test_unstructured_bindings.py"
+                         "$<TARGET_FILE_DIR:aether_solver_py>"
+                         "${CMAKE_SOURCE_DIR}/python")
+    else()
+        # Printed rather than silently skipped: a suite that quietly stops
+        # registering is the exact failure the CI's --no-tests=error flag
+        # exists to prevent, and hiding it here would defeat that.
+        message(WARNING "Python interpreter not known to CMake - skipping aether_python_bindings_tests")
+    endif()
+endif()

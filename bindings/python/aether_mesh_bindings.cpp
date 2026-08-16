@@ -2,6 +2,7 @@
 #include "aether/mesh/DelaunayTriangulation2D.hpp"
 #include "aether/mesh/PolygonTriangulation2D.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
+#include "aether/mesh/TetrahedralMesh.hpp"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -76,4 +77,44 @@ PYBIND11_MODULE(aether_mesh_py, m) {
         })
         .def("satisfies_delaunay_property", &DelaunayTetrahedralization3D::satisfiesDelaunayProperty,
              py::arg("tolerance") = 1e-6);
+
+    // Face connectivity, the piece the unstructured solvers consume. Bound
+    // together with them (see aether_solver_bindings.cpp) because a solver
+    // without a way to build its mesh from Python would expose the layer
+    // without making it usable.
+    py::class_<TetrahedralMesh::Face>(m, "TetrahedralFace")
+        .def_readonly("vertices", &TetrahedralMesh::Face::vertices)
+        .def_readonly("owner", &TetrahedralMesh::Face::owner)
+        // kNoNeighbour (the largest size_t) on a boundary face -- compare
+        // against TetrahedralMesh.NO_NEIGHBOUR rather than to a literal, or
+        // just ask is_boundary_face().
+        .def_readonly("neighbour", &TetrahedralMesh::Face::neighbour)
+        .def_readonly("area_vector", &TetrahedralMesh::Face::areaVector)
+        .def_readonly("centroid", &TetrahedralMesh::Face::centroid);
+
+    py::class_<TetrahedralMesh>(m, "TetrahedralMesh")
+        .def_static("from_tetrahedralization", &TetrahedralMesh::fromTetrahedralization,
+                    py::arg("tetrahedralization"))
+        .def_readonly_static("NO_NEIGHBOUR", &TetrahedralMesh::kNoNeighbour)
+        .def("cell_count", &TetrahedralMesh::cellCount)
+        .def("face_count", &TetrahedralMesh::faceCount)
+        .def("vertex_count", &TetrahedralMesh::vertexCount)
+        // Returned by reference into the mesh's own storage, so the mesh has
+        // to outlive the Face handed back.
+        .def("face", &TetrahedralMesh::face, py::arg("index"),
+             py::return_value_policy::reference_internal)
+        .def("vertex", &TetrahedralMesh::vertex, py::arg("index"))
+        .def("cell_volume", &TetrahedralMesh::cellVolume, py::arg("cell"))
+        .def("cell_centroid", &TetrahedralMesh::cellCentroid, py::arg("cell"))
+        .def("cell_faces", &TetrahedralMesh::cellFaces, py::arg("cell"))
+        .def("is_boundary_face", &TetrahedralMesh::isBoundaryFace, py::arg("index"))
+        .def("boundary_face_count", &TetrahedralMesh::boundaryFaceCount)
+        .def("outward_area_vector", &TetrahedralMesh::outwardAreaVector, py::arg("cell"),
+             py::arg("face_index"))
+        // Identically zero for any closed polyhedron -- the discrete
+        // divergence theorem. Exposed because it is how a caller checks a
+        // mesh it did not build: a nonzero result means a normal is
+        // misoriented or a face is missing.
+        .def("cell_area_vector_sum", &TetrahedralMesh::cellAreaVectorSum, py::arg("cell"))
+        .def("total_volume", &TetrahedralMesh::totalVolume);
 }

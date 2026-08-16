@@ -12,9 +12,11 @@ using mesh::TetrahedralMesh;
 UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     const TetrahedralMesh& mesh, double viscosity,
     std::function<Vector3(const Vector3&)> wallVelocity,
-    std::function<bool(const Vector3&)> isOutlet, double outletPressure)
+    std::function<bool(const Vector3&)> isOutlet, double outletPressure,
+    std::size_t pressureCorrectors)
     : UnstructuredFvmBase(mesh), viscosity_(viscosity), wallVelocity_(std::move(wallVelocity)),
-      isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure) {
+      isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure),
+      pressureCorrectors_(std::max<std::size_t>(pressureCorrectors, 2)) {
     velocity_.assign(mesh.cellCount(), Vector3{});
     pressure_.assign(mesh.cellCount(), 0.0);
 
@@ -178,8 +180,8 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     // incompatible references. Started from the previous step's pressure,
     // which is why it converges in a handful of iterations.
     const std::size_t pinnedCell = hasOutlet_ ? kNoPinnedCell : 0;
-    double outerChange = 0.0;
-    solveDeferredCorrection(pressure_, rhs, pinnedCell, n, 1e-10, kPressureCorrectors, outerChange);
+    solveDeferredCorrection(pressure_, rhs, pinnedCell, n, 1e-10, pressureCorrectors_,
+                            lastPressureChange_);
 
     const std::vector<Vector3> pressureGradients = computeCellGradients(pressure_);
     for (std::size_t cell = 0; cell < n; ++cell) {

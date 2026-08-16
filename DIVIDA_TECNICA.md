@@ -325,18 +325,88 @@ execução.
 
 **O que fazer**: um push. O resto já está pronto.
 
-### 5.2 Solvers não-estruturados sem bindings Python [criada nesta sessão]
+### 5.2 ~~Solvers não-estruturados sem bindings Python~~ — RESOLVIDO em 2026-08-16
 
-Todas as outras camadas do engine têm bindings — é o invariante arquitetural
-"hybrid C++/Python" desde o Módulo 1. `UnstructuredDiffusionSolver`,
-`UnstructuredCavitySolver3D` e `TetrahedralMesh` não têm.
+Todas as outras camadas do engine tinham bindings — é o invariante
+arquitetural "hybrid C++/Python" desde o Módulo 1. `UnstructuredDiffusionSolver`,
+`UnstructuredCavitySolver3D` e `TetrahedralMesh` não tinham.
 
-**Por que não dá para contornar**: sem bindings, todo experimento com esses
+**Por que não dava para contornar**: sem bindings, todo experimento com esses
 solvers exige escrever e compilar C++, o que é exatamente o atrito que a
 camada Python existe para eliminar. A investigação dos 13,2% teria sido
 minutos em Python em vez de vários ciclos de build.
 
-**O que fazer**: bindings, como toda outra camada tem.
+**Resolvido**: `TetrahedralMesh` e `TetrahedralFace` em
+`aether_mesh_bindings.cpp`, os dois solvers em `aether_solver_bindings.cpp`,
+exportados pelo pacote `aether`. Seletores de contorno, velocidade de parede
+e predicado de saída atravessam como *callables* Python.
+
+**E os bindings passaram a ser exercitados, não só compilados.**
+`python/tests/test_unstructured_bindings.py` está registrado no ctest (12
+suítes agora, era 11). Isso importa porque compilar um binding pega erro de
+assinatura e nada mais: ele pode compilar e ainda devolver ponteiro pendurado,
+perder um argumento default ou trocar a ordem do construtor. O teste checa o
+que a suíte C++ estruturalmente não pode — a superfície do binding — mais duas
+afirmações físicas que saem de graça (princípio do máximo do Laplaciano,
+balanço de massa do canal). Inclui, de propósito, o caso `del mesh; gc.collect()`
+seguido de `step()`: sem `keep_alive` isso é use-after-free, e largar a malha
+depois de construir o solver é a coisa natural para um script fazer.
+
+**O primeiro achado veio na primeira execução, que é o argumento inteiro do
+item.** O teste falhou no balanço de massa do canal: 2,7e-04 da vazão, onde a
+suíte C++ fecha em 1e-13. Três scripts Python e nenhum rebuild depois:
+
+- **não é face descartada** — contei em Python as faces com `A·d ≤ 0`, que a
+  montagem pula em silêncio: zero, nas duas malhas;
+- **não é transiente** — t = 2, 4 e 8 todos em 1e-04;
+- **é o número de correctores não-ortogonais**, e depende da malha:
+
+| correctores | naoOrtog 0,707 | naoOrtog 1,651 |
+|---|---|---|
+| 4 | 2,6e-13 | 2,7e-04 |
+| 16 | 2,7e-12 | 1,3e-07 |
+| 64 | 2,7e-12 | 7,1e-14 |
+
+Isso virou API: `pressureCorrectors` passou a ser argumento de construtor (com
+o default documentado como "o que a suíte calibra", não como suficiência), e
+`lastPressureChange()` é o diagnóstico que diz se a projeção convergiu ou só
+acabou os correctores — mesmo papel que `lastOuterChange()` na difusão. Os
+dois casos C++ reportam 2,9e-11 e 0,0e+00, ou seja, **estão convergidos** com
+4; foi a malha que eu gerei em Python, mais torta, que não estava. Sem o
+diagnóstico, os três números seriam indistinguíveis.
+
+O teste passou a medir a *relação* em vez de um limiar: mais correctores têm
+de fechar melhor, e o suficiente tem de chegar à precisão de máquina. Um
+limiar fixo no default teria codificado a malha que aquele teste por acaso
+constrói.
+
+**Também encontrado ao escrever os bindings**: o callback de valor de
+contorno era chamado de dentro do laço de Green-Gauss e da correção
+não-ortogonal — milhares de vezes por passo, contradizendo a afirmação da
+própria base de que nenhum laço interno paga despacho. Em C++ isso era só
+ineficiência; com uma lambda Python seria o GIL milhares de vezes por passo,
+o que tornaria os bindings inúteis para os experimentos que eles existem para
+permitir. Passou a ser avaliado uma vez por face e cacheado. Números da suíte
+idênticos; o canal de 5016 passos roda em 1,4 s a partir de Python (0,28
+ms/passo).
+
+### 5.4 Projeção com contagem fixa de correctores, não com critério de convergência [aberta pelo 5.2]
+
+`kDefaultPressureCorrectors = 4` é uma contagem fixa. A medição acima mostra
+que o número necessário é propriedade da malha: o resíduo cai cerca de metade
+por corrector, então malha mais torta precisa de mais, e não há valor fixo
+correto.
+
+**Por que ainda não é remendo**: o diagnóstico existe (`lastPressureChange()`)
+e o botão existe (argumento de construtor), então hoje isso é uma escolha
+informada, não um erro silencioso. Era erro silencioso antes.
+
+**O que fazer**: parar por critério — iterar até a mudança de pressão cair
+abaixo de uma tolerância *relativa* à escala da pressão, com teto. O laço
+`solveDeferredCorrection()` já para por tolerância; o que falta é a tolerância
+ser relativa em vez de 1e-10 absoluto, que nas cavidades quase nunca dispara
+cedo. Medir o custo antes de adotar: o canal torto precisou de 64 correctores,
+que é 16× o custo de projeção daquele caso.
 
 ### 5.3 Caso da cavidade não-estruturada em malha grosseira por custo
 
@@ -371,13 +441,15 @@ Por dependência, não por tamanho:
 1. ~~**1.1** (fluxo de saída)~~ — FEITO
 2. ~~**2.1** (extrair base compartilhada)~~ — FEITO
 3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
-4. **5.2** (bindings) — destrava todo o resto da investigação
+4. ~~**5.2** (bindings)~~ — FEITO, e já pagou: encontrou 5.4 na primeira execução
 5. **2.3** (pressão da saída no estêncil) — uma linha mais a medição; com os
    bindings prontos vira um experimento em minutos em vez de um ciclo de build
-6. **3.2** (solução manufaturada) — mede o que hoje é inferido
-7. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
-8. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
-9. **5.1** (push) — um comando
+6. **5.4** (critério de parada da projeção) — o botão e o diagnóstico existem;
+   falta a tolerância relativa e a medição de custo
+7. **3.2** (solução manufaturada) — mede o que hoje é inferido
+8. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
+9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
+10. **5.1** (push) — um comando
 
 O item **6** (tetraedralização restrita) fica por último não por prioridade,
 mas porque é o único que não se resolve com disciplina — se resolve com

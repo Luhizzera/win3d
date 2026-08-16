@@ -75,6 +75,26 @@ void UnstructuredFvmBase::buildFaceGeometry(
         laplacianDiagonal_[face.neighbour] += coefficient;
         interiorFaces_.push_back(interior);
     }
+
+    refreshBoundaryValues();
+}
+
+void UnstructuredFvmBase::refreshBoundaryValues() {
+    boundaryHasValue_.assign(mesh_->faceCount(), 0);
+    boundaryValueCache_.assign(mesh_->faceCount(), 0.0);
+    if (!boundaryFaceValue_) {
+        return;
+    }
+    for (std::size_t f = 0; f < mesh_->faceCount(); ++f) {
+        if (!mesh_->isBoundaryFace(f)) {
+            continue;
+        }
+        double value = 0.0;
+        if (boundaryFaceValue_(f, value)) {
+            boundaryHasValue_[f] = 1;
+            boundaryValueCache_[f] = value;
+        }
+    }
 }
 
 void UnstructuredFvmBase::buildGradientStencils(bool useBoundaryValues) {
@@ -102,10 +122,10 @@ void UnstructuredFvmBase::buildGradientStencils(bool useBoundaryValues) {
     for (std::size_t f = 0; f < mesh_->faceCount(); ++f) {
         const auto& face = mesh_->face(f);
         if (mesh_->isBoundaryFace(f)) {
-            double prescribed = 0.0;
-            if (!useBoundaryValues || !boundaryFaceValue_ || !boundaryFaceValue_(f, prescribed)) {
+            if (!useBoundaryValues || boundaryHasValue_[f] == 0) {
                 continue; // zero-gradient face: carries no gradient information
             }
+            const double prescribed = boundaryValueCache_[f];
             const Vector3 d = face.centroid - mesh_->cellCentroid(face.owner);
             const double lengthSquared = d.normSquared();
             if (lengthSquared == 0.0) {
@@ -195,9 +215,8 @@ std::vector<Vector3> UnstructuredFvmBase::greenGaussGradients(const std::vector<
     for (std::size_t f = 0; f < mesh_->faceCount(); ++f) {
         const auto& face = mesh_->face(f);
         if (mesh_->isBoundaryFace(f)) {
-            double prescribed = 0.0;
-            const bool hasValue = boundaryFaceValue_ && boundaryFaceValue_(f, prescribed);
-            const double faceValue = hasValue ? prescribed : field[face.owner];
+            const double faceValue =
+                boundaryHasValue_[f] != 0 ? boundaryValueCache_[f] : field[face.owner];
             gradients[face.owner] += face.areaVector * faceValue;
             continue;
         }
@@ -259,10 +278,10 @@ std::vector<double> UnstructuredFvmBase::nonOrthogonalCorrection(const std::vect
         if (!face.entersOperator) {
             continue;
         }
-        double prescribed = 0.0;
-        if (!boundaryFaceValue_ || !boundaryFaceValue_(face.meshFace, prescribed)) {
+        if (boundaryHasValue_[face.meshFace] == 0) {
             continue;
         }
+        const double prescribed = boundaryValueCache_[face.meshFace];
         const Vector3& cellGradient = gradients[face.cell];
         const double compactNormalDerivative = (prescribed - field[face.cell]) / face.distance;
         const Vector3 faceGradient =

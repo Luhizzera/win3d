@@ -18,7 +18,10 @@
 #include "aether/solver/SteadyDiffusionSolver.hpp"
 #include "aether/solver/TaylorGreenVortexSolver2D.hpp"
 #include "aether/solver/TransientDiffusionSolver.hpp"
+#include "aether/solver/UnstructuredCavitySolver3D.hpp"
+#include "aether/solver/UnstructuredDiffusionSolver.hpp"
 
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -322,4 +325,84 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("wall_distance", &KOmegaSSTChannelFlowSolver1D::wallDistance)
         .def("cell_center_y", &KOmegaSSTChannelFlowSolver1D::cellCenterY)
         .def("friction_velocity", &KOmegaSSTChannelFlowSolver1D::frictionVelocity);
+
+    // -- Unstructured FVM on tetrahedra (ROADMAP Fase 2 and 3) -------------
+    //
+    // These were the one layer of the engine without bindings, which is not
+    // a cosmetic gap: every experiment with them meant writing and compiling
+    // C++, which is exactly the friction the Python layer exists to remove.
+    // The investigation that found the 13.2% mass imbalance would have been
+    // minutes here instead of several build cycles -- that is the argument,
+    // recorded as DIVIDA_TECNICA.md 5.2.
+    //
+    // Both classes take the mesh by const reference and keep a pointer to
+    // it, hence keep_alive: letting Python collect the mesh while a solver
+    // still points at it is a use-after-free, and the mesh is the natural
+    // thing for a script to drop after constructing the solver.
+    //
+    // cell_count / max_non_orthogonality / deficient_stencil_count are
+    // inherited from UnstructuredFvmBase and re-declared on each class
+    // rather than binding the base itself, which is not constructible or
+    // destructible from outside.
+
+    py::class_<UnstructuredDiffusionSolver>(m, "UnstructuredDiffusionSolver")
+        .def(py::init<const aether::mesh::TetrahedralMesh&>(), py::arg("mesh"), py::keep_alive<1, 2>())
+        // `selector` is called once per boundary face with that face's
+        // centroid: "the face on the x = 0 plane" without needing to know
+        // how the mesh generator numbered anything. Every face starts
+        // insulated; a later call overrides an earlier one.
+        .def("set_dirichlet_boundary", &UnstructuredDiffusionSolver::setDirichletBoundary,
+             py::arg("selector"), py::arg("value"))
+        .def("solve_conjugate_gradient", &UnstructuredDiffusionSolver::solveConjugateGradient,
+             py::arg("max_iterations") = 20000, py::arg("tolerance") = 1e-10,
+             py::arg("max_outer_sweeps") = 50)
+        .def("value", &UnstructuredDiffusionSolver::value, py::arg("cell"))
+        .def("cell_gradients", &UnstructuredDiffusionSolver::cellGradients)
+        // Largest per-cell change across the final outer sweep: what
+        // separates a solve that settled from one that hit the sweep cap.
+        .def("last_outer_change", &UnstructuredDiffusionSolver::lastOuterChange)
+        .def("cell_count", &UnstructuredDiffusionSolver::cellCount)
+        .def("max_non_orthogonality", &UnstructuredDiffusionSolver::maxNonOrthogonality)
+        .def("deficient_stencil_count", &UnstructuredDiffusionSolver::deficientStencilCount);
+
+    py::class_<UnstructuredCavitySolver3D>(m, "UnstructuredCavitySolver3D")
+        // `wall_velocity(position)` gives the prescribed velocity at a
+        // boundary face centroid -- zero on a solid wall, the lid's speed on
+        // a moving one, the inlet profile on an inlet (an inlet needs
+        // nothing new: it is a wall with a non-zero prescribed velocity).
+        // `is_outlet(position)` marks faces where fluid may leave; pass None
+        // for a closed domain, where every boundary is a solid wall.
+        // `pressure_correctors` is exposed because how many the projection
+        // needs is a property of the *mesh*: four leaves 1e-04 of the inflow
+        // unaccounted on a jittered mesh that sixty-four closes to 1e-14.
+        // Pair it with last_pressure_change() rather than guessing.
+        .def(py::init<const aether::mesh::TetrahedralMesh&, double,
+                      std::function<aether::core::Vector3(const aether::core::Vector3&)>,
+                      std::function<bool(const aether::core::Vector3&)>, double, std::size_t>(),
+             py::arg("mesh"), py::arg("viscosity"), py::arg("wall_velocity"),
+             py::arg("is_outlet") = py::none(), py::arg("outlet_pressure") = 0.0,
+             py::arg("pressure_correctors") = UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
+             py::keep_alive<1, 2>())
+        .def("step", &UnstructuredCavitySolver3D::step, py::arg("dt"))
+        .def("stable_time_step", &UnstructuredCavitySolver3D::stableTimeStep)
+        .def("velocity", &UnstructuredCavitySolver3D::velocity, py::arg("cell"))
+        .def("pressure", &UnstructuredCavitySolver3D::pressure, py::arg("cell"))
+        .def("time", &UnstructuredCavitySolver3D::time)
+        .def("cell_count", &UnstructuredCavitySolver3D::cellCount)
+        // The quantity the projection actually drives to zero, measured on
+        // faces rather than as a cell-centred difference -- see the class
+        // comment for why that distinction has bitten this project twice.
+        .def("max_face_divergence", &UnstructuredCavitySolver3D::maxFaceDivergence)
+        // Net mass flux across every non-wall boundary face. A per-cell
+        // divergence can be zero everywhere while the domain as a whole
+        // gains or loses mass, which is what this catches.
+        .def("net_boundary_flux", &UnstructuredCavitySolver3D::netBoundaryFlux)
+        .def("max_non_orthogonality", &UnstructuredCavitySolver3D::maxNonOrthogonality)
+        // Whether the projection converged or merely ran out of correctors.
+        .def("last_pressure_change", &UnstructuredCavitySolver3D::lastPressureChange)
+        // How many cells fall back to Green-Gauss because their
+        // least-squares stencil is rank-deficient. Not a curiosity: it was
+        // 7% of the cavity and 12% of the channel, and those cells used to
+        // receive a silent zero gradient instead.
+        .def("deficient_stencil_count", &UnstructuredCavitySolver3D::deficientStencilCount);
 }

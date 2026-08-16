@@ -416,9 +416,9 @@ void testChannelWithOutletConservesGlobalMass() {
 
     std::printf("  [solver_tests] canal com saida: %zu celulas, entrada=%.5f, "
                 "balanco liquido=%+.3e (%.2f%% da entrada), u medio na saida=%.5f, "
-                "estencilDeficiente=%zu\n",
+                "estencilDeficiente=%zu, mudancaDePressao=%.2e\n",
                 mesh.cellCount(), inflow, net, 100.0 * std::fabs(net) / inflow, outletMean,
-                solver.deficientStencilCount());
+                solver.deficientStencilCount(), solver.lastPressureChange());
     std::fflush(stdout);
 
     AETHER_CHECK(inflow > 0.0);
@@ -509,8 +509,9 @@ void testUnstructuredCavityReproducesVortexTopology() {
     const double topMean = topSum / topVolume;
     const double bottomMean = bottomSum / bottomVolume;
     std::printf("  [solver_tests] cavidade nao-estruturada: %zu celulas, u medio topo=%+.5f fundo=%+.5f, "
-                "divergencia por faces=%.3e, estencilDeficiente=%zu\n",
-                mesh.cellCount(), topMean, bottomMean, worstDivergence, solver.deficientStencilCount());
+                "divergencia por faces=%.3e, estencilDeficiente=%zu, mudancaDePressao=%.2e\n",
+                mesh.cellCount(), topMean, bottomMean, worstDivergence, solver.deficientStencilCount(),
+                solver.lastPressureChange());
     std::fflush(stdout);
 
     // Direct viscous drag: the near-lid fluid must follow the lid.

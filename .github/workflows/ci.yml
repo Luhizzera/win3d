@@ -22,10 +22,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Installing pybind11 means CI also compiles the six binding modules,
-      # which are otherwise never exercised by ctest. Without it CMake would
-      # silently skip bindings/python and the build would still pass -- real
-      # coverage lost for one cheap step.
+      # Installing pybind11 means CI also builds the binding modules. That
+      # used to buy compile coverage only; since the unstructured layer got
+      # bindings (DIVIDA_TECNICA.md 5.2) there is a real Python suite
+      # registered with ctest, so this step is now what makes that suite run
+      # at all. Without it CMake silently skips bindings/python, the build
+      # still passes, and a whole registered suite disappears -- which is the
+      # failure --no-tests=error exists to catch, but only for the case where
+      # *no* test registers.
       - name: Install pybind11
         run: python -m pip install --upgrade pip pybind11
 

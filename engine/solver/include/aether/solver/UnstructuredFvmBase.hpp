@@ -140,9 +140,25 @@ protected:
     // the non-orthogonal correction needs it on the faces that entered the
     // operator. Keeping it as one registered function is what stops the two
     // solvers from answering the same question differently again.
+    //
+    // **Evaluated once per boundary face and cached, never called from
+    // inside a solve.** It used to be called from the Green-Gauss loop and
+    // from the non-orthogonal correction, i.e. thousands of times per step,
+    // which contradicted this class's own claim that no inner loop pays for
+    // dispatch. Writing the Python bindings is what made that visible and
+    // not merely inelegant: a predicate defined in Python would have taken
+    // the GIL on every one of those calls, which would have made the bindings
+    // too slow for the experiments they exist to enable.
     void setBoundaryFaceValue(std::function<bool(std::size_t, double&)> boundaryFaceValue) {
         boundaryFaceValue_ = std::move(boundaryFaceValue);
+        refreshBoundaryValues();
     }
+
+    // Re-evaluates the registered callback for every boundary face. Called
+    // automatically by buildFaceGeometry() and by setBoundaryFaceValue(), so
+    // the two possible orderings both end up with a filled cache; a solver
+    // whose prescribed values change without a rebuild must call it.
+    void refreshBoundaryValues();
 
     // -- Gradients ---------------------------------------------------------
 
@@ -327,6 +343,13 @@ protected:
     std::vector<std::vector<GradientStencilEntry>> gradientStencil_;
     std::vector<SymmetricInverse> gradientMatrixInverse_;
     std::function<bool(std::size_t, double&)> boundaryFaceValue_;
+    // The callback's answer, cached per *mesh* face -- mesh-indexed rather
+    // than boundary-indexed because Green-Gauss integrates over a cell's
+    // whole closed surface, mesh face by mesh face, including any face
+    // buildFaceGeometry() rejected. Dropping a face there would break the
+    // divergence-theorem identity the method rests on.
+    std::vector<char> boundaryHasValue_;
+    std::vector<double> boundaryValueCache_;
     std::size_t deficientStencilCount_ = 0;
 };
 
