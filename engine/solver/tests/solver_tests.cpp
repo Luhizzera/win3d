@@ -349,7 +349,7 @@ void testUnstructuredCavityReproducesVortexTopology() {
     // not to what would look impressive. Making finer, longer runs practical
     // needs implicit diffusion -- recorded in the ROADMAP, not attempted
     // here.
-    const std::size_t n = 3;
+    const std::size_t n = 4;
     const double lidSpeed = 1.0;
     const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(n);
     const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);

@@ -145,39 +145,11 @@ std::vector<Vector3> UnstructuredCavitySolver3D::scalarGradients(const std::vect
 }
 
 double UnstructuredCavitySolver3D::stableTimeStep() const {
-    // **The limit is taken from the operator itself, not from a length-scale
-    // proxy.** The explicit viscous update is
-    //     u_P += dt * nu * sum_f a_f (u_N - u_P) / V_P
-    // whose diagonal coefficient is nu * sum_f a_f / V_P, so stability needs
-    // dt below V_P / (nu * sum_f a_f) for every cell. That is exactly
-    // computable here because the a_f are already assembled.
-    //
-    // A first version instead used (V_P / total face area)^2 / (6 nu) as a
-    // stand-in for the cell's size. It was badly pessimistic on the slivers
-    // every Delaunay tetrahedralization produces -- volume shrinks toward
-    // zero while face area does not, so the proxy collapses much faster than
-    // the true limit does. Measured directly: that made a single cavity test
-    // take 6m57s. The proxy was never the criterion, only a guess at it.
-    double diffusiveLimit = 1e300;
-    if (viscosity_ > 0.0) {
-        std::vector<double> coefficientSum(mesh_->cellCount(), 0.0);
-        for (const InteriorFace& face : interiorFaces_) {
-            coefficientSum[face.owner] += face.laplacianCoefficient;
-            coefficientSum[face.neighbour] += face.laplacianCoefficient;
-        }
-        for (const BoundaryFace& face : boundaryFaces_) {
-            coefficientSum[face.cell] += face.laplacianCoefficient;
-        }
-        for (std::size_t cell = 0; cell < mesh_->cellCount(); ++cell) {
-            if (coefficientSum[cell] > 0.0) {
-                diffusiveLimit =
-                    std::min(diffusiveLimit, mesh_->cellVolume(cell) / (viscosity_ * coefficientSum[cell]));
-            }
-        }
-    }
-
-    // Convection still needs a length scale, and here volume / face area is
-    // the right one: it is the distance the flux actually has to cross.
+    // **Convection only.** With the viscous term solved implicitly there is
+    // no diffusive stability bound at all, which is what that change was
+    // for: the explicit bound scaled with the square of the smallest cell,
+    // and a Delaunay tetrahedralization always produces slivers, so the
+    // mesh's worst cell -- not the physics -- was setting the step.
     double smallestScale = 1e300;
     for (std::size_t cell = 0; cell < mesh_->cellCount(); ++cell) {
         double areaSum = 0.0;
@@ -188,34 +160,12 @@ double UnstructuredCavitySolver3D::stableTimeStep() const {
             smallestScale = std::min(smallestScale, mesh_->cellVolume(cell) / areaSum);
         }
     }
-    const double convectiveLimit = smallestScale / std::max(maxWallSpeed_, 1e-12);
-
-    // Safety factor, deliberately: ROADMAP Fase 1 found the structured
-    // cavity running at CFL exactly 1.0000 with no margin at all, which is
-    // why a small perturbation tipped it into NaN.
-    //
-    // **What this factor buys, measured rather than guessed.** Sweeping it
-    // on the cavity (177 cells, Re = 10, t = 4):
-    //
-    //   x1.00   8953 steps   divergence 6.42e-02   u_top +0.04568   0.2s
-    //   x0.50  17906 steps   divergence 3.56e-02   u_top +0.04483   0.5s
-    //   x0.25  35812 steps   divergence 1.88e-02   u_top +0.04438   0.9s
-    //
-    // Divergence scales **linearly with dt**: it is the projection's
-    // splitting error, not a defect, and halving the step halves it. That
-    // also settles what looked like a regression when this criterion
-    // replaced the old length-scale proxy -- the proxy's much smaller
-    // divergence (3.3e-04) was bought purely by taking ~200x smaller steps,
-    // at ~200x the cost. Same tradeoff curve, just a different point on it;
-    // the criterion's value is that the point is now chosen deliberately
-    // instead of dictated by a bad estimate of cell size.
-    //
-    // 0.4 is the default because the velocity field is already converged to
-    // three digits there (u_top moves by 3% across a 4x change in dt), so
-    // paying 4x the wall-clock buys accuracy the topology claim does not
-    // need. Lower it when the *pressure/divergence* field is what matters.
-    return 0.4 * std::min(diffusiveLimit, convectiveLimit);
+    // Safety factor, deliberately: ROADMAP Fase 1 found the structured cavity
+    // running at CFL exactly 1.0000 with no margin at all, which is why a
+    // small perturbation tipped it into NaN.
+    return 0.4 * smallestScale / std::max(maxWallSpeed_, 1e-12);
 }
+
 
 std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector<Vector3>& velocity,
                                                                  const std::vector<double>& pressure,
@@ -258,6 +208,66 @@ std::vector<double> UnstructuredCavitySolver3D::applyPoissonOperator(const std::
         }
     }
     return result;
+}
+
+std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(const std::vector<double>& x,
+                                                                        double dt) const {
+    std::vector<double> result(x.size());
+    for (std::size_t cell = 0; cell < x.size(); ++cell) {
+        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * poissonDiagonal_[cell]) * x[cell];
+    }
+    // A wall face stiffens its cell's equation even though the wall value
+    // itself is known and belongs on the right-hand side.
+    for (const BoundaryFace& face : boundaryFaces_) {
+        result[face.cell] += viscosity_ * face.laplacianCoefficient * x[face.cell];
+    }
+    for (const InteriorFace& face : interiorFaces_) {
+        result[face.owner] -= viscosity_ * face.laplacianCoefficient * x[face.neighbour];
+        result[face.neighbour] -= viscosity_ * face.laplacianCoefficient * x[face.owner];
+    }
+    return result;
+}
+
+std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(const std::vector<double>& rhs,
+                                                                double dt) const {
+    // Plain CG. This operator is far more diagonally dominant than the
+    // pressure Poisson one -- the V/dt shift only adds to the diagonal -- so
+    // it converges in very few iterations, which is why making diffusion
+    // implicit costs much less than the step limit it removes.
+    const std::size_t n = rhs.size();
+    std::vector<double> x(n, 0.0);
+    std::vector<double> residual = rhs;
+    std::vector<double> direction = residual;
+    double residualDotResidual = 0.0;
+    for (double r : residual) {
+        residualDotResidual += r * r;
+    }
+    for (std::size_t iteration = 0; iteration < n; ++iteration) {
+        if (std::sqrt(residualDotResidual) < 1e-12) {
+            break;
+        }
+        const std::vector<double> applied = applyHelmholtzOperator(direction, dt);
+        double directionDotApplied = 0.0;
+        for (std::size_t i2 = 0; i2 < n; ++i2) {
+            directionDotApplied += direction[i2] * applied[i2];
+        }
+        if (directionDotApplied == 0.0) {
+            break;
+        }
+        const double alpha = residualDotResidual / directionDotApplied;
+        double newResidualDotResidual = 0.0;
+        for (std::size_t i2 = 0; i2 < n; ++i2) {
+            x[i2] += alpha * direction[i2];
+            residual[i2] -= alpha * applied[i2];
+            newResidualDotResidual += residual[i2] * residual[i2];
+        }
+        const double beta = newResidualDotResidual / residualDotResidual;
+        for (std::size_t i2 = 0; i2 < n; ++i2) {
+            direction[i2] = residual[i2] + beta * direction[i2];
+        }
+        residualDotResidual = newResidualDotResidual;
+    }
+    return x;
 }
 
 void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& velocityStar, double dt) {
@@ -339,27 +349,40 @@ void UnstructuredCavitySolver3D::step(double dt) {
         flux[face.neighbour] += upwind * massFlux;
     }
 
-    // --- Viscous diffusion, orthogonal part plus the non-orthogonal
-    // correction evaluated from the current field (same decomposition as
-    // UnstructuredDiffusionSolver).
-    for (const InteriorFace& face : interiorFaces_) {
-        const Vector3 difference = velocity_[face.neighbour] - velocity_[face.owner];
-        const Vector3 viscous = difference * (viscosity_ * face.laplacianCoefficient);
-        flux[face.owner] += viscous;
-        flux[face.neighbour] -= viscous;
+    // --- Viscous diffusion, **implicit**. Per component,
+    //   (V/dt + nu L) u* = (V/dt) (u^n + dt * convection / V) + nu * wall terms
+    // so no diffusive stability bound applies at all. The three components
+    // are independent scalar solves: the viscous operator does not couple
+    // them.
+    std::vector<std::vector<double>> component(3, std::vector<double>(n));
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        const double volumeOverDt = mesh_->cellVolume(cell) / dt;
+        const Vector3 explicitPart = velocity_[cell] + flux[cell] * (dt / mesh_->cellVolume(cell));
+        component[0][cell] = volumeOverDt * explicitPart.x;
+        component[1][cell] = volumeOverDt * explicitPart.y;
+        component[2][cell] = volumeOverDt * explicitPart.z;
     }
-    // Wall viscous flux: the prescribed wall velocity acts as the "neighbour"
-    // value at the face centroid. This is what drives the whole flow -- the
-    // lid's tangential motion enters the momentum equation here and nowhere
-    // else.
+    // The wall velocity is known, so its viscous flux is a source rather than
+    // part of the operator. This is where the lid drives the flow.
     for (const BoundaryFace& face : boundaryFaces_) {
-        const Vector3 difference = face.wallVelocity - velocity_[face.cell];
-        flux[face.cell] += difference * (viscosity_ * face.laplacianCoefficient);
+        const double coefficient = viscosity_ * face.laplacianCoefficient;
+        component[0][face.cell] += coefficient * face.wallVelocity.x;
+        component[1][face.cell] += coefficient * face.wallVelocity.y;
+        component[2][face.cell] += coefficient * face.wallVelocity.z;
     }
 
     std::vector<Vector3> velocityStar(n);
-    for (std::size_t cell = 0; cell < n; ++cell) {
-        velocityStar[cell] = velocity_[cell] + flux[cell] * (dt / mesh_->cellVolume(cell));
+    for (int c = 0; c < 3; ++c) {
+        const std::vector<double> solved = solveHelmholtz(component[c], dt);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            if (c == 0) {
+                velocityStar[cell].x = solved[cell];
+            } else if (c == 1) {
+                velocityStar[cell].y = solved[cell];
+            } else {
+                velocityStar[cell].z = solved[cell];
+            }
+        }
     }
 
     projectToDivergenceFree(velocityStar, dt);

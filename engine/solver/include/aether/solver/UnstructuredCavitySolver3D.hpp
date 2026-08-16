@@ -59,10 +59,12 @@ public:
 
     void step(double dt);
 
-    // Conservative explicit limit from each cell's own size: the diffusive
-    // bound uses the smallest cell, the convective one the largest wall
-    // speed. A safety factor is applied -- Fase 1 found the structured
-    // cavity running at CFL exactly 1.0000 with no margin, which is what
+    // **Only the convective limit, because diffusion is implicit.** That is
+    // the whole point of the implicit treatment: the explicit viscous bound
+    // scales with the square of the smallest cell, and every Delaunay
+    // tetrahedralization produces slivers, so it -- not the physics -- was
+    // dictating the step. A safety factor is still applied: Fase 1 found the
+    // structured cavity at CFL exactly 1.0000 with no margin, which is what
     // made it so fragile.
     double stableTimeStep() const;
 
@@ -103,6 +105,14 @@ private:
                                         const std::vector<double>& pressure, double dt) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
     std::vector<double> applyPoissonOperator(const std::vector<double>& x) const;
+
+    // (V_P/dt + nu * sum_f a_f) x_P - nu * sum_f a_f x_N: the same Laplacian
+    // with a shifted diagonal, which is what makes the viscous term implicit.
+    // Still symmetric positive definite -- more strongly so than the Poisson
+    // operator, since the V/dt shift only adds to the diagonal -- so the same
+    // Conjugate Gradient applies unchanged.
+    std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt) const;
+    std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt) const;
 
     const mesh::TetrahedralMesh* mesh_;
     double viscosity_;
