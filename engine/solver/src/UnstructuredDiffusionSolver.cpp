@@ -26,13 +26,20 @@ UnstructuredDiffusionSolver::UnstructuredDiffusionSolver(const TetrahedralMesh& 
 
 void UnstructuredDiffusionSolver::setDirichletBoundary(
     const std::function<bool(const Vector3&)>& selector, double value) {
+    setDirichletBoundary(selector, [value](const Vector3&) { return value; });
+}
+
+void UnstructuredDiffusionSolver::setDirichletBoundary(
+    const std::function<bool(const Vector3&)>& selector,
+    const std::function<double(const Vector3&)>& value) {
     for (std::size_t f = 0; f < mesh_->faceCount(); ++f) {
         if (!mesh_->isBoundaryFace(f)) {
             continue;
         }
-        if (selector(mesh_->face(f).centroid)) {
+        const Vector3& centroid = mesh_->face(f).centroid;
+        if (selector(centroid)) {
             boundaryIsDirichlet_[f] = true;
-            boundaryValue_[f] = value;
+            boundaryValue_[f] = value(centroid);
         }
     }
     rebuildCoefficients();
@@ -56,6 +63,17 @@ void UnstructuredDiffusionSolver::rebuildCoefficients() {
     buildGradientStencils(/*useBoundaryValues=*/true);
 }
 
+void UnstructuredDiffusionSolver::setSourceTerm(std::function<double(const Vector3&)> source) {
+    if (!source) {
+        integratedSource_.clear();
+        return;
+    }
+    integratedSource_.assign(mesh_->cellCount(), 0.0);
+    for (std::size_t cell = 0; cell < mesh_->cellCount(); ++cell) {
+        integratedSource_[cell] = source(mesh_->cellCentroid(cell)) * mesh_->cellVolume(cell);
+    }
+}
+
 std::size_t UnstructuredDiffusionSolver::solveConjugateGradient(std::size_t maxIterations, double tolerance,
                                                                  std::size_t maxOuterSweeps) {
     if (!hasDirichletFace_) {
@@ -64,11 +82,19 @@ std::size_t UnstructuredDiffusionSolver::solveConjugateGradient(std::size_t maxI
             "boundaries the operator is singular");
     }
 
-    // The only source term: a_b * phi_b from each face held at a fixed value.
+    // Boundary source: a_b * phi_b from each face held at a fixed value.
     std::vector<double> baseRhs(phi_.size(), 0.0);
     for (const BoundaryFace& face : boundaryFaces_) {
         if (face.entersOperator) {
             baseRhs[face.cell] += face.coefficient * boundaryValue_[face.meshFace];
+        }
+    }
+    // Volumetric source, already integrated over each cell. The operator
+    // assembled here is -integral(laplacian(phi)) over the cell, so a source
+    // on this side of the equation solves laplacian(phi) + S = 0.
+    if (!integratedSource_.empty()) {
+        for (std::size_t cell = 0; cell < phi_.size(); ++cell) {
+            baseRhs[cell] += integratedSource_[cell];
         }
     }
 

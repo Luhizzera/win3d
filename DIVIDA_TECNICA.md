@@ -291,17 +291,74 @@ escoamento (arrasto, sustentação, perda de carga) fica dominado pela difusão
 do esquema, não pela física. Serve para topologia, não para número.
 
 **O que fazer**: esquema limitado de alta ordem (TVD / linear-upwind com
-limitador), que é o padrão exatamente por esse motivo.
+limitador), que é o padrão exatamente por esse motivo. O item 3.2 já entregou
+a régua para medir o ganho: uma solução manufaturada com convecção, no mesmo
+molde da que mediu o Laplaciano em ordem 2, diria quanto do erro é de fato do
+esquema de convecção.
 
-### 3.2 FVM não-estruturado em ordem ~1, não 2
+### 3.2 ~~FVM não-estruturado em ordem ~1, não 2~~ — RESOLVIDO em 2026-08-16: é ordem 2
 
 Medido na Fase 2.2: 0,91 → 0,98 na norma global; 1,06 → 1,63 excluindo os
-cantos singulares. Segunda ordem existe na região suave, mas não foi
-demonstrada num caso sem singularidade.
+cantos singulares. Segunda ordem existia na região suave, mas não tinha sido
+demonstrada num caso sem singularidade — era inferência, e estava marcada
+como tal.
 
-**O que fazer**: um caso de verificação com solução suave em todo o domínio
-(solução manufaturada) para medir a ordem sem o teto da singularidade. Sem
-isso, "é de segunda ordem" continua sendo inferência, não medição.
+**Resolvido, e a inferência estava certa.** Solução manufaturada suave em todo
+o cubo fechado:
+
+    phi(x,y,z) = sin(pi x) cos(pi y) exp(z)
+    lap(phi) = (1 - 2 pi^2) phi   =>   S = (2 pi^2 - 1) phi
+
+com `phi` imposto nas seis faces. Tudo o que sobra entre o campo calculado e
+`phi` é erro de discretização — nada recordado de tabela, nada ajustado.
+
+| n | células | rms | ordem | naoOrtog |
+|---|---|---|---|---|
+| 4 | 415 | 2,338802e-02 | — | 1,48 |
+| 6 | 1358 | 1,033868e-02 | **2,013** | 1,45 |
+| 8 | 3184 | 5,775569e-03 | **2,024** | 1,63 |
+| 10 | 6204 | 3,675188e-03 | **2,026** | 1,75 |
+| 12 | 10667 | 2,577107e-03 | 1,947 | 1,64 |
+
+**Segunda ordem, em malha cuja não-ortogonalidade fica entre 1,45 e 1,75 e não
+melhora com refino.** O ~1 da placa era o teto da singularidade de canto, não
+o esquema. As duas primeiras linhas estão na suíte; n = 10 e 12 rodam fora
+dela, porque tetraedralizar n = 10 custa 36 s contra 0,16 s de solve.
+
+**Três coisas verificadas antes de acreditar no número**, cada uma capaz de
+limitar a ordem medida exatamente no valor sob teste:
+
+- A fonte é integrada pela regra do ponto médio, `S(centroide)·V` — exata para
+  fonte linear e O(h²) caso contrário. Fica na mesma ordem sob teste, não
+  abaixo dela, então não pode se disfarçar de esquema de primeira ordem.
+- O erro é medido contra `phi` no centroide, enquanto a incógnita de volumes
+  finitos é a média da célula. Diferem por O(h²), o que significa que **esta
+  norma não poderia demonstrar ordem acima de 2** — mas distingue 1 de 2, que
+  é a pergunta.
+- A correção diferida foi levada à convergência, não ao teto de varreduras: em
+  n = 8 o erro é 5,77434e-03 com 20 varreduras, 5,775568e-03 com 60 e
+  5,7755687e-03 convergido. A iteração externa parou de importar quatro
+  dígitos antes da discretização.
+
+**O que isto exigiu de API**, e ambas são funcionalidade legítima que faltava:
+`setSourceTerm()` (Laplace vira Poisson — sem fonte, as únicas soluções
+exatas são as harmônicas, família estreita que deixa a integração de volume
+sem teste) e uma sobrecarga de `setDirichletBoundary()` com valor variável
+pela face, porque a condição de contorno de uma solução manufaturada *é* a
+solução exata amostrada na superfície. Ambas com binding Python.
+
+**Efeito colateral que valeu o passo**: as malhas de teste passaram a ser
+construídas uma vez e compartilhadas (`cubeLatticeMesh`). A tetraedralização
+domina — 0,24 s / 1,99 s / 10,26 s / 36,2 s para n = 4/6/8/10, contra
+0,00 s / 0,02 s / 0,06 s / 0,16 s de solve — e quatro testes queriam as
+mesmas resoluções. A suíte inteira **caiu de 29,3 s para 28,7 s mesmo com o
+caso novo dentro**.
+
+**O que este item não afirma**: que o *solver de Navier-Stokes* é de segunda
+ordem. Isto mede o Laplaciano com a correção não-ortogonal e os gradientes de
+mínimos quadrados — a parte compartilhada. A convecção continua upwind de
+primeira ordem (item 3.1), e agora existe uma régua confiável para medir o que
+um esquema de alta ordem melhoraria.
 
 ### 3.3 Interpolação de face sem correção de skewness
 
@@ -546,8 +603,8 @@ Por dependência, não por tamanho:
 5. ~~**2.3** (pressão da saída no estêncil)~~ — FEITO, e dissolveu o 5.4
 6. ~~**4.3** (NaN em malha distorcida)~~ — DIAGNOSTICADO e contido; a causa
    segue aberta e precisa de uma API de carregar estado para ser medida
-7. **3.2** (solução manufaturada) — mede o que hoje é inferido
-8. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
+7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
+8. **3.1** (esquema de alta ordem) — a régua confiável agora existe
 9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
 10. **5.1** (push) — um comando
 

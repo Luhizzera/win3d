@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <memory>
 #include <vector>
 #include <cstdio>
@@ -261,6 +262,28 @@ aether::mesh::DelaunayTetrahedralization3D buildCubeLatticeTetrahedralization(st
     return tets;
 }
 
+// Face connectivity for that lattice, built once per resolution.
+//
+// **This is a cache because tetrahedralization dominates, and by a lot.**
+// Measured: n = 4/6/8/10 take 0.24s / 1.99s / 10.26s / 36.2s to
+// tetrahedralize, against 0.00s / 0.02s / 0.06s / 0.16s to *solve* on the
+// resulting mesh. Four tests in this file want the same few resolutions, so
+// rebuilding per test was paying the expensive part two and three times over
+// for nothing. Returned by reference into storage that outlives every caller,
+// which matters because the solvers keep a pointer to the mesh rather than a
+// copy.
+const aether::mesh::TetrahedralMesh& cubeLatticeMesh(std::size_t n) {
+    static std::map<std::size_t, aether::mesh::TetrahedralMesh> cache;
+    const auto existing = cache.find(n);
+    if (existing != cache.end()) {
+        return existing->second;
+    }
+    return cache
+        .emplace(n, aether::mesh::TetrahedralMesh::fromTetrahedralization(
+                        buildCubeLatticeTetrahedralization(n)))
+        .first->second;
+}
+
 // Solves the plate problem on one such mesh and returns the volume-weighted
 // RMS error against the Fourier series. Volume-weighted because tetrahedra
 // vary in size: an unweighted average would let a cloud of tiny slivers
@@ -277,8 +300,7 @@ struct UnstructuredPlateResult {
 
 UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
     const double t0 = 100.0;
-    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(n);
-    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
 
     aether::solver::UnstructuredDiffusionSolver solver(mesh);
     constexpr double kOnPlane = 1e-9;
@@ -354,8 +376,7 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
 // sealed domain cannot do at all.
 void testChannelWithOutletConservesGlobalMass() {
     const double inletSpeed = 1.0;
-    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(3);
-    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(3);
 
     aether::solver::UnstructuredCavitySolver3D solver(
         mesh, 0.1,
@@ -459,8 +480,7 @@ void testUnstructuredCavityReproducesVortexTopology() {
     // here.
     const std::size_t n = 4;
     const double lidSpeed = 1.0;
-    const aether::mesh::DelaunayTetrahedralization3D tets = buildCubeLatticeTetrahedralization(n);
-    const aether::mesh::TetrahedralMesh mesh = aether::mesh::TetrahedralMesh::fromTetrahedralization(tets);
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
 
     // Re = lidSpeed * L / nu = 10: safely laminar, single-vortex regime, the
     // same number the structured cavity topology test uses.
@@ -529,6 +549,123 @@ void testUnstructuredCavityReproducesVortexTopology() {
     AETHER_CHECK(worstDivergence < 5e-2);
     // Guards against the whole thing passing on a dead field.
     AETHER_CHECK(topMean > 0.01);
+}
+
+// **Method of manufactured solutions: the ruler ROADMAP Fase 2.2 never had.**
+//
+// Fase 2.2 measured the plate problem converging at order 0.91 -> 0.98 in the
+// global norm and 1.06 -> 1.63 with the singular corners excluded, and
+// concluded that second order "exists in the smooth region" but had not been
+// demonstrated. That was an inference, and it was recorded as such
+// (DIVIDA_TECNICA.md 3.2), because the plate has an unbounded gradient where
+// its hot edge meets a cold one: no scheme converges at its formal order in a
+// norm that includes those cells, so the plate could not tell a second-order
+// discretization from a first-order one.
+//
+// This case removes the ceiling instead of working around it. Pick a solution
+// that is smooth on the whole closed cube,
+//
+//   phi(x,y,z) = sin(pi x) cos(pi y) exp(z)
+//
+// derive the source term it satisfies exactly,
+//
+//   laplacian(phi) = (-pi^2 - pi^2 + 1) phi   =>   S = -laplacian(phi) = (2 pi^2 - 1) phi
+//
+// impose phi itself on all six faces, and every remaining difference between
+// the computed field and phi is discretization error. Nothing is recalled
+// from a table, and nothing is fitted: the exact answer is known everywhere
+// in closed form.
+//
+// **Three things were checked before trusting the number**, because each
+// would have capped the measured order at exactly the value being tested:
+//
+//   - The source is integrated by the midpoint rule, S(centroid) * V. That is
+//     exact for a linear source and O(h^2) otherwise, so it sits at the order
+//     under test rather than below it -- but at the same order, not a lower
+//     one, so it cannot masquerade as a first-order scheme.
+//   - The error is measured against phi at the cell centroid, while the
+//     finite-volume unknown is really the cell average. Those differ by
+//     O(h^2), which means this norm cannot demonstrate an order *above* two.
+//     It can distinguish one from two, which is the question.
+//   - The deferred correction was run to convergence rather than to a sweep
+//     cap. At n = 8 the error is 5.77434e-03 after 20 sweeps, 5.775568e-03
+//     after 60, and 5.7755687e-03 at full convergence: the outer iteration
+//     stopped mattering four digits before the discretization did.
+void testManufacturedSolutionReachesSecondOrder() {
+    std::printf("  [solver_tests] solucao manufaturada, suave em todo o dominio:\n");
+    std::fflush(stdout);
+
+    constexpr double kPi = 3.14159265358979323846;
+    const auto exact = [&](const Vector3& p) {
+        return std::sin(kPi * p.x) * std::cos(kPi * p.y) * std::exp(p.z);
+    };
+    const auto source = [&](const Vector3& p) { return (2.0 * kPi * kPi - 1.0) * exact(p); };
+
+    double previousError = 0.0;
+    double previousH = 0.0;
+    double finestError = 0.0;
+    double worstOrder = 1e9;
+    std::size_t orderSamples = 0;
+
+    // Same three resolutions the plate case uses, so the meshes are built
+    // once and shared (see cubeLatticeMesh). Finer meshes were measured out
+    // of suite -- n = 10 gives order 2.026 and n = 12 gives 1.947 -- and are
+    // not run here because tetrahedralizing n = 10 alone costs 36s against a
+    // 0.16s solve. Same trade as DIVIDA_TECNICA.md 5.3: the suite gates what
+    // is cheap, the fuller study runs outside it.
+    for (std::size_t n : {4u, 6u, 8u}) {
+        const double h = 1.0 / static_cast<double>(n);
+        const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+
+        aether::solver::UnstructuredDiffusionSolver solver(mesh);
+        solver.setSourceTerm(source);
+        // Every boundary face, whichever plane it lies on: the manufactured
+        // solution is the boundary condition.
+        solver.setDirichletBoundary([](const Vector3&) { return true; },
+                                     std::function<double(const Vector3&)>(exact));
+        const std::size_t sweeps = solver.solveConjugateGradient(60000, 1e-11, 200);
+
+        // Volume-weighted, because tetrahedra vary in size and an unweighted
+        // average would let a cloud of slivers outvote the cells that carry
+        // the domain.
+        double weightedSquaredError = 0.0;
+        double totalVolume = 0.0;
+        for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+            const double error = solver.value(cell) - exact(mesh.cellCentroid(cell));
+            const double volume = mesh.cellVolume(cell);
+            weightedSquaredError += volume * error * error;
+            totalVolume += volume;
+        }
+        const double rmsError = std::sqrt(weightedSquaredError / totalVolume);
+
+        double order = 0.0;
+        if (previousError > 0.0) {
+            order = std::log(previousError / rmsError) / std::log(previousH / h);
+            worstOrder = std::min(worstOrder, order);
+            ++orderSamples;
+        }
+        std::printf("    n=%2zu  celulas=%5zu  rmsErro=%.6e (ordem %5.3f)  naoOrtog=%.2f  varreduras=%zu\n",
+                    n, mesh.cellCount(), rmsError, order, solver.maxNonOrthogonality(), sweeps);
+        std::fflush(stdout);
+
+        previousError = rmsError;
+        previousH = h;
+        finestError = rmsError;
+    }
+
+    AETHER_CHECK(orderSamples == 2);
+    // **The claim Fase 2.2 could not make.** Measured 2.013 and 2.024 here,
+    // 2.026 and 1.947 on the two finer meshes run out of suite -- second
+    // order, on a mesh whose non-orthogonality is 1.45 to 1.75 and does not
+    // improve with refinement. The bound is set below the measured values
+    // with margin and well above 1: the whole point is to separate a
+    // second-order discretization from a first-order one, and 1.8 is a
+    // threshold no first-order scheme reaches.
+    AETHER_CHECK(worstOrder > 1.8);
+    // Guards the other direction: an order computed from a sequence of
+    // absurdly large errors would be meaningless. Set from the measured
+    // 5.78e-03 at n = 8.
+    AETHER_CHECK(finestError < 8e-3);
 }
 
 // **The gate for ROADMAP Fase 2.** Two things are checked, and the second
@@ -2692,6 +2829,7 @@ int main() {
     testImplicitConvectionDiffusion1DJacobiHelpsOnlyWhenDiagonalVaries();
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
+    testManufacturedSolutionReachesSecondOrder();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();

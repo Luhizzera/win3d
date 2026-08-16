@@ -351,8 +351,23 @@ PYBIND11_MODULE(aether_solver_py, m) {
         // centroid: "the face on the x = 0 plane" without needing to know
         // how the mesh generator numbered anything. Every face starts
         // insulated; a later call overrides an earlier one.
-        .def("set_dirichlet_boundary", &UnstructuredDiffusionSolver::setDirichletBoundary,
+        .def("set_dirichlet_boundary",
+             py::overload_cast<const std::function<bool(const aether::core::Vector3&)>&, double>(
+                 &UnstructuredDiffusionSolver::setDirichletBoundary),
              py::arg("selector"), py::arg("value"))
+        // Value varying over the boundary, for data that is not piecewise
+        // constant -- a manufactured solution above all. Registered second so
+        // a plain number still binds to the constant overload.
+        .def("set_dirichlet_boundary",
+             py::overload_cast<const std::function<bool(const aether::core::Vector3&)>&,
+                                const std::function<double(const aether::core::Vector3&)>&>(
+                 &UnstructuredDiffusionSolver::setDirichletBoundary),
+             py::arg("selector"), py::arg("value"))
+        // Volumetric source: turns Laplace into Poisson, which is what the
+        // method of manufactured solutions needs -- pick any smooth phi, set
+        // S = -laplacian(phi), and the discretization error is all that is
+        // left to measure.
+        .def("set_source_term", &UnstructuredDiffusionSolver::setSourceTerm, py::arg("source"))
         .def("solve_conjugate_gradient", &UnstructuredDiffusionSolver::solveConjugateGradient,
              py::arg("max_iterations") = 20000, py::arg("tolerance") = 1e-10,
              py::arg("max_outer_sweeps") = 50)

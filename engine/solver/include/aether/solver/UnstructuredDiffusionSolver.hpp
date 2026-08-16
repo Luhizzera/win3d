@@ -42,6 +42,17 @@ namespace aether::solver {
 // 2.433 -> 2.365 for n = 4/6/8, an observed order of 0.42 then 0.10 -- a
 // plateau, not convergence. Running that experiment before committing to the
 // simpler scheme is the Fase 1 lesson applied.
+//
+// **With the correction in place this class is second order, and that is now
+// measured rather than inferred.** Fase 2.2 could only report 0.91 -> 0.98 on
+// the plate problem, whose hot and cold edges meet at two corners where the
+// exact solution has no bounded gradient -- no scheme converges at its formal
+// order in a norm that includes those cells, so the plate could not tell a
+// second-order discretization from a first-order one. A manufactured solution
+// smooth over the whole closed cube gives order 2.013, 2.024, 2.026 for
+// n = 4/6/8/10 (and 1.947 at n = 12), on meshes whose non-orthogonality stays
+// between 1.45 and 1.75. See testManufacturedSolutionReachesSecondOrder() and
+// setSourceTerm(), which exists for it.
 class UnstructuredDiffusionSolver : public UnstructuredFvmBase {
 public:
     explicit UnstructuredDiffusionSolver(const mesh::TetrahedralMesh& mesh);
@@ -54,6 +65,38 @@ public:
     // mesh generator happened to number things. A later call overrides an
     // earlier one for the same face.
     void setDirichletBoundary(const std::function<bool(const core::Vector3&)>& selector, double value);
+
+    // The same, with the value varying over the boundary: `value` is
+    // evaluated at each selected face's centroid. Needed by any problem whose
+    // boundary data is not piecewise constant -- a manufactured solution
+    // above all, where the boundary condition *is* the exact solution
+    // sampled on the surface. The constant overload is this one with a
+    // constant function, and is kept because "this whole side is held at
+    // 100 degrees" should not have to be written as a lambda.
+    void setDirichletBoundary(const std::function<bool(const core::Vector3&)>& selector,
+                               const std::function<double(const core::Vector3&)>& value);
+
+    // Volumetric source: solves the Poisson equation
+    //
+    //   laplacian(phi) + S(x) = 0
+    //
+    // instead of Laplace's. `source` is evaluated at each cell centroid and
+    // multiplied by the cell volume, which is the midpoint rule for the
+    // integral the finite-volume method actually needs. That rule is exact
+    // for a linear source and carries an O(h^2) relative error otherwise --
+    // deliberately noted, because it sits at exactly the order this class's
+    // accuracy is claimed at, so a coarser quadrature here would cap the
+    // measured convergence rate and look like a defect of the scheme.
+    //
+    // **Added for the method of manufactured solutions** (ROADMAP Fase 2.2
+    // left second order as an inference, DIVIDA_TECNICA.md 3.2): pick any
+    // smooth phi, set S = -laplacian(phi), impose phi on the boundary, and
+    // the discretization error is the only thing left to measure. Without a
+    // source term the only exactly-known solutions are harmonic ones, which
+    // is a narrower family and leaves the volume integration untested.
+    //
+    // Pass {} to clear it and return to Laplace's equation.
+    void setSourceTerm(std::function<double(const core::Vector3&)> source);
 
     // Outer deferred-correction sweeps, each an inner matrix-free CG solve
     // (same pattern as SteadyDiffusionSolver). Returns the number of outer
@@ -91,6 +134,9 @@ private:
     std::vector<bool> boundaryIsDirichlet_;
     std::vector<double> boundaryValue_;
     bool hasDirichletFace_ = false;
+    // Already integrated: S(centroid) * V, one per cell, so the solve does
+    // not re-evaluate the caller's function on every outer sweep.
+    std::vector<double> integratedSource_;
     std::vector<double> phi_;
     double lastOuterChange_ = 0.0;
 };
