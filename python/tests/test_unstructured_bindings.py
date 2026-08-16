@@ -376,7 +376,8 @@ def main():
     # people this layer is for.
     import aether
 
-    for name in ("TetrahedralMesh", "UnstructuredDiffusionSolver", "UnstructuredCavitySolver3D"):
+    for name in ("TetrahedralMesh", "UnstructuredDiffusionSolver", "UnstructuredCavitySolver3D",
+                 "UnstructuredScalarTransportSolver"):
         check(hasattr(aether, name), f"aether.{name} exportado pelo pacote")
 
     mesh = build_jittered_lattice(3)

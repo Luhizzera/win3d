@@ -20,6 +20,7 @@
 #include "aether/solver/TransientDiffusionSolver.hpp"
 #include "aether/solver/UnstructuredCavitySolver3D.hpp"
 #include "aether/solver/UnstructuredDiffusionSolver.hpp"
+#include "aether/solver/UnstructuredScalarTransportSolver.hpp"
 
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
@@ -379,6 +380,39 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("cell_count", &UnstructuredDiffusionSolver::cellCount)
         .def("max_non_orthogonality", &UnstructuredDiffusionSolver::maxNonOrthogonality)
         .def("deficient_stencil_count", &UnstructuredDiffusionSolver::deficientStencilCount);
+
+    // Steady convection-diffusion of a passive scalar carried by a
+    // *prescribed* velocity. Exists to measure the convection scheme against
+    // a known answer -- the Navier-Stokes solver cannot do that, because
+    // there the velocity is what is being solved for.
+    py::class_<UnstructuredScalarTransportSolver> transport(m, "UnstructuredScalarTransportSolver");
+    py::enum_<UnstructuredScalarTransportSolver::ConvectionScheme>(transport, "ConvectionScheme")
+        .value("FIRST_ORDER_UPWIND",
+               UnstructuredScalarTransportSolver::ConvectionScheme::FirstOrderUpwind)
+        .value("LIMITED_LINEAR_UPWIND",
+               UnstructuredScalarTransportSolver::ConvectionScheme::LimitedLinearUpwind);
+    transport
+        .def(py::init<const aether::mesh::TetrahedralMesh&, double,
+                      std::function<aether::core::Vector3(const aether::core::Vector3&)>,
+                      UnstructuredScalarTransportSolver::ConvectionScheme>(),
+             py::arg("mesh"), py::arg("diffusivity"), py::arg("velocity"),
+             py::arg("scheme") =
+                 UnstructuredScalarTransportSolver::ConvectionScheme::LimitedLinearUpwind,
+             py::keep_alive<1, 2>())
+        .def("set_dirichlet_boundary", &UnstructuredScalarTransportSolver::setDirichletBoundary,
+             py::arg("selector"), py::arg("value"))
+        .def("set_source_term", &UnstructuredScalarTransportSolver::setSourceTerm, py::arg("source"))
+        .def("solve_steady", &UnstructuredScalarTransportSolver::solveSteady,
+             py::arg("tolerance") = 1e-12, py::arg("max_steps") = 500000)
+        .def("stable_time_step", &UnstructuredScalarTransportSolver::stableTimeStep)
+        .def("value", &UnstructuredScalarTransportSolver::value, py::arg("cell"))
+        .def("last_change", &UnstructuredScalarTransportSolver::lastChange)
+        // How far into the convection-dominated regime this case sits, which
+        // is the only regime where the error measures the convection scheme.
+        .def("max_cell_peclet", &UnstructuredScalarTransportSolver::maxCellPeclet)
+        .def("cell_count", &UnstructuredScalarTransportSolver::cellCount)
+        .def("max_non_orthogonality", &UnstructuredScalarTransportSolver::maxNonOrthogonality)
+        .def("deficient_stencil_count", &UnstructuredScalarTransportSolver::deficientStencilCount);
 
     py::class_<UnstructuredCavitySolver3D>(m, "UnstructuredCavitySolver3D")
         // `wall_velocity(position)` gives the prescribed velocity at a

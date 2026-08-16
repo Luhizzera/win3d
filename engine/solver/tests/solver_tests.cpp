@@ -3,6 +3,7 @@
 #include "aether/mesh/TetrahedralMesh.hpp"
 #include "aether/solver/UnstructuredCavitySolver3D.hpp"
 #include "aether/solver/UnstructuredDiffusionSolver.hpp"
+#include "aether/solver/UnstructuredScalarTransportSolver.hpp"
 #include "aether/solver/DesSstLidDrivenCavitySolver3D.hpp"
 #include "aether/solver/ImplicitConvectionDiffusionSolver1D.hpp"
 #include "aether/solver/KEpsilonChannelFlowSolver1D.hpp"
@@ -549,6 +550,122 @@ void testUnstructuredCavityReproducesVortexTopology() {
     AETHER_CHECK(worstDivergence < 5e-2);
     // Guards against the whole thing passing on a dead field.
     AETHER_CHECK(topMean > 0.01);
+}
+
+// **The convection scheme, measured against a known answer.**
+//
+// DIVIDA_TECNICA.md 3.1 recorded that this project's unstructured convection
+// was first-order upwind and that its numerical diffusion was the ceiling on
+// any quantitative result. That was a textbook expectation, not a
+// measurement -- the same status second order had for the Laplacian before
+// item 3.2, and this project's own history says expectations of that kind are
+// worth checking: the plate case measured order 0.95 for a discretization
+// that turned out to be second order.
+//
+// Same construction as the manufactured Laplacian case, with convection
+// added. Exact solution phi = sin(pi x) cos(pi y) exp(z), carried by a
+// **uniform** velocity U = (1,1,1)/sqrt(3):
+//
+//   - uniform, so its discrete divergence is exactly zero and no spurious
+//     source hides in the convection operator;
+//   - oblique to every face of a tetrahedron, which is where upwind's
+//     numerical diffusion is worst and is the reason item 3.1 called it a
+//     ceiling rather than a nuisance.
+//
+// The source term follows from the equation the solver states it solves:
+// div(U phi) - Gamma laplacian(phi) = S, with div(U phi) = U . grad(phi)
+// since U is divergence free.
+//
+// Gamma = 0.01 puts the cell Peclet number between 12.5 and 5.8 over these
+// meshes -- convection-dominated, so what the error measures is the
+// convection scheme rather than the (already second-order) Laplacian.
+void testConvectionSchemeOrder() {
+    std::printf("  [solver_tests] conveccao vs solucao manufaturada (U obliquo, Pe 12.5 a 5.8):\n");
+    std::fflush(stdout);
+
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kGamma = 0.01;
+    const double kAxis = 1.0 / std::sqrt(3.0);
+
+    const auto exact = [&](const Vector3& p) {
+        return std::sin(kPi * p.x) * std::cos(kPi * p.y) * std::exp(p.z);
+    };
+    const auto source = [&](const Vector3& p) {
+        const double gx = kPi * std::cos(kPi * p.x) * std::cos(kPi * p.y) * std::exp(p.z);
+        const double gy = -kPi * std::sin(kPi * p.x) * std::sin(kPi * p.y) * std::exp(p.z);
+        const double gz = exact(p);
+        const double laplacian = (1.0 - 2.0 * kPi * kPi) * exact(p);
+        return kAxis * (gx + gy + gz) - kGamma * laplacian;
+    };
+
+    using Scheme = aether::solver::UnstructuredScalarTransportSolver::ConvectionScheme;
+    double upwindFinest = 0.0;
+    double limitedFinest = 0.0;
+    double upwindWorstOrder = 1e9;
+    double limitedWorstOrder = 1e9;
+
+    for (int schemeIndex = 0; schemeIndex < 2; ++schemeIndex) {
+        const Scheme scheme = schemeIndex == 0 ? Scheme::FirstOrderUpwind : Scheme::LimitedLinearUpwind;
+        std::printf("    %s\n", schemeIndex == 0 ? "upwind de primeira ordem"
+                                                  : "linear-upwind limitado (van Leer)");
+        double previousError = 0.0;
+        double previousH = 0.0;
+
+        for (std::size_t n : {4u, 6u, 8u}) {
+            const double h = 1.0 / static_cast<double>(n);
+            const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+
+            aether::solver::UnstructuredScalarTransportSolver solver(
+                mesh, kGamma, [&](const Vector3&) { return Vector3{kAxis, kAxis, kAxis}; }, scheme);
+            solver.setDirichletBoundary([](const Vector3&) { return true; },
+                                         std::function<double(const Vector3&)>(exact));
+            solver.setSourceTerm(source);
+            const std::size_t steps = solver.solveSteady(1e-11, 200000);
+
+            double weightedSquaredError = 0.0;
+            double totalVolume = 0.0;
+            for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+                const double error = solver.value(cell) - exact(mesh.cellCentroid(cell));
+                const double volume = mesh.cellVolume(cell);
+                weightedSquaredError += volume * error * error;
+                totalVolume += volume;
+            }
+            const double rmsError = std::sqrt(weightedSquaredError / totalVolume);
+
+            double order = 0.0;
+            if (previousError > 0.0) {
+                order = std::log(previousError / rmsError) / std::log(previousH / h);
+                double& worst = schemeIndex == 0 ? upwindWorstOrder : limitedWorstOrder;
+                worst = std::min(worst, order);
+            }
+            std::printf("      n=%zu  celulas=%5zu  rms=%.6e (ordem %5.3f)  Pe=%4.1f  passos=%zu\n", n,
+                        mesh.cellCount(), rmsError, order, solver.maxCellPeclet(), steps);
+            std::fflush(stdout);
+
+            previousError = rmsError;
+            previousH = h;
+            (schemeIndex == 0 ? upwindFinest : limitedFinest) = rmsError;
+        }
+    }
+
+    // **First order, measured.** 1.028 and 1.182 -- so item 3.1's premise was
+    // right, and now it is a number rather than a textbook expectation.
+    AETHER_CHECK(upwindWorstOrder > 0.85);
+    AETHER_CHECK(upwindWorstOrder < 1.45);
+    // **And the limited scheme is second order in the smooth region.** 2.066
+    // and 1.826 here, 1.584 on a fourth mesh run out of suite. The drift down
+    // is expected and is the price of boundedness: a TVD limiter clips at
+    // smooth extrema, and this solution has interior extrema in x and y, so
+    // those cells fall back to first order and take a growing share of the
+    // norm as the mesh refines. The bound separates it from first order,
+    // which is the claim being made.
+    AETHER_CHECK(limitedWorstOrder > 1.5);
+    // Lower error at the same resolution is the practical statement, and the
+    // one a user cares about: 3.32x on the finest mesh here.
+    AETHER_CHECK(limitedFinest < 0.5 * upwindFinest);
+    std::printf("      erro %0.2fx menor na malha mais fina, com o mesmo custo de malha\n",
+                upwindFinest / limitedFinest);
+    std::fflush(stdout);
 }
 
 // **Method of manufactured solutions: the ruler ROADMAP Fase 2.2 never had.**
@@ -2830,6 +2947,7 @@ int main() {
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
     testManufacturedSolutionReachesSecondOrder();
+    testConvectionSchemeOrder();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();

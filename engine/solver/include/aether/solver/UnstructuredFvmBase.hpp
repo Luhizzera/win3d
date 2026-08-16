@@ -59,6 +59,19 @@ public:
     // first-order and the solver's formal accuracy claim does not hold.
     std::size_t deficientStencilCount() const { return deficientStencilCount_; }
 
+    // How a convected quantity is reconstructed at a face.
+    enum class ConvectionScheme {
+        // phi_f = phi_upwind. Bounded unconditionally and first-order
+        // accurate. Its error is numerical diffusion, and the part that makes
+        // it more than a nuisance is that the diffusion is largest for flow
+        // *oblique* to the face -- which on tetrahedra is every face.
+        FirstOrderUpwind,
+        // Second-order reconstruction from the upwind cell, pulled back
+        // towards upwind by a limiter wherever the solution is not smooth.
+        // See limitedFaceValue().
+        LimitedLinearUpwind,
+    };
+
 protected:
     explicit UnstructuredFvmBase(const mesh::TetrahedralMesh& mesh) : mesh_(&mesh) {}
     ~UnstructuredFvmBase() = default;
@@ -227,6 +240,40 @@ protected:
         return gradients[face.owner] * face.ownerWeight +
                gradients[face.neighbour] * (1.0 - face.ownerWeight);
     }
+
+    // -- Convection ---------------------------------------------------------
+
+    // Face value of `field` for a convective flux across `face`, given the
+    // mass flux through it and the cell gradients.
+    //
+    // **The limited form, and why this shape of it.** Writing the face value
+    // as a correction to the upwind value,
+    //
+    //   phi_f = phi_C + psi * (phi_central - phi_C)
+    //
+    // makes psi = 0 exactly upwind and psi = 1 exactly central, so the
+    // limiter interpolates between a scheme that is bounded and a scheme that
+    // is second order. `phi_central` is the distance-weighted interpolation
+    // the rest of this class already uses, not a flat average -- on a skewed
+    // mesh the two differ at first order, which would defeat the point.
+    //
+    // The limiter argument is the standard unstructured ratio
+    //
+    //   r = 2 (grad(phi)_C . d_CD) / (phi_D - phi_C) - 1
+    //
+    // which compares the *upwind cell's own gradient* against the difference
+    // it is being asked to span: r = 1 in a smooth field (psi = 1, second
+    // order), r <= 0 at an extremum (psi = 0, upwind, bounded). The gradient
+    // is the least-squares one this class already computes, which is what
+    // makes second-order-accurate reconstruction possible without a wider
+    // stencil -- there is no "upwind-upwind" cell to reach for on tetrahedra.
+    //
+    // van Leer's psi(r) = (r + |r|) / (1 + |r|): smooth, symmetric, and
+    // inside the TVD region. Smoothness matters here beyond taste -- a
+    // limiter with a kink (minmod, superbee) makes the residual of a steady
+    // iteration non-differentiable and can stall it short of convergence.
+    double faceValue(const InteriorFace& face, double massFlux, const std::vector<double>& field,
+                      const std::vector<core::Vector3>& gradients, ConvectionScheme scheme) const;
 
     // -- The Laplacian -----------------------------------------------------
 

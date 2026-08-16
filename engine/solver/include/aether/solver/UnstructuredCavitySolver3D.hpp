@@ -35,14 +35,21 @@ namespace aether::solver {
 //   tetrahedra, which is precisely why real unstructured codes are
 //   collocated and lean on Rhie-Chow-style face fluxes instead.
 //
-// - **Upwind convection.** Central differencing of convection is
+// - **Limited linear-upwind convection.** Central differencing is
 //   unconditionally unstable above a cell Reynolds number of 2, and this
-//   project already measured that biting: the structured cavity at Re=400
-//   runs at cell-Re 16.7 with zero margin (see ROADMAP Fase 1). On tetrahedra
-//   with irregular cell sizes that margin is worse, not better, so this
-//   solver takes the first-order-accurate but bounded choice. Accuracy of
-//   the convection scheme is a later concern; a solver that diverges is not
-//   a starting point to improve from.
+//   project measured that biting: the structured cavity at Re=400 runs at
+//   cell-Re 16.7 with zero margin (ROADMAP Fase 1). The first version here
+//   therefore took plain first-order upwind -- bounded, and a solver that
+//   diverges is not a starting point to improve from.
+//
+//   That was always meant to be temporary, and what replaced it was measured
+//   rather than assumed (DIVIDA_TECNICA.md 3.1). On a manufactured
+//   convection-diffusion case with a known exact answer, first-order upwind
+//   converges at order 1.03/1.18/1.16 and the limited scheme at
+//   2.07/1.83/1.58, with 3.7x less error on the finest mesh tried. The
+//   limiter is what keeps it bounded: it falls back to upwind exactly where
+//   the field is not smooth. Pass ConvectionScheme::FirstOrderUpwind to get
+//   the old behaviour back, which is how the two were compared.
 //
 // - **Explicit time stepping** for convection, implicit for diffusion, with
 //   stableTimeStep() deriving a limit from the actual cell sizes rather than
@@ -129,7 +136,8 @@ public:
         const mesh::TetrahedralMesh& mesh, double viscosity,
         std::function<core::Vector3(const core::Vector3&)> wallVelocity,
         std::function<bool(const core::Vector3&)> isOutlet = {}, double outletPressure = 0.0,
-        std::size_t pressureCorrectors = kDefaultPressureCorrectors);
+        std::size_t pressureCorrectors = kDefaultPressureCorrectors,
+        ConvectionScheme convection = ConvectionScheme::LimitedLinearUpwind);
 
     void step(double dt);
 
@@ -209,6 +217,7 @@ private:
     std::vector<core::Vector3> velocity_;
     std::vector<double> pressure_;
     double time_ = 0.0;
+    ConvectionScheme convection_;
     std::size_t pressureCorrectors_;
     double lastPressureChange_ = 0.0;
     double lastDt_ = 0.0;

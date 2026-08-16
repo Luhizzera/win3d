@@ -6,6 +6,7 @@ add_library(aether_solver STATIC
     src/LidDrivenCavitySolver2D.cpp
     src/UnstructuredFvmBase.cpp
     src/UnstructuredDiffusionSolver.cpp
+    src/UnstructuredScalarTransportSolver.cpp
     src/UnstructuredCavitySolver3D.cpp
     src/MixingLengthLidDrivenCavitySolver2D.cpp
     src/MultigridPoissonSolver2D.cpp

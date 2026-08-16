@@ -230,6 +230,41 @@ std::vector<Vector3> UnstructuredFvmBase::greenGaussGradients(const std::vector<
     return gradients;
 }
 
+double UnstructuredFvmBase::faceValue(const InteriorFace& face, double massFlux,
+                                       const std::vector<double>& field,
+                                       const std::vector<Vector3>& gradients,
+                                       ConvectionScheme scheme) const {
+    const bool ownerIsUpwind = massFlux >= 0.0;
+    const std::size_t upwind = ownerIsUpwind ? face.owner : face.neighbour;
+    if (scheme == ConvectionScheme::FirstOrderUpwind) {
+        return field[upwind];
+    }
+
+    const std::size_t downwind = ownerIsUpwind ? face.neighbour : face.owner;
+    const double difference = field[downwind] - field[upwind];
+
+    // Distance-weighted interpolation, the second-order end of the blend.
+    const double central =
+        field[face.owner] * face.ownerWeight + field[face.neighbour] * (1.0 - face.ownerWeight);
+
+    // A vanishing difference is not an extremum, it is a locally flat field:
+    // the ratio below is meaningless there and every scheme agrees anyway, so
+    // the guard costs no accuracy. Scaled by the field's own magnitude so it
+    // stays a relative test rather than one that depends on the units.
+    const double scale = std::fabs(field[upwind]) + std::fabs(field[downwind]);
+    if (std::fabs(difference) <= 1e-12 * (scale + 1.0)) {
+        return field[upwind];
+    }
+
+    // d from the upwind cell to the downwind one, so the ratio is measured
+    // along the direction the flux actually travels.
+    const Vector3 upwindToDownwind = ownerIsUpwind ? face.unitD * face.distance
+                                                    : face.unitD * (-face.distance);
+    const double ratio = 2.0 * gradients[upwind].dot(upwindToDownwind) / difference - 1.0;
+    const double limiter = (ratio + std::fabs(ratio)) / (1.0 + std::fabs(ratio)); // van Leer
+    return field[upwind] + limiter * (central - field[upwind]);
+}
+
 std::vector<double> UnstructuredFvmBase::applyLaplacian(const std::vector<double>& x,
                                                          std::size_t pinnedCell) const {
     std::vector<double> result(x.size());

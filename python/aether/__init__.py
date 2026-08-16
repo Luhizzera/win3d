@@ -52,6 +52,7 @@ try:
         TransientDiffusionSolver,
         UnstructuredCavitySolver3D,
         UnstructuredDiffusionSolver,
+        UnstructuredScalarTransportSolver,
     )
     from aether_postprocessing_py import (
         Segment2D,
@@ -127,6 +128,7 @@ __all__ = [
     "ImplicitConvectionDiffusionSolver1D",
     "UnstructuredDiffusionSolver",
     "UnstructuredCavitySolver3D",
+    "UnstructuredScalarTransportSolver",
     "Streamline2D",
     "Segment2D",
     "marching_squares_2d",

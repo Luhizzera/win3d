@@ -278,7 +278,7 @@ e é a razão do default ser 4 e não 2.
 
 ## 3. Acurácia declarada mas não atingida
 
-### 3.1 Convecção upwind de primeira ordem [criada nesta sessão]
+### 3.1 ~~Convecção upwind de primeira ordem~~ — RESOLVIDO em 2026-08-16
 
 Escolhida deliberadamente por estabilidade (diferença central é
 incondicionalmente instável acima de Re de célula 2, e a Fase 1 mediu a
@@ -286,15 +286,64 @@ cavidade estruturada em 16,7). Mas é primeira ordem, e **difusão numérica de
 upwind cresce com o refinamento da malha em direções oblíquas ao escoamento**
 — justamente o caso em tetraedros.
 
-**Por que não dá para contornar**: qualquer resultado quantitativo de
-escoamento (arrasto, sustentação, perda de carga) fica dominado pela difusão
-do esquema, não pela física. Serve para topologia, não para número.
+**Primeiro a régua, depois o esquema** — na ordem, porque construir o esquema
+antes seria não saber o que ele comprou. `UnstructuredScalarTransportSolver`
+resolve `div(U φ) = Γ lap(φ) + S` com **U prescrito**, que é o que torna a
+medição possível: no solver de Navier-Stokes a velocidade é a incógnita, então
+uma solução manufaturada lá mede a equação de momento, a projeção e o esquema
+de convecção ao mesmo tempo.
 
-**O que fazer**: esquema limitado de alta ordem (TVD / linear-upwind com
-limitador), que é o padrão exatamente por esse motivo. O item 3.2 já entregou
-a régua para medir o ganho: uma solução manufaturada com convecção, no mesmo
-molde da que mediu o Laplaciano em ordem 2, diria quanto do erro é de fato do
-esquema de convecção.
+Caso: mesma `φ = sin(πx) cos(πy) exp(z)` do item 3.2, carregada por
+`U = (1,1,1)/√3` — uniforme, logo de divergência discreta exatamente nula, e
+**oblíqua a toda face de tetraedro**, que é onde a difusão do upwind é pior.
+Γ = 0,01 põe o Péclet de célula entre 12,5 e 4,4.
+
+| n | upwind 1ª ordem | ordem | linear-upwind limitado | ordem |
+|---|---|---|---|---|
+| 4 | 2,378150e-01 | — | 1,313639e-01 | — |
+| 6 | 1,567389e-01 | **1,028** | 5,683272e-02 | **2,066** |
+| 8 | 1,115700e-01 | **1,182** | 3,361285e-02 | **1,826** |
+| 10 | 8,621935e-02 | 1,155 | 2,360342e-02 | 1,584 |
+
+**A premissa do item estava certa: upwind é ordem 1.** E o esquema limitado é
+segunda ordem na região suave, com **3,7× menos erro na malha mais fina**, sem
+custo de malha nenhum.
+
+**A queda de 2,07 para 1,58 é esperada e é o preço da limitação**, não um
+defeito escondido: um limitador TVD corta em extremos suaves, e esta solução
+tem extremos interiores em x e y — aquelas células caem para primeira ordem e
+tomam uma fatia crescente da norma conforme a malha refina. Registrado porque
+seria fácil (e errado) apresentar "segunda ordem" sem a ressalva.
+
+**O esquema**: reconstrução linear a partir da célula a montante, escrita como
+`φ_f = φ_C + ψ (φ_central − φ_C)`, de modo que ψ = 0 é upwind exato e ψ = 1 é
+central exato. `φ_central` é a interpolação ponderada por distância que o
+resto da base já usa, não média simples — em malha torta as duas diferem em
+primeira ordem. Razão do limitador `r = 2(∇φ_C · d)/(φ_D − φ_C) − 1` e
+limitador de van Leer, escolhido liso de propósito: um limitador com quina
+(minmod, superbee) torna o resíduo da iteração estacionária não-diferenciável
+e pode travá-la antes de convergir. Vive na base, então o solver de NS e o de
+transporte usam o mesmo código — disciplina do item 2.1.
+
+**Aplicado ao momento do Navier-Stokes**, por componente (o limitador se
+constrói do gradiente da grandeza convectada, e momento tem três). Efeito
+medido: u médio na saída do canal 0,99916 → **1,00020** contra a velocidade de
+bulk 1,0 que a conservação de massa impõe; topo da cavidade +0,06929 →
++0,06973. Pequenos e na direção física esperada, como se espera de uma malha
+grosseira onde a topologia já estava certa.
+
+**Efeito colateral necessário**: o march explícito ao estado estacionário era
+inviável — 150 mil passos e 246 s para n = 8, porque o passo é limitado pela
+convecção enquanto a relaxação acontece na escala difusiva. Passo **local por
+célula** resolveu: 150.235 → 780 passos, com o estado estacionário convergido
+idêntico. O operador continua simétrico (V/dt entra só na diagonal), então o
+CG da base segue valendo — que é o motivo de essa aceleração estar disponível
+aqui. O caso de verificação inteiro custa 1,2 s na suíte.
+
+**O que este item não afirma**: que o solver de NS é de segunda ordem em
+convecção. Mede o esquema de face isoladamente, com U prescrito. A ordem do NS
+completo depende também do acoplamento pressão-velocidade, cuja
+incompatibilidade entre operadores é a suspeita aberta do item 4.3.
 
 ### 3.2 ~~FVM não-estruturado em ordem ~1, não 2~~ — RESOLVIDO em 2026-08-16: é ordem 2
 
@@ -604,7 +653,7 @@ Por dependência, não por tamanho:
 6. ~~**4.3** (NaN em malha distorcida)~~ — DIAGNOSTICADO e contido; a causa
    segue aberta e precisa de uma API de carregar estado para ser medida
 7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
-8. **3.1** (esquema de alta ordem) — a régua confiável agora existe
+8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
 9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
 10. **5.1** (push) — um comando
 

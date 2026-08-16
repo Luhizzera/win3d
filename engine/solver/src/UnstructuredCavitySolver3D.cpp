@@ -14,9 +14,9 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     const TetrahedralMesh& mesh, double viscosity,
     std::function<Vector3(const Vector3&)> wallVelocity,
     std::function<bool(const Vector3&)> isOutlet, double outletPressure,
-    std::size_t pressureCorrectors)
+    std::size_t pressureCorrectors, ConvectionScheme convection)
     : UnstructuredFvmBase(mesh), viscosity_(viscosity), wallVelocity_(std::move(wallVelocity)),
-      isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure),
+      isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure), convection_(convection),
       pressureCorrectors_(std::max<std::size_t>(pressureCorrectors, 2)) {
     velocity_.assign(mesh.cellCount(), Vector3{});
     pressure_.assign(mesh.cellCount(), 0.0);
@@ -233,12 +233,30 @@ void UnstructuredCavitySolver3D::step(double dt) {
     // for why not central differencing), in conservative form so that what
     // leaves one cell enters its neighbour exactly.
     const std::vector<double> massFluxes = faceMassFluxes(velocity_, pressure_, lastDt_);
+    // The face reconstruction is per component, so the three components need
+    // their own gradients -- the limiter is built from the upwind cell's
+    // gradient of the quantity being convected, and momentum has three of
+    // them. Three extra gradient passes per step, against several matrix-free
+    // CG solves in the same step.
+    std::vector<std::vector<double>> velocityComponent(3, std::vector<double>(n));
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        velocityComponent[0][cell] = velocity_[cell].x;
+        velocityComponent[1][cell] = velocity_[cell].y;
+        velocityComponent[2][cell] = velocity_[cell].z;
+    }
+    std::vector<std::vector<Vector3>> velocityGradient(3);
+    for (int c = 0; c < 3; ++c) {
+        velocityGradient[c] = computeCellGradients(velocityComponent[c]);
+    }
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         const InteriorFace& face = interiorFaces_[i];
         const double massFlux = massFluxes[i];
-        const Vector3 upwind = massFlux >= 0.0 ? velocity_[face.owner] : velocity_[face.neighbour];
-        flux[face.owner] -= upwind * massFlux;
-        flux[face.neighbour] += upwind * massFlux;
+        const Vector3 faceVelocity{
+            faceValue(face, massFlux, velocityComponent[0], velocityGradient[0], convection_),
+            faceValue(face, massFlux, velocityComponent[1], velocityGradient[1], convection_),
+            faceValue(face, massFlux, velocityComponent[2], velocityGradient[2], convection_)};
+        flux[face.owner] -= faceVelocity * massFlux;
+        flux[face.neighbour] += faceVelocity * massFlux;
     }
 
     // Convective transport across the boundary. Without this, momentum enters
