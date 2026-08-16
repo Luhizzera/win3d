@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 namespace aether::solver {
@@ -300,6 +301,34 @@ void UnstructuredCavitySolver3D::step(double dt) {
     projectToDivergenceFree(velocityStar, dt);
     lastDt_ = dt;
     time_ += dt;
+
+    // **Refuse rather than propagate.** On a sufficiently distorted mesh this
+    // scheme is linearly unstable and the field runs away to inf and then to
+    // NaN (DIVIDA_TECNICA.md 4.3). Every number this class returns afterwards
+    // is NaN, including the diagnostics a caller would check -- so without
+    // this the failure is silent in the worst way: a whole run of plausible
+    // machinery producing a field that is not a field.
+    //
+    // The check is here rather than in a mesh-quality gate at construction
+    // because **there is no honest a-priori criterion to gate on**, and that
+    // was measured, not assumed: a mesh with non-orthogonality 2.24 runs
+    // fine, while one at 2.07 diverges. Whatever predicts this failure, the
+    // quantities this class currently computes do not.
+    //
+    // Costs one pass over the cells per step, against several matrix-free CG
+    // solves in the same step.
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        if (std::isfinite(pressure_[cell]) && std::isfinite(velocity_[cell].x) &&
+            std::isfinite(velocity_[cell].y) && std::isfinite(velocity_[cell].z)) {
+            continue;
+        }
+        throw std::runtime_error(
+            "UnstructuredCavitySolver3D: the solution stopped being finite. This is a linear "
+            "instability of the scheme on this mesh, not a time-step problem: it was measured to "
+            "grow by a fixed factor per step, unchanged by a 10x smaller dt or a 1e-6 smaller "
+            "velocity scale, and it appears on meshes whose non-orthogonality is no worse than "
+            "meshes that run fine. See DIVIDA_TECNICA.md 4.3.");
+    }
 }
 
 double UnstructuredCavitySolver3D::netBoundaryFlux() const {

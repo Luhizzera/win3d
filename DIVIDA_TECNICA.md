@@ -340,30 +340,71 @@ o limite.
 tratamento implícito ou semi-implícito da convecção. Não urgente enquanto o
 limite convectivo for folgado.
 
-### 4.3 NaN sem aviso em malha muito distorcida [encontrada ao medir o 2.3]
+### 4.3 NaN em malha muito distorcida — DIAGNOSTICADO e contido em 2026-08-16; a causa segue aberta
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
-**NaN no passo 20 de 1333**, com as sementes 17 e 3 — passo 20 e 21,
-respectivamente.
+**NaN no passo 20 de 1333**.
 
-**Não é o 2.3 nem nenhuma mudança desta sessão**: medido com e sem a saída no
-estêncil, o NaN acontece no mesmo passo, com os mesmos dígitos. É
-pré-existente; foi a facilidade de varrer malhas em Python que o expôs.
+**O que foi medido, e o que cada medição eliminou.** A instrução deste item
+era instrumentar antes de propor qualquer correção; foi o que se fez, e a
+resposta fácil estava errada em todas as tentativas:
 
-**Por que não é sliver óbvio**: volume mínimo 4,7e-04 com razão máximo/mínimo
-de 32 — pior que os testes, mas não degenerado. A não-ortogonalidade (2,07 e
-2,23) é comparável à de malhas com jitter 0,35, que rodam sem problema. Então
-a explicação fácil não serve, e a causa é desconhecida.
+| hipótese | teste | resultado |
+|---|---|---|
+| NaN súbito (divisão por zero) | traçar \|u\|max por passo | **não** — cresce exponencialmente desde o passo 1 |
+| passo de tempo (CFL) | dt × 0,25 e × 0,1 | **não** — morre no *mesmo passo* (20→21), não no mesmo tempo |
+| face descartada (`A·d ≤ 0`) | contar em Python | **não** — zero em toda malha; cos(A,d) mínimo é 0,436 em jitter 0,45 contra 0,464 em jitter 0,25 |
+| estêncil deficiente | `deficientStencilCount()` | **não** — 15 nas duas malhas |
+| a saída | rodar cavidade fechada na mesma malha | **não** — morre também (passo 31) |
+| convecção / Reynolds | entrada 0,1; ν = 1,0 (Re=1) | **não** — morre nos dois (passo 29) |
+| correctores de pressão | 2, 4 e 16 | **não** — morre nos três |
 
-**Por que importa**: é o modo de falha que o item 4.1 já registra para os
-solvers estruturados — **NaN, não aviso**. Um usuário com geometria real vai
-encontrar malhas piores que jitter 0,35, e o que ele vai receber é um campo
-inutilizável sem nenhuma indicação de onde começou.
+**O que sobrou, e é um resultado positivo, não uma eliminação.** Rodando a
+cavidade fechada com tampa a 10⁻⁶ e o *mesmo* dt do caso a 1,0 — amplitude
+seis ordens de grandeza menor, onde a convecção (quadrática em u) é
+irrelevante:
 
-**O que fazer**: instrumentar o passo 19→20 desse caso (qual campo perde
-finitude primeiro: preditor, pressão ou fluxo de face) antes de propor
-qualquer correção. Depois, no mínimo, detectar e recusar em vez de propagar.
+| malha | tampa 1,0 | tampa 10⁻⁶ |
+|---|---|---|
+| jitter 0,25 | razão 1,0293 por passo | razão 1,0294 |
+| jitter 0,45 | NaN no passo 31 | **razão 2,0524 por passo** |
+
+A razão de crescimento é a mesma em 10⁶ de amplitude. **A instabilidade é
+linear, com fator ≈ 2,05 por passo, propriedade da malha e do operador — não
+da física, não do passo, não da convecção.** Em jitter 0,45 ela sobrevive 40
+passos com tampa 10⁻⁶ apenas porque começou seis ordens abaixo; é a mesma
+instabilidade.
+
+**A suspeita restante, registrada como suspeita e não como conclusão**: o
+único elemento do passo que é linear, independente de dt e independente de
+amplitude é a incompatibilidade entre os dois operadores da projeção — a
+pressão é resolvida contra o operador *de face* (compacto mais correção
+não-ortogonal), e a velocidade é corrigida com o gradiente *de célula* por
+mínimos quadrados. A difusão é implícita (incondicionalmente estável) e a
+convecção foi excluída pela medição de amplitude. Confirmar isso exige medir
+o raio espectral do operador de um passo, o que precisa de uma API para impor
+um campo de velocidade inicial — não existe hoje.
+
+**Contido, não resolvido.** `step()` passa a recusar em vez de propagar: se o
+campo perde finitude, levanta com uma mensagem que diz o que foi medido,
+inclusive que reduzir o passo não adianta — o primeiro instinto de quem vê
+uma explosão, e aqui só desperdiça tempo. Antes disso, todo número devolvido
+depois era NaN, **inclusive os diagnósticos que um chamador consultaria para
+perceber o problema**.
+
+**Por que não há portão de qualidade de malha na construção**: porque não há
+critério a-priori honesto para usar, e isso foi medido, não suposto. Uma malha
+com não-ortogonalidade 2,24 (jitter 0,35) roda bem; esta, com 2,07, diverge.
+Nenhuma quantidade que esta classe calcula hoje separa as duas. Inventar um
+limiar seria fingir um critério.
+
+**O que fazer**: expor um modo de carregar estado (velocidade e pressão), que
+serve tanto para checkpoint quanto para medir o raio espectral do operador de
+um passo diretamente — potência iterada em Python, poucos minutos. Só depois
+propor correção; o candidato natural é tornar consistentes os dois operadores
+da projeção, mas isso é reescrever o acoplamento pressão-velocidade e não se
+faz sobre uma suspeita.
 
 ---
 
@@ -503,8 +544,8 @@ Por dependência, não por tamanho:
 3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
 4. ~~**5.2** (bindings)~~ — FEITO, e já pagou: encontrou 5.4 na primeira execução
 5. ~~**2.3** (pressão da saída no estêncil)~~ — FEITO, e dissolveu o 5.4
-6. **4.3** (NaN em malha distorcida) — instrumentar antes de propor correção;
-   é o único modo de falha silencioso que sobrou nesta camada
+6. ~~**4.3** (NaN em malha distorcida)~~ — DIAGNOSTICADO e contido; a causa
+   segue aberta e precisa de uma API de carregar estado para ser medida
 7. **3.2** (solução manufaturada) — mede o que hoje é inferido
 8. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
 9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser

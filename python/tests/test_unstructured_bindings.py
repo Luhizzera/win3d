@@ -43,7 +43,7 @@ def check(condition, description):
         failures.append(description)
 
 
-def build_jittered_lattice(n, seed=17):
+def build_jittered_lattice(n, seed=17, jitter=0.25):
     """A cube lattice with the interior points perturbed, tetrahedralized.
 
     Jittered rather than regular on purpose: a regular lattice tetrahedralizes
@@ -64,7 +64,7 @@ def build_jittered_lattice(n, seed=17):
                 for index in (i, j, k):
                     value = index / n
                     if 0 < index < n:
-                        value += rng.uniform(-0.25, 0.25) / n
+                        value += rng.uniform(-jitter, jitter) / n
                     point.append(value)
                 tets.add_point(*point)
     tets.tetrahedralize()
@@ -314,6 +314,56 @@ def test_mesh_outlives_python_reference():
           "os diagnosticos seguem finitos depois da coleta")
 
 
+def test_distorted_mesh_refuses_instead_of_returning_nan():
+    """On a sufficiently distorted mesh this scheme is linearly unstable and
+    the field runs away to inf and then NaN (DIVIDA_TECNICA.md 4.3). The
+    instability itself is open; what is closed is that it can no longer be
+    silent.
+
+    That distinction is the whole point of this check. Before the guard, every
+    number the solver returned afterwards was NaN -- including the
+    diagnostics a caller would consult to notice something was wrong -- so a
+    run produced a field that was not a field, with nothing to indicate where
+    it stopped being one.
+
+    The mesh is jittered at +-0.45/n against the +-0.25/n used everywhere
+    else. There is no gentler way to reach the failure and no a-priori
+    criterion that separates the two: a mesh at non-orthogonality 2.24 runs
+    fine while this one, at 2.07, diverges.
+    """
+    import aether_core_py as core_module
+    import aether_solver_py as solver_module
+
+    print("malha muito distorcida: recusa em vez de propagar NaN")
+    mesh = build_jittered_lattice(3, seed=17, jitter=0.45)
+    solver = solver_module.UnstructuredCavitySolver3D(
+        mesh, 0.1,
+        lambda p: core_module.Vector3(1.0, 0.0, 0.0) if p.x < 1e-9
+        else core_module.Vector3(0.0, 0.0, 0.0),
+        lambda p: p.x > 1.0 - 1e-9, 0.0)
+
+    dt = solver.stable_time_step()
+    raised = False
+    steps_survived = 0
+    try:
+        for _ in range(200):
+            solver.step(dt)
+            steps_survived += 1
+    except RuntimeError as exc:
+        raised = True
+        message = str(exc)
+
+    check(raised, f"levantou em vez de devolver NaN (sobreviveu {steps_survived} passos)")
+    if raised:
+        check("4.3" in message,
+              "a mensagem aponta para o item da divida que explica o que foi medido")
+        # Not a time-step problem, and the message has to say so: the first
+        # instinct on seeing a blow-up is to halve dt, which here wastes time
+        # -- it fails at the same step number with a tenth of the step.
+        check("time-step" in message or "dt" in message,
+              "a mensagem diz que reduzir o passo nao resolve")
+
+
 def main():
     if len(sys.argv) < 3:
         print("uso: test_unstructured_bindings.py <dir-das-extensoes> <dir-do-pacote>")
@@ -334,6 +384,7 @@ def main():
     test_diffusion_maximum_principle(mesh)
     test_cavity_topology(mesh)
     test_channel_mass_balance(mesh)
+    test_distorted_mesh_refuses_instead_of_returning_nan()
     test_mesh_outlives_python_reference()
 
     print()
