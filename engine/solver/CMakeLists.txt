@@ -4,6 +4,7 @@ add_library(aether_solver STATIC
     src/TransientDiffusionSolver.cpp
     src/TaylorGreenVortexSolver2D.cpp
     src/LidDrivenCavitySolver2D.cpp
+    src/UnstructuredFvmBase.cpp
     src/UnstructuredDiffusionSolver.cpp
     src/UnstructuredCavitySolver3D.cpp
     src/MixingLengthLidDrivenCavitySolver2D.cpp

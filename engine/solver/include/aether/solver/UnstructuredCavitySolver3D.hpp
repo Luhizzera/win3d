@@ -2,6 +2,7 @@
 
 #include "aether/core/Vector3.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/solver/UnstructuredFvmBase.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -14,12 +15,20 @@ namespace aether::solver {
 // only boxes.
 //
 // Fase 2 proved the geometric machinery on the simplest physics available
-// (diffusion, against a closed-form Fourier series). This class reuses that
-// machinery unchanged for the hardest part of an incompressible solve: the
-// pressure Poisson equation *is* the same over-relaxed-decomposition
-// Laplacian, with the same non-orthogonal deferred correction and the same
-// least-squares gradients. What is new here is momentum transport and the
-// projection that couples it to pressure.
+// (diffusion, against a closed-form Fourier series). That machinery is now
+// UnstructuredFvmBase, shared with UnstructuredDiffusionSolver instead of
+// copied from it: the pressure Poisson equation *is* the same
+// over-relaxed-decomposition Laplacian, built from the same face
+// coefficients and the same least-squares gradients. What is new here is
+// momentum transport and the projection that couples it to pressure.
+//
+// **One divergence from the shared base is still real and is not fixed
+// here**: applyPoissonOperator() assembles only the implicit part of that
+// Laplacian, without the non-orthogonal deferred correction the diffusion
+// solver applies to the same operator -- the correction Fase 2.2 measured as
+// the difference between converging and stagnating at order 0.10. It is
+// recorded as DIVIDA_TECNICA.md 1.2, and sharing the base is what makes
+// fixing it a change in one place rather than two.
 //
 // **Design choices, and why each is what it is:**
 //
@@ -37,9 +46,9 @@ namespace aether::solver {
 //   the convection scheme is a later concern; a solver that diverges is not
 //   a starting point to improve from.
 //
-// - **Explicit time stepping**, matching every other Navier-Stokes solver
-//   here, with stableTimeStep() deriving a limit from the actual cell sizes
-//   rather than a uniform spacing.
+// - **Explicit time stepping** for convection, implicit for diffusion, with
+//   stableTimeStep() deriving a limit from the actual cell sizes rather than
+//   a uniform spacing.
 //
 // - **Mass conservation is measured on faces, not on a cell-centred
 //   difference.** Fase 1 established that the wide cell-centred divergence
@@ -47,7 +56,7 @@ namespace aether::solver {
 //   unstructured mesh there is no wide stencil to be tempted by, and the
 //   face flux is the only meaningful definition. maxFaceDivergence() is the
 //   honest diagnostic.
-class UnstructuredCavitySolver3D {
+class UnstructuredCavitySolver3D : public UnstructuredFvmBase {
 public:
     // `lidVelocity(position)` gives the prescribed wall velocity at a
     // boundary face centroid -- zero on a solid wall, the lid's tangential
@@ -83,7 +92,6 @@ public:
     core::Vector3 velocity(std::size_t cell) const { return velocity_.at(cell); }
     double pressure(std::size_t cell) const { return pressure_.at(cell); }
     double time() const { return time_; }
-    std::size_t cellCount() const { return velocity_.size(); }
 
     // Largest |sum of face mass fluxes| / cellVolume. The quantity the
     // projection actually drives to zero -- see the class comment.
@@ -98,30 +106,15 @@ public:
     double netBoundaryFlux() const;
 
 private:
-    struct InteriorFace {
-        std::size_t owner;
-        std::size_t neighbour;
-        double laplacianCoefficient; // a_f = |A|^2 / (A . d)
-        core::Vector3 areaVector;    // owner -> neighbour
-        core::Vector3 nonOrthogonalArea;
-        core::Vector3 unitD;
-        double distance;
-        double ownerWeight;
-    };
-
-    struct BoundaryFace {
-        std::size_t cell;
-        core::Vector3 areaVector; // outward
-        core::Vector3 centroid;
+    // Per-boundary-face condition, indexed alongside the base's
+    // boundaryFaces_: the base owns a boundary face's *geometry*, this owns
+    // what is prescribed on it.
+    struct BoundaryCondition {
         core::Vector3 wallVelocity;
-        double laplacianCoefficient; // for the viscous wall flux
-        double distance;
         bool isOutlet = false;
     };
 
-    void buildFaces();
-    void buildGradientStencils();
-    std::vector<core::Vector3> scalarGradients(const std::vector<double>& field) const;
+    void buildBoundaryConditions();
     std::vector<double> faceMassFluxes(const std::vector<core::Vector3>& velocity,
                                         const std::vector<double>& pressure, double dt) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
@@ -134,6 +127,7 @@ private:
     // Conjugate Gradient applies unchanged.
     std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt) const;
     std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt) const;
+
     // The boundary mass flux **as the projection left it**, filled in by
     // projectToDivergenceFree(). Stored rather than recomputed because the
     // two are not the same number: the projection corrects an outlet with
@@ -145,30 +139,12 @@ private:
     // cavity's divergence.
     std::vector<double> boundaryFlux_;
 
-    const mesh::TetrahedralMesh* mesh_;
     double viscosity_;
     std::function<core::Vector3(const core::Vector3&)> wallVelocity_;
     std::function<bool(const core::Vector3&)> isOutlet_;
     double outletPressure_ = 0.0;
 
-    std::vector<InteriorFace> interiorFaces_;
-    std::vector<BoundaryFace> boundaryFaces_;
-    std::vector<double> poissonDiagonal_;
-
-    struct GradientStencilEntry {
-        std::size_t neighbour;
-        core::Vector3 weightedDelta;
-    };
-    struct SymmetricInverse {
-        double xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
-        bool valid = false;
-        core::Vector3 apply(const core::Vector3& v) const {
-            return {xx * v.x + xy * v.y + xz * v.z, xy * v.x + yy * v.y + yz * v.z,
-                    xz * v.x + yz * v.y + zz * v.z};
-        }
-    };
-    std::vector<std::vector<GradientStencilEntry>> gradientStencil_;
-    std::vector<SymmetricInverse> gradientMatrixInverse_;
+    std::vector<BoundaryCondition> boundaryConditions_;
 
     std::vector<core::Vector3> velocity_;
     std::vector<double> pressure_;

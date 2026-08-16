@@ -66,27 +66,86 @@ gradiente importa mais.
 **O que fazer**: usar o mesmo recuo para Green-Gauss, ou recusar a malha
 explicitamente. Nunca devolver zero como se fosse resultado.
 
+### 1.4 Face de saída arrasta viscosamente no operador de Helmholtz [encontrada ao extrair a base, não criada por ela]
+
+`applyHelmholtzOperator()` monta a diagonal como
+`V/dt + ν·laplacianDiagonal_[célula]` e depois pula as faces de saída no laço
+de contorno, com o comentário "zero-gradient: no viscous flux through an
+outlet". Só que `laplacianDiagonal_` **já contém** o `a_b` da saída — ele foi
+somado ali de propósito, porque é o que fixa o nível de pressão no Poisson.
+Resultado: a célula de saída ganha `ν·a_b` na diagonal do Helmholtz **sem
+termo correspondente no lado direito**, o que impõe `u = 0` na face de saída
+em vez de gradiente nulo. É o contrário do que o comentário afirma.
+
+**Por que importa**: é um freio viscoso espúrio exatamente onde o escoamento
+deixa o domínio — o caso do canal e qualquer escoamento externo futuro
+(cilindro, aerofólio). O balanço de massa não acusa: a projeção fecha em
+6e-14 de qualquer jeito, porque o erro está no preditor, não na projeção. Um
+diagnóstico global que fecha não prova que o campo está certo.
+
+**Por que não foi corrigido aqui**: é mudança de comportamento, e este item
+2.1 é estrutural — misturar as duas coisas tira a única evidência de que a
+extração não mudou nada. Pré-existe à extração; foi ela que tornou o conflito
+visível, ao pôr as duas montagens lado a lado.
+
+**O que fazer**: separar a diagonal do Poisson da diagonal viscosa (a saída
+entra em uma e não na outra), ou levar `a_b·u_saída` para o lado direito com
+o valor extrapolado da célula. Medir a diferença no perfil de saída do canal
+antes e depois — se for nula, o item vira nota de rodapé; se não for, é o
+primeiro número quantitativo errado do escoamento externo.
+
 ---
 
 ## 2. Duplicação que vai divergir
 
-### 2.1 Dois solvers não-estruturados com a mesma geometria copiada [criada nesta sessão]
+### 2.1 ~~Dois solvers não-estruturados com a mesma geometria copiada~~ — RESOLVIDO em 2026-08-16
 
-`UnstructuredDiffusionSolver` e `UnstructuredCavitySolver3D` têm cópias
+`UnstructuredDiffusionSolver` e `UnstructuredCavitySolver3D` tinham cópias
 independentes de: coeficientes de face (`|A|²/(A·d)`), decomposição
 over-relaxed, estêncil de mínimos quadrados, inversa 3×3 simétrica com guarda
 de posto, e o laço de CG.
 
-**Por que não dá para contornar**: é exatamente a situação que motivou extrair
-`StaggeredCavityBase3D` das seis cavidades 3D antes dos Módulos 9-14 — e a
-razão registrada lá vale igual aqui: **portar uma correção seis vezes é a
-versão cara do problema**. O item 1.2 acima já é a primeira divergência entre
-as duas cópias, com menos de um dia de vida.
+**Por que não dava para contornar**: é exatamente a situação que motivou
+extrair `StaggeredCavityBase3D` das seis cavidades 3D antes dos Módulos 9-14 —
+e a razão registrada lá vale igual aqui: **portar uma correção seis vezes é a
+versão cara do problema**. O item 1.2 acima já era a primeira divergência
+entre as duas cópias, com menos de um dia de vida.
 
-**O que fazer**: extrair uma base compartilhada (`UnstructuredFvmBase`) com
-geometria de face, gradientes e CG, do mesmo jeito e pelo mesmo motivo que a
-base staggered foi extraída. Fazer isso **antes** de escrever um terceiro
-solver não-estruturado.
+**Resolvido**: `UnstructuredFvmBase` (`engine/solver/.../UnstructuredFvmBase.hpp`)
+passa a ser dona da geometria de face, do estêncil de gradientes, da inversa
+simétrica com guarda de posto, do CG matrix-free e do
+`maxNonOrthogonality()`. As duas classes herdam dela. Código (sem comentários
+nem linhas em branco): 836 → 720 linhas, com 388 linhas saindo dos dois
+solvers e 272 passando a existir **uma** vez em vez de duas.
+
+**Onde as duas cópias divergiam de verdade, a diferença virou argumento
+nomeado em vez de divergência silenciosa**: `buildFaceGeometry()` recebe o
+predicado que decide se uma face de contorno entra no operador (Dirichlet na
+difusão, saída no NS — a mesma regra dita para condições diferentes), e
+`buildGradientStencils()` recebe o que informa o valor prescrito de uma face
+de contorno (a difusão informa; o NS não). Quem lê o cabeçalho vê as duas
+diferenças; antes elas estavam escondidas em dois corpos de código que
+ninguém compara.
+
+**A extração é preservadora de comportamento, e isso foi projetado, não
+torcido para acontecer**: cada laço compartilhado percorre as faces na mesma
+ordem das duas versões originais e acumula nas mesmas somas na mesma
+sequência. Foi por isso que `buildFaceGeometry()` recebe um predicado em vez
+de deixar cada solver somar suas contribuições de contorno depois — montar
+"interiores primeiro, contornos depois" seria igualmente correto e teria
+perturbado toda soma no último bit, o que destrói a única checagem barata de
+que um refactor não mudou nada.
+
+**Medido**: a placa vs. série de Fourier saiu idêntica em todos os dígitos
+impressos (0.98949 / 0.69966 / 0.53084, ordens 0,85 e 0,96); a topologia da
+cavidade idêntica (topo +0.06850, fundo −0.01169). O único número que se
+mexeu foi o balanço do canal, −6,347e-14 → −6,425e-14: ruído de arredondamento,
+da única mudança aritmética real da extração — o estêncil do NS reconstruía
+`d` como `unitD·|d|` e agora usa o `c_N − c_P` exato, como a difusão sempre
+fez. Suíte inteira: 11/11.
+
+**O que isso destrava**: 1.2 e 1.3 agora são correção em um lugar só, que era
+o motivo de este item vir primeiro na ordem.
 
 ### 2.2 Duas representações de malha que não se falam
 
@@ -228,8 +287,9 @@ para não serem confundidos com descuido:
 Por dependência, não por tamanho:
 
 1. ~~**1.1** (fluxo de saída)~~ — FEITO
-2. **2.1** (extrair base compartilhada) — antes que 1.2 e 1.3 virem três cópias
-3. **1.2 e 1.3** — de graça depois do 2.1, já que passam a ter um lugar só
+2. ~~**2.1** (extrair base compartilhada)~~ — FEITO
+3. **1.2 e 1.3** — agora com um lugar só para serem corrigidos; e **1.4**,
+   que a extração encontrou, junto com eles
 4. **5.2** (bindings) — destrava todo o resto da investigação
 5. **3.2** (solução manufaturada) — mede o que hoje é inferido
 6. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável

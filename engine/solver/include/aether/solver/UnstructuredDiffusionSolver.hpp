@@ -2,6 +2,7 @@
 
 #include "aether/core/Vector3.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/solver/UnstructuredFvmBase.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -27,18 +28,10 @@ namespace aether::solver {
 // diffusive flux through a face is just (phi_N - phi_P)/|d| times the area.
 // On tetrahedra it never is, and that misalignment is a property of mesh
 // *shape*, not mesh *size* -- refining a tet mesh does not make it more
-// orthogonal. This class uses the standard over-relaxed decomposition,
-// splitting the face area vector A into a part along d = c_N - c_P and a
-// remainder:
-//
-//   A_orth = (|A|^2 / (A . d)) d,      A_nonorth = A - A_orth
-//
-// so that the flux is
-//
-//   (grad phi)_f . A  =  a_f (phi_N - phi_P)  +  (grad phi)_f . A_nonorth
-//                        \___ implicit ____/     \___ correction ____/
-//
-// with a_f = |A|^2 / (A . d) > 0.
+// orthogonal. The over-relaxed decomposition that handles it now lives in
+// UnstructuredFvmBase, which this class shares with the Navier-Stokes
+// solver; see that header for the algebra and for why the split was
+// extracted.
 //
 // **The correction is not optional here, and that was measured rather than
 // assumed.** A first version assembled only the implicit part. Its mesh
@@ -53,12 +46,12 @@ namespace aether::solver {
 // The correction is handled by **deferred correction**: the implicit part
 // keeps the matrix a symmetric positive-definite M-matrix (positive
 // diagonal, negative off-diagonals, diagonally dominant once at least one
-// Dirichlet face exists) so the project's existing matrix-free Conjugate
-// Gradient applies unchanged, while the non-orthogonal term is evaluated
-// from the previous iterate and moved to the right-hand side. Outer sweeps
-// repeat until it stops changing. The face gradient it needs comes from
-// Green-Gauss cell gradients averaged to the face.
-class UnstructuredDiffusionSolver {
+// Dirichlet face exists) so the base's matrix-free Conjugate Gradient
+// applies unchanged, while the non-orthogonal term is evaluated from the
+// previous iterate and moved to the right-hand side. Outer sweeps repeat
+// until it stops changing. The face gradient it needs comes from
+// least-squares cell gradients averaged to the face.
+class UnstructuredDiffusionSolver : public UnstructuredFvmBase {
 public:
     explicit UnstructuredDiffusionSolver(const mesh::TetrahedralMesh& mesh);
 
@@ -97,20 +90,13 @@ public:
     double lastOuterChange() const { return lastOuterChange_; }
 
     double value(std::size_t cell) const { return phi_.at(cell); }
-    std::size_t cellCount() const { return phi_.size(); }
-
-    // Largest |A_nonorth| / |A| over the interior faces: 0 on a perfectly
-    // orthogonal mesh, approaching 1 as a face becomes parallel to the line
-    // between the cell centres. Exposed because it is the quantity that
-    // decides whether the omitted correction matters, and a caller
-    // measuring accuracy should be able to report it alongside.
-    double maxNonOrthogonality() const;
 
 private:
     std::vector<double> applyOperator(const std::vector<double>& x) const;
-    static double dot(const std::vector<double>& a, const std::vector<double>& b);
     void rebuildCoefficients();
-    void buildGradientStencils();
+
+    bool isDirichlet(const BoundaryFace& face) const { return boundaryIsDirichlet_[face.meshFace]; }
+    double dirichletValue(const BoundaryFace& face) const { return boundaryValue_[face.meshFace]; }
 
     // The non-orthogonal flux the implicit part cannot represent, evaluated
     // from the previous iterate and accumulated per cell.
@@ -118,66 +104,23 @@ private:
 
     // Green-Gauss: cheap, but only first-order accurate on a skewed mesh --
     // kept as the fallback for the rare cell whose least-squares stencil is
-    // rank-deficient (too few, or nearly coplanar, neighbours).
+    // rank-deficient (too few, or nearly coplanar, neighbours). Returning a
+    // zero gradient there instead would be a wrong answer that looks like a
+    // result; see UnstructuredFvmBase::leastSquaresGradients.
     std::vector<core::Vector3> computeGradientsGreenGauss(const std::vector<double>& phi) const;
 
-    // Inverse-distance-weighted least squares: fits the gradient that best
-    // reproduces the measured differences to every neighbour, minimising
-    // sum_i w_i (grad(phi)_P . d_i - (phi_i - phi_P))^2 with w_i = 1/|d_i|^2.
-    // Unlike Green-Gauss it stays second-order on a skewed mesh, which is
-    // why it exists here: the Green-Gauss version's convergence order
-    // stalled around 0.6-1.0 instead of reaching 2.
+    // Least-squares cell gradients, with the Green-Gauss fallback supplied
+    // only when this mesh actually has a deficient stencil to fall back for.
     std::vector<core::Vector3> computeGradients(const std::vector<double>& phi) const;
 
-    struct GradientStencilEntry {
-        std::size_t neighbour; // kBoundaryStencil when the "neighbour" is a Dirichlet face
-        double boundaryValue;
-        core::Vector3 weightedDelta; // w_i * d_i
-    };
-    static constexpr std::size_t kBoundaryStencil = static_cast<std::size_t>(-1);
-
-    // Inverse of the symmetric 3x3 normal-equation matrix, stored as its six
-    // unique components (xx, xy, xz, yy, yz, zz). Geometry only, so it is
-    // built once alongside the face coefficients.
-    struct SymmetricInverse {
-        double xx = 0.0, xy = 0.0, xz = 0.0, yy = 0.0, yz = 0.0, zz = 0.0;
-        bool valid = false; // false => stencil was rank-deficient, use Green-Gauss for this cell
-        core::Vector3 apply(const core::Vector3& v) const {
-            return {xx * v.x + xy * v.y + xz * v.z, xy * v.x + yy * v.y + yz * v.z,
-                    xz * v.x + yz * v.y + zz * v.z};
-        }
-    };
-
-    struct InteriorFace {
-        std::size_t owner;
-        std::size_t neighbour;
-        double coefficient;              // a_f = |A|^2 / (A . d)
-        core::Vector3 nonOrthogonalArea; // A - (|A|^2/(A.d)) d, as seen from the owner
-        core::Vector3 unitD;             // normalised c_N - c_P
-        double distance;                 // |c_N - c_P|
-        double ownerWeight;              // distance-based interpolation weight for the owner
-    };
-
-    struct DirichletFace {
-        std::size_t cell;
-        double coefficient; // |A|^2 / (A . d_b), with d_b = faceCentroid - cellCentroid
-        double value;
-        core::Vector3 nonOrthogonalArea;
-        core::Vector3 unitD;
-        double distance;
-    };
-
-    const mesh::TetrahedralMesh* mesh_;
-    std::vector<InteriorFace> interiorFaces_;
-    std::vector<DirichletFace> dirichletFaces_;
     // Per-boundary-face prescribed value, or "no value" when insulated.
+    // Indexed by *mesh* face, since that is what a selector resolves to and
+    // what the base hands back in BoundaryFace::meshFace.
     std::vector<bool> boundaryIsDirichlet_;
     std::vector<double> boundaryValue_;
-    std::vector<double> diagonal_;
+    bool hasDirichletFace_ = false;
     std::vector<double> phi_;
     double lastOuterChange_ = 0.0;
-    std::vector<std::vector<GradientStencilEntry>> gradientStencil_;
-    std::vector<SymmetricInverse> gradientMatrixInverse_;
 };
 
 } // namespace aether::solver
