@@ -318,6 +318,33 @@ todo o resto da suíte. Malha e tempo simulado foram fixados no que a
 afirmação precisa (topologia é resolvível em malha grossa), não no que
 pareceria impressionante. Suíte total hoje: 59s.
 
+**Difusão implícita: FEITA (2026-08-14).** O termo viscoso passou a ser
+resolvido como `(V/dt + νL)u* = ...` — o mesmo Laplaciano com a diagonal
+deslocada, ainda SPD, mesmo CG. Com isso o `stableTimeStep()` perde o limite
+difusivo inteiro, que era o que escalava com o **quadrado** da menor célula.
+Validação cruzada na mesma malha (n=4): explícito dá u topo +0,06686 / fundo
+−0,01156; implícito dá +0,06850 / −0,01169 — dois tratamentos temporais
+independentes chegando ao mesmo escoamento dentro de ~2%. O caso caiu de
+~6m37s para segundos.
+
+**O caso do cilindro tem DOIS bloqueios, não um** (levantado em 2026-08-14
+verificando o código, não assumido):
+
+1. **O solver não tem condição de saída.** O construtor recebe apenas
+   `wallVelocity` e `buildFaces()` trata toda face de contorno como parede; o
+   operador de Poisson não recebe contribuição de contorno e o fluxo de massa
+   por faces de contorno é assumido zero. **Entrada já funciona** — é uma
+   parede com velocidade prescrita não-nula. **Saída não existe**: precisa de
+   pressão Dirichlet contribuindo para a diagonal do Poisson e para o lado
+   direito, velocidade zero-gradiente, e — o ponto crítico — massa poder
+   deixar o domínio, o que hoje é estruturalmente impossível. Contido,
+   independente de malha, ~80 linhas.
+2. **Tetraedralização restrita preservando a superfície do cilindro** — o
+   Módulo 3 registra isso resolvido só na fatia tratável desde que foi escrito.
+
+**Fazer o (1) primeiro**: é o menor, não depende do (2), e sem ele nenhuma
+malha resolve o problema.
+
 **O que falta para fechar a Fase 3**: item 2 do portão — um caso genuinamente
 não-cartesiano (escoamento em torno de cilindro a partir de STL). E, para
 tornar prático rodar malhas finas por tempos longos, **difusão implícita**:
