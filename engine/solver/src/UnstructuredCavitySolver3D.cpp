@@ -25,6 +25,7 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
         }
     }
     buildGradientStencils();
+    boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
 }
 
 void UnstructuredCavitySolver3D::buildFaces() {
@@ -363,6 +364,21 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     for (std::size_t cell = 0; cell < n; ++cell) {
         velocity_[cell] = velocityStar[cell] - pressureGradients[cell] * dt;
     }
+
+    // Record the boundary flux **the projection enforced**, using the same
+    // compact face gradient the Poisson operator's outlet coefficient was
+    // built from. Recomputing it later from the corrected cell velocity and
+    // the least-squares gradient gives a different -- and systematically
+    // wrong -- number, which is what produced the 13.2% imbalance.
+    boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        const BoundaryFace& face = boundaryFaces_[i];
+        if (!face.isOutlet) {
+            continue;
+        }
+        boundaryFlux_[i] = velocityStar[face.cell].dot(face.areaVector) -
+                            dt * face.laplacianCoefficient * (outletPressure_ - pressure_[face.cell]);
+    }
 }
 
 void UnstructuredCavitySolver3D::step(double dt) {
@@ -386,9 +402,10 @@ void UnstructuredCavitySolver3D::step(double dt) {
     // cells until the solution diverges. Found exactly that way -- the channel
     // case went to NaN while the closed cavity, which has no boundary flux at
     // all, was unaffected.
-    for (const BoundaryFace& face : boundaryFaces_) {
+    for (std::size_t bi = 0; bi < boundaryFaces_.size(); ++bi) {
+        const BoundaryFace& face = boundaryFaces_[bi];
         const double massFlux =
-            face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
+            face.isOutlet ? boundaryFlux_[bi] : face.wallVelocity.dot(face.areaVector);
         // Upwind as everywhere else: outflow carries the cell value away,
         // inflow brings the prescribed boundary value in.
         const Vector3 upwind = massFlux >= 0.0 ? velocity_[face.cell] : face.wallVelocity;
@@ -439,21 +456,15 @@ void UnstructuredCavitySolver3D::step(double dt) {
     time_ += dt;
 }
 
-double UnstructuredCavitySolver3D::boundaryMassFlux(const BoundaryFace& face) const {
-    // A wall passes nothing. An outlet extrapolates the cell velocity with a
-    // zero gradient, which is what lets mass leave.
-    if (!face.isOutlet) {
-        return 0.0;
-    }
-    return velocity_[face.cell].dot(face.areaVector);
-}
-
 double UnstructuredCavitySolver3D::netBoundaryFlux() const {
     double net = 0.0;
-    for (const BoundaryFace& face : boundaryFaces_) {
-        // Inflow through a prescribed-velocity wall counts too: that is how
-        // an inlet enters the balance.
-        net += face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        // Inflow through a prescribed-velocity face counts too: that is how
+        // an inlet enters the balance. Outlets use the flux the projection
+        // actually enforced -- see boundaryFlux_.
+        net += boundaryFaces_[i].isOutlet ? boundaryFlux_[i]
+                                          : boundaryFaces_[i].wallVelocity.dot(
+                                                boundaryFaces_[i].areaVector);
     }
     return net;
 }
@@ -465,9 +476,10 @@ double UnstructuredCavitySolver3D::maxFaceDivergence() const {
         divergence[interiorFaces_[i].owner] += fluxes[i];
         divergence[interiorFaces_[i].neighbour] -= fluxes[i];
     }
-    for (const BoundaryFace& face : boundaryFaces_) {
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        const BoundaryFace& face = boundaryFaces_[i];
         divergence[face.cell] +=
-            face.isOutlet ? boundaryMassFlux(face) : face.wallVelocity.dot(face.areaVector);
+            face.isOutlet ? boundaryFlux_[i] : face.wallVelocity.dot(face.areaVector);
     }
     double worst = 0.0;
     for (std::size_t cell = 0; cell < divergence.size(); ++cell) {

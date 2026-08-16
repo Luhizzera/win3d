@@ -391,22 +391,22 @@ void testChannelWithOutletConservesGlobalMass() {
     // Mass must actually be leaving: a sealed domain would give exactly the
     // inflow as the imbalance, so this separates "outlet works" from "outlet
     // is silently still a wall".
-    // **The residual ~13% is a diagnosed inconsistency, not noise.** Swept
-    // over simulated time it comes out identical to five digits at t = 3, 8
-    // and 20 (-1.3158e-01 every time), so it is neither transient nor
-    // drifting -- the signature of a bookkeeping error, not of physics.
+    // **Mass balance closes to machine precision**, and getting there was the
+    // whole point. A first version reported a 13.2% deficit that was identical
+    // to five digits at t = 3, 8 and 20 -- constant, so not transient, which
+    // is the signature of a bookkeeping error rather than physics.
     //
-    // Cause, found by comparing the two code paths rather than guessing:
-    // projectToDivergenceFree() forms the outlet flux from velocityStar,
-    // *before* the pressure correction, while netBoundaryFlux() reads it from
-    // velocity_, *after*. The projection therefore balances one flux while
-    // this measures another, and the two differ by exactly -dt * grad(p) . A
-    // at the outlet cells -- constant once the flow is steady, which is
-    // precisely what the sweep shows. The fix is to correct the boundary flux
-    // the same way the interior ones are corrected; left as the next step
-    // rather than patched blind, and the bound below is what is actually
-    // achieved today, not what would read better.
-    AETHER_CHECK(std::fabs(net) < 0.25 * inflow);
+    // The cause was the diagnostic, not the solver: the projection corrects an
+    // outlet with the compact face gradient a_b (p_outlet - p_P), the same one
+    // its Poisson coefficient is built from, while this check recomputed the
+    // flux from the corrected cell velocity and the least-squares gradient --
+    // a different operator. Recording the flux the projection actually
+    // enforced took the imbalance from 1.3e-01 to 6.3e-14.
+    //
+    // Same lesson as ROADMAP Fase 1, where the structured cavity's "~0.2
+    // divergence" turned out to be a property of the diagnostic too: **measure
+    // the operator you actually solve.**
+    AETHER_CHECK(std::fabs(net) < 1e-9 * inflow);
     // And the interior must still be divergence-free where no boundary acts.
     AETHER_CHECK(solver.maxFaceDivergence() < 10.0);
 }

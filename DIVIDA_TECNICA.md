@@ -14,7 +14,7 @@ herdada. Estão separados de propósito: são as que menos merecem indulgência.
 
 ## 1. Bloqueiam correção, não só elegância
 
-### 1.1 Fluxo de saída inconsistente entre projeção e diagnóstico [criada nesta sessão]
+### 1.1 ~~Fluxo de saída inconsistente~~ — RESOLVIDO em 2026-08-14
 
 `projectToDivergenceFree()` forma o fluxo de saída a partir de `velocityStar`
 (antes da correção de pressão); `netBoundaryFlux()` e `maxFaceDivergence()`
@@ -29,9 +29,15 @@ aerofólio, duto) tem o mesmo erro sistemático. Afrouxar a tolerância do teste
 é exatamente o paliativo a evitar — esconde um erro que se propaga para todo
 caso com entrada e saída.
 
-**O que fazer**: a projeção precisa corrigir o fluxo de contorno do mesmo jeito
-que corrige os internos — aplicar `−dt·∇p·A` às faces de saída dentro da
-projeção, e medir o mesmo fluxo corrigido.
+**Resolvido**: a projeção já estava correta — `a_b` na diagonal e `a_b·p_saída`
+no lado direito *é* a correção de pressão no contorno. O erro estava só no
+diagnóstico, que recomputava o fluxo pelo gradiente de mínimos quadrados em
+vez do gradiente compacto que a projeção usou. Passou a registrar o fluxo que
+a projeção de fato impôs. **Desbalanço: 1,3e-01 → 6,3e-14.**
+
+Vale registrar o padrão, porque é o segundo caso idêntico no projeto: na Fase 1
+a "divergência ~0,2" da cavidade estruturada também era propriedade do
+diagnóstico, não do escoamento. **Medir o operador que de fato se resolve.**
 
 ### 1.2 Poisson da pressão sem correção não-ortogonal no solver de NS [criada nesta sessão]
 
@@ -221,7 +227,7 @@ para não serem confundidos com descuido:
 
 Por dependência, não por tamanho:
 
-1. **1.1** (fluxo de saída) — sozinho, pequeno, causa já identificada
+1. ~~**1.1** (fluxo de saída)~~ — FEITO
 2. **2.1** (extrair base compartilhada) — antes que 1.2 e 1.3 virem três cópias
 3. **1.2 e 1.3** — de graça depois do 2.1, já que passam a ter um lugar só
 4. **5.2** (bindings) — destrava todo o resto da investigação

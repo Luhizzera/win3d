@@ -134,7 +134,16 @@ private:
     // Conjugate Gradient applies unchanged.
     std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt) const;
     std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt) const;
-    double boundaryMassFlux(const BoundaryFace& face) const;
+    // The boundary mass flux **as the projection left it**, filled in by
+    // projectToDivergenceFree(). Stored rather than recomputed because the
+    // two are not the same number: the projection corrects an outlet with
+    // the compact face gradient a_b (p_outlet - p_P), while recomputing from
+    // the cell velocity uses the least-squares gradient instead. Reporting
+    // the recomputed one made the domain look like it was losing 13.2% of
+    // its inflow -- measuring a different operator than the one being
+    // solved, exactly the error ROADMAP Fase 1 diagnosed for the structured
+    // cavity's divergence.
+    std::vector<double> boundaryFlux_;
 
     const mesh::TetrahedralMesh* mesh_;
     double viscosity_;
