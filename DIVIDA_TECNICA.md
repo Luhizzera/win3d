@@ -39,60 +39,121 @@ Vale registrar o padrão, porque é o segundo caso idêntico no projeto: na Fase
 a "divergência ~0,2" da cavidade estruturada também era propriedade do
 diagnóstico, não do escoamento. **Medir o operador que de fato se resolve.**
 
-### 1.2 Poisson da pressão sem correção não-ortogonal no solver de NS [criada nesta sessão]
+### 1.2 ~~Poisson da pressão sem correção não-ortogonal no solver de NS~~ — RESOLVIDO em 2026-08-16
 
-`UnstructuredDiffusionSolver` tem correção não-ortogonal por correção
-diferida; `UnstructuredCavitySolver3D::applyPoissonOperator()` **não tem**.
-São o mesmo operador matemático, com tratamentos diferentes.
+`UnstructuredDiffusionSolver` tinha correção não-ortogonal por correção
+diferida; `UnstructuredCavitySolver3D::applyPoissonOperator()` **não tinha**.
+Eram o mesmo operador matemático, com tratamentos diferentes.
 
-**Por que importa**: a Fase 2.2 mediu que, sem essa correção, o erro **estagna**
-(ordem 0,10 em vez de convergir). O solver de NS está hoje com a versão que
-sabidamente não converge, na equação mais importante que ele resolve.
+**Por que importava**: a Fase 2.2 mediu que, sem essa correção, o erro
+**estagna** (ordem 0,10 em vez de convergir). O solver de NS estava com a
+versão que sabidamente não converge, na equação mais importante que resolve.
 
-**O que fazer**: extrair o operador validado da Fase 2.2 e usá-lo, em vez de
-manter duas implementações divergentes do mesmo Laplaciano.
+**Resolvido**: não existe mais um segundo Laplaciano. `applyPoissonOperator()`
+foi apagado; a projeção chama `solveDeferredCorrection()` da base — a mesma
+função que a difusão usa, com a mesma correção — passando a célula fixada
+quando não há saída. Foi a mudança de uma linha que o item 2.1 prometia.
 
-### 1.3 Gradiente zero silencioso em célula de estêncil deficiente [criada nesta sessão]
+**Medido — divergência máxima por faces na cavidade, contra o número de
+correctores por passo** (topologia idêntica em todos os casos):
 
-`UnstructuredCavitySolver3D::scalarGradients()` devolve gradiente **zero**
-quando a matriz de mínimos quadrados é singular. `UnstructuredDiffusionSolver`
-cai para Green-Gauss no mesmo caso.
+| correctores | divergência | |
+|---|---|---|
+| 0 (antes) | 1,150e-01 | sem correção nenhuma |
+| 1 | **diverge** (2,9e+88) | a correção nunca alcança a pressão que corrige |
+| 2 | 2,284e-02 | mínimo estável |
+| 3 | 1,322e-02 | |
+| **4** | **7,129e-03** | escolhido: +0,8 s numa suíte de 25 s |
+| 8 | 8,560e-04 | |
+| 16 | 1,286e-04 | |
 
-**Por que não dá para contornar**: gradiente zero não é "sem resposta", é uma
-resposta errada e plausível. Numa malha de geometria real, células de estêncil
-deficiente aparecem justamente perto de contornos complicados — onde o
-gradiente importa mais.
+Duas coisas se leem nessa tabela. O resíduo cai pela metade a cada corrector —
+geométrico, que é o que diz que a correção diferida está convergindo e não
+brigando com alguma coisa —, então **esse diagnóstico reporta quantos
+correctores foram pagos, não uma propriedade do esquema**. E um corrector não
+é apenas impreciso, é instável, que é por que a contagem não é simplesmente
+minimizada. Escolhido 4: 16× melhor que a versão sem correção, por 3% de
+tempo de suíte.
 
-**O que fazer**: usar o mesmo recuo para Green-Gauss, ou recusar a malha
-explicitamente. Nunca devolver zero como se fosse resultado.
+**Consequência que precisou ser perseguida**: com a correção ligada, o balanço
+de massa do canal saltou de 6e-14 para 2,5e-03. Não era regressão da física —
+a projeção passou a impor um fluxo com um termo a mais, e `boundaryFlux_`
+ainda registrava só a parte compacta `a_b(p_saída − p_P)`. Passou a registrar
+`(∇p)_f·A` inteiro, que é a mesma quantidade pela identidade
+`A = a_b·d + A_nonorth`. Voltou a 2,1e-13. **Terceira vez que o mesmo erro
+aparece neste projeto** (Fase 1, item 1.1, agora aqui): medir o operador que
+de fato se resolve.
 
-### 1.4 Face de saída arrasta viscosamente no operador de Helmholtz [encontrada ao extrair a base, não criada por ela]
+### 1.3 ~~Gradiente zero silencioso em célula de estêncil deficiente~~ — RESOLVIDO em 2026-08-16
 
-`applyHelmholtzOperator()` monta a diagonal como
-`V/dt + ν·laplacianDiagonal_[célula]` e depois pula as faces de saída no laço
-de contorno, com o comentário "zero-gradient: no viscous flux through an
-outlet". Só que `laplacianDiagonal_` **já contém** o `a_b` da saída — ele foi
-somado ali de propósito, porque é o que fixa o nível de pressão no Poisson.
-Resultado: a célula de saída ganha `ν·a_b` na diagonal do Helmholtz **sem
-termo correspondente no lado direito**, o que impõe `u = 0` na face de saída
-em vez de gradiente nulo. É o contrário do que o comentário afirma.
+`UnstructuredCavitySolver3D::scalarGradients()` devolvia gradiente **zero**
+quando a matriz de mínimos quadrados era singular. `UnstructuredDiffusionSolver`
+caía para Green-Gauss no mesmo caso.
 
-**Por que importa**: é um freio viscoso espúrio exatamente onde o escoamento
-deixa o domínio — o caso do canal e qualquer escoamento externo futuro
-(cilindro, aerofólio). O balanço de massa não acusa: a projeção fecha em
-6e-14 de qualquer jeito, porque o erro está no preditor, não na projeção. Um
-diagnóstico global que fecha não prova que o campo está certo.
+**Por que não dava para contornar**: gradiente zero não é "sem resposta", é
+uma resposta errada e plausível. Numa malha de geometria real, células de
+estêncil deficiente aparecem justamente perto de contornos complicados — onde
+o gradiente importa mais.
 
-**Por que não foi corrigido aqui**: é mudança de comportamento, e este item
-2.1 é estrutural — misturar as duas coisas tira a única evidência de que a
-extração não mudou nada. Pré-existe à extração; foi ela que tornou o conflito
-visível, ao pôr as duas montagens lado a lado.
+**Resolvido**: `computeCellGradients()` na base faz mínimos quadrados onde o
+estêncil suporta e Green-Gauss onde não suporta. **A escolha não é mais
+oferecida a quem chama** — não existe API que devolva zero.
 
-**O que fazer**: separar a diagonal do Poisson da diagonal viscosa (a saída
-entra em uma e não na outra), ou levar `a_b·u_saída` para o lado direito com
-o valor extrapolado da célula. Medir a diferença no perfil de saída do canal
-antes e depois — se for nula, o item vira nota de rodapé; se não for, é o
-primeiro número quantitativo errado do escoamento externo.
+**Medido, e a medição é o achado**: `deficientStencilCount()` (novo
+diagnóstico de qualidade de malha, ao lado de `maxNonOrthogonality()`) mostra
+que isto **não era hipotético**:
+
+| caso | células | estêncil deficiente |
+|---|---|---|
+| placa (difusão), n=4/6/8 | 415 / 1358 / 3184 | **0** |
+| cavidade não-estruturada | 415 | **29 (7,0%)** |
+| canal com saída | 177 | **21 (11,9%)** |
+
+A difusão nunca caiu no recuo porque inclui os valores de Dirichlet do
+contorno no ajuste, o que completa o posto. O solver de NS não inclui (parede
+é gradiente nulo, não carrega informação), então suas células de canto ficam
+com poucos vizinhos — e **7 a 12% das células vinham recebendo gradiente de
+pressão zero em todo teste que já rodou**.
+
+Efeito isolado, desligando só o recuo: u médio no topo da cavidade
+0,06782 → 0,06929 (+2,2%); a divergência praticamente não se mexe
+(7,158e-03 → 7,129e-03). O item mexe no campo, não no diagnóstico da
+projeção — como esperado, já que a projeção zera o operador que resolve
+independentemente de o gradiente das células deficientes estar certo.
+
+### 1.4 ~~Face de saída arrasta viscosamente no operador de Helmholtz~~ — RESOLVIDO em 2026-08-16
+
+`applyHelmholtzOperator()` montava a diagonal como
+`V/dt + ν·laplacianDiagonal_[célula]` e depois pulava as faces de saída no
+laço de contorno, com o comentário "zero-gradient: no viscous flux through an
+outlet". Só que `laplacianDiagonal_` **já continha** o `a_b` da saída — somado
+ali de propósito, porque é o que fixa o nível de pressão no Poisson.
+Resultado: a célula de saída ganhava `ν·a_b` na diagonal **sem termo
+correspondente no lado direito**, o que impõe `u = 0` na face de saída em vez
+de gradiente nulo. O contrário do que o comentário afirmava.
+
+**Resolvido**: a base mantém duas diagonais. `interiorDiagonal_` só as faces
+interiores, `laplacianDiagonal_` interiores mais as de contorno que entram no
+operador. O Poisson usa a segunda, o Helmholtz usa a primeira mais as paredes.
+Uma saída é Dirichlet para pressão e gradiente nulo para velocidade; compartilhar
+uma diagonal entre as duas era assumir que os dois operadores concordam sobre
+quais faces são conexões, e eles não concordam.
+
+**Medido, e o resultado contraria o que eu previa**: u médio nas células
+junto à saída do canal, 1,00367 com o termo espúrio, 0,98698 sem ele — 1,7%
+de diferença, com o balanço de massa idêntico em precisão de máquina nos dois
+casos (−8,0e-15 vs −2,1e-13). Vale registrar que o deslocamento é **para
+baixo**: o termo não é um freio simples cuja remoção acelera o escoamento,
+porque a projeção responde ao preditor alterado redistribuindo pressão. A
+direção não é o argumento para a correção — não haver fluxo viscoso através de
+uma face de gradiente nulo é —, mas é o motivo pelo qual isto precisou ser
+medido em vez de previsto.
+
+**O que este item ensina, além dele mesmo**: um diagnóstico global que fecha
+não prova que o campo está certo. O balanço de massa fechou em 1e-13 durante
+todo o tempo em que a saída estava com condição de parede no preditor, porque
+a projeção impõe o balanço independentemente do que a equação de momento fez
+lá. O teste do canal passou a reportar o perfil de saída por isso.
 
 ---
 
@@ -160,6 +221,27 @@ ponto de integração — pós-processamento, persistência, visualização.
 
 **O que fazer**: decidir qual é a representação canônica e fazer a outra
 construir sobre ela. Não manter as duas.
+
+### 2.3 Pressão da saída fica de fora do ajuste de mínimos quadrados [notada ao resolver 1.3]
+
+`buildGradientStencils(useBoundaryValues)` é chamado com `false` no solver de
+NS, então **nenhuma** face de contorno entra no estêncil de gradiente. Para
+parede isso é certo e o motivo está no código: gradiente nulo afirma que a
+*derivada normal* some, e o ajuste leria isso como "o valor na face é igual ao
+da célula", enviesando também as componentes tangenciais. Mas a saída tem
+pressão prescrita — é Dirichlet, exatamente como as faces quentes e frias da
+placa, que a difusão inclui.
+
+**Por que importa**: é a causa direta dos 21 de 177 estêncils deficientes do
+canal (item 1.3). Incluir a saída completaria o posto de boa parte deles, e
+essas células são justamente as que decidem quanto o escoamento leva embora.
+Enquanto ficarem de fora, o recuo Green-Gauss — de primeira ordem — carrega
+12% do domínio.
+
+**Por que não foi feito junto**: é mudança de comportamento com medição
+própria a fazer, e empilhá-la sobre três outras no mesmo passo tira a
+atribuição de cada uma. É uma linha (`true` em vez de `false`) mais a medição
+do perfil de saída antes e depois.
 
 ---
 
@@ -288,13 +370,14 @@ Por dependência, não por tamanho:
 
 1. ~~**1.1** (fluxo de saída)~~ — FEITO
 2. ~~**2.1** (extrair base compartilhada)~~ — FEITO
-3. **1.2 e 1.3** — agora com um lugar só para serem corrigidos; e **1.4**,
-   que a extração encontrou, junto com eles
+3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
 4. **5.2** (bindings) — destrava todo o resto da investigação
-5. **3.2** (solução manufaturada) — mede o que hoje é inferido
-6. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
-7. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
-8. **5.1** (push) — um comando
+5. **2.3** (pressão da saída no estêncil) — uma linha mais a medição; com os
+   bindings prontos vira um experimento em minutos em vez de um ciclo de build
+6. **3.2** (solução manufaturada) — mede o que hoje é inferido
+7. **3.1** (esquema de alta ordem) — só depois que 3.2 der uma régua confiável
+8. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
+9. **5.1** (push) — um comando
 
 O item **6** (tetraedralização restrita) fica por último não por prioridade,
 mas porque é o único que não se resolve com disciplina — se resolve com

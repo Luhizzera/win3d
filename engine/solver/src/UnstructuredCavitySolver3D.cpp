@@ -27,12 +27,26 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     buildFaceGeometry([this](std::size_t meshFace) {
         return isOutlet_ && isOutlet_(mesh_->face(meshFace).centroid);
     });
+    // What a boundary face's *pressure* is: the prescribed value at an
+    // outlet, nothing at a wall (zero-gradient, so the face carries the
+    // cell's own value). Used by the Green-Gauss fallback and by the
+    // non-orthogonal correction.
+    setBoundaryFaceValue([this](std::size_t meshFace, double& value) {
+        if (!isOutlet_ || !isOutlet_(mesh_->face(meshFace).centroid)) {
+            return false;
+        }
+        value = outletPressure_;
+        return true;
+    });
     buildBoundaryConditions();
 
     // Interior neighbours only. A solid wall carries a zero-gradient
     // condition for pressure, so including it as a stencil entry would
-    // assert "the wall value equals the cell value", biasing the fit.
-    buildGradientStencils();
+    // assert "the wall value equals the cell value", biasing the fit. An
+    // outlet's pressure *is* known and could legitimately join the fit; it is
+    // left out for now because that is a behaviour change with its own
+    // measurement to make, recorded as DIVIDA_TECNICA.md 2.3.
+    buildGradientStencils(/*useBoundaryValues=*/false);
     boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
 }
 
@@ -80,7 +94,7 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
     // difference. Without this the face flux is blind to a cell-to-cell
     // pressure oscillation, which is the collocated-grid failure mode this
     // arrangement is otherwise exposed to.
-    const std::vector<Vector3> pressureGradients = leastSquaresGradients(pressure);
+    const std::vector<Vector3> pressureGradients = computeCellGradients(pressure);
     std::vector<double> fluxes(interiorFaces_.size());
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         const InteriorFace& face = interiorFaces_[i];
@@ -96,35 +110,11 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
     return fluxes;
 }
 
-std::vector<double> UnstructuredCavitySolver3D::applyPoissonOperator(const std::vector<double>& x) const {
-    // The same Laplacian Fase 2.2 validated -- minus its non-orthogonal
-    // deferred correction, which this operator still lacks
-    // (DIVIDA_TECNICA.md 1.2) -- with cell 0 pinned to remove the
-    // pure-Neumann null space (every boundary here is a solid wall).
-    // Cell 0 is pinned ONLY when every boundary is a wall. With an outlet
-    // the prescribed pressure already fixes the level, and pinning as well
-    // would over-constrain the system -- two incompatible references.
-    const bool pinReference = !hasOutlet_;
-    std::vector<double> result(x.size());
-    for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = (pinReference && cell == 0) ? x[cell] : laplacianDiagonal_[cell] * x[cell];
-    }
-    for (const InteriorFace& face : interiorFaces_) {
-        if (!pinReference || face.owner != 0) {
-            result[face.owner] -= face.coefficient * x[face.neighbour];
-        }
-        if (!pinReference || face.neighbour != 0) {
-            result[face.neighbour] -= face.coefficient * x[face.owner];
-        }
-    }
-    return result;
-}
-
 std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(const std::vector<double>& x,
                                                                         double dt) const {
     std::vector<double> result(x.size());
     for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * laplacianDiagonal_[cell]) * x[cell];
+        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * interiorDiagonal_[cell]) * x[cell];
     }
     // A wall face stiffens its cell's equation even though the wall value
     // itself is known and belongs on the right-hand side.
@@ -178,35 +168,54 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
             rhs[face.cell] += face.coefficient * outletPressure_;
         }
     }
-    if (!hasOutlet_) {
-        rhs[0] = 0.0;
-    }
+    // **The same Laplacian the diffusion solver uses, correction included.**
+    // This operator used to be a second copy that assembled only the implicit
+    // part -- the version Fase 2.2 measured stagnating at observed order 0.10
+    // on exactly these meshes, in the most important equation this solver
+    // has (DIVIDA_TECNICA.md 1.2). Cell 0 is pinned ONLY when every boundary
+    // is a wall: with an outlet the prescribed pressure already fixes the
+    // level, and pinning as well would over-constrain the system with two
+    // incompatible references. Started from the previous step's pressure,
+    // which is why it converges in a handful of iterations.
+    const std::size_t pinnedCell = hasOutlet_ ? kNoPinnedCell : 0;
+    double outerChange = 0.0;
+    solveDeferredCorrection(pressure_, rhs, pinnedCell, n, 1e-10, kPressureCorrectors, outerChange);
 
-    // Started from the previous step's pressure, which is why this converges
-    // in a handful of iterations. With a pinned reference the operator's row
-    // 0 is the identity and rhs[0] is zero, so pressure_[0] -- zero from
-    // construction -- stays exactly zero and never enters any direction.
-    conjugateGradient([this](const std::vector<double>& v) { return applyPoissonOperator(v); }, rhs,
-                      pressure_, n, 1e-10);
-
-    const std::vector<Vector3> pressureGradients = leastSquaresGradients(pressure_);
+    const std::vector<Vector3> pressureGradients = computeCellGradients(pressure_);
     for (std::size_t cell = 0; cell < n; ++cell) {
         velocity_[cell] = velocityStar[cell] - pressureGradients[cell] * dt;
     }
 
-    // Record the boundary flux **the projection enforced**, using the same
-    // compact face gradient the Poisson operator's outlet coefficient was
-    // built from. Recomputing it later from the corrected cell velocity and
-    // the least-squares gradient gives a different -- and systematically
-    // wrong -- number, which is what produced the 13.2% imbalance.
+    // Record the boundary flux **the projection enforced**, term for term.
+    // Recomputing it later from the corrected cell velocity and the
+    // least-squares gradient gives a different -- and systematically wrong --
+    // number, which is what produced the original 13.2% imbalance.
+    //
+    // Both terms of the operator have to appear here, and that was measured:
+    // when the non-orthogonal correction was added to the Poisson equation
+    // and this flux still carried only the compact part a_b (p_out - p_P),
+    // the imbalance went from 6e-14 straight back to 2.5e-03. The projection
+    // had simply started enforcing a flux with one more term in it. Same
+    // lesson as ROADMAP Fase 1 and as item 1.1, for the third time:
+    // **measure the operator you actually solve.**
+    //
+    // Written as (grad p)_f . A rather than as its two pieces because
+    // that identity is the reason the split is legitimate at all:
+    // A = a_b d + A_nonorth and (grad p)_f . d = p_out - p_P, so
+    // (grad p)_f . A  ==  a_b (p_out - p_P) + (grad p)_f . A_nonorth.
     boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
     for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
         const BoundaryFace& face = boundaryFaces_[i];
         if (!boundaryConditions_[i].isOutlet) {
             continue;
         }
+        const Vector3& cellGradient = pressureGradients[face.cell];
+        const double compactNormalDerivative =
+            (outletPressure_ - pressure_[face.cell]) / face.distance;
+        const Vector3 faceGradient =
+            cellGradient + face.unitD * (compactNormalDerivative - cellGradient.dot(face.unitD));
         boundaryFlux_[i] = velocityStar[face.cell].dot(face.areaVector) -
-                            dt * face.coefficient * (outletPressure_ - pressure_[face.cell]);
+                            dt * faceGradient.dot(face.areaVector);
     }
 }
 

@@ -22,13 +22,11 @@ namespace aether::solver {
 // coefficients and the same least-squares gradients. What is new here is
 // momentum transport and the projection that couples it to pressure.
 //
-// **One divergence from the shared base is still real and is not fixed
-// here**: applyPoissonOperator() assembles only the implicit part of that
-// Laplacian, without the non-orthogonal deferred correction the diffusion
-// solver applies to the same operator -- the correction Fase 2.2 measured as
-// the difference between converging and stagnating at order 0.10. It is
-// recorded as DIVIDA_TECNICA.md 1.2, and sharing the base is what makes
-// fixing it a change in one place rather than two.
+// **The pressure Poisson equation is now literally that same operator**,
+// non-orthogonal deferred correction included. It used to be a second copy
+// carrying only the implicit part -- the version Fase 2.2 measured stagnating
+// at observed order 0.10 -- which was DIVIDA_TECNICA.md 1.2. Fixing it was a
+// change in one place because the base exists.
 //
 // **Design choices, and why each is what it is:**
 //
@@ -118,7 +116,32 @@ private:
     std::vector<double> faceMassFluxes(const std::vector<core::Vector3>& velocity,
                                         const std::vector<double>& pressure, double dt) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
-    std::vector<double> applyPoissonOperator(const std::vector<double>& x) const;
+
+    // Non-orthogonal correctors per projection, rather than iterating the
+    // deferred correction to convergence every step. The pressure of an
+    // explicit-convection projection scheme is an intermediate quantity --
+    // what has to converge is the *time march*, not each individual solve --
+    // so unstructured codes fix a small number of correctors per step.
+    //
+    // **Four, and the number was measured rather than picked.** Cavity test,
+    // max face divergence against the corrector count, with the topology
+    // result (u at the lid, u at the floor) identical in every case:
+    //
+    //     1  ->  diverges (2.9e+88)      the correction never catches the
+    //                                    pressure it is correcting
+    //     2  ->  2.284e-02               minimum stable count
+    //     3  ->  1.322e-02
+    //     4  ->  7.129e-03               chosen: +0.8s on a 25s suite
+    //     8  ->  8.560e-04
+    //    16  ->  1.286e-04
+    //
+    // Two things are worth reading off that table. The residual halves per
+    // corrector -- geometric, which is what says the deferred correction is
+    // converging rather than fighting something -- so **this diagnostic
+    // reports how many correctors were paid for, not a property of the
+    // scheme**. And one corrector is not merely inaccurate but unstable,
+    // which is why the count is not simply minimised.
+    static constexpr std::size_t kPressureCorrectors = 4;
 
     // (V_P/dt + nu * sum_f a_f) x_P - nu * sum_f a_f x_N: the same Laplacian
     // with a shifted diagonal, which is what makes the viscous term implicit.

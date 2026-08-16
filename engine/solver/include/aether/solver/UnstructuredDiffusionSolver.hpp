@@ -23,34 +23,25 @@ namespace aether::solver {
 // problem on tetrahedra isolates what changed -- the geometric
 // discretization -- from what did not -- the physics.
 //
-// **The real difficulty: non-orthogonality.** On a Cartesian grid the face
+// **What is left in this class is only the physics.** The geometry (the
+// over-relaxed decomposition, the non-orthogonal deferred correction, the
+// least-squares gradients with their Green-Gauss fallback, the Laplacian and
+// the Conjugate Gradient that solves it) is UnstructuredFvmBase, shared with
+// the Navier-Stokes solver. What remains here is the boundary condition --
+// which faces are held at a fixed value and which are insulated -- and the
+// right-hand side that follows from it. That split is the whole reason the
+// base exists; see its header.
+//
+// **The non-orthogonality this rests on.** On a Cartesian grid the face
 // normal is parallel to the line joining the two cell centres, so the
 // diffusive flux through a face is just (phi_N - phi_P)/|d| times the area.
 // On tetrahedra it never is, and that misalignment is a property of mesh
 // *shape*, not mesh *size* -- refining a tet mesh does not make it more
-// orthogonal. The over-relaxed decomposition that handles it now lives in
-// UnstructuredFvmBase, which this class shares with the Navier-Stokes
-// solver; see that header for the algebra and for why the split was
-// extracted.
-//
-// **The correction is not optional here, and that was measured rather than
-// assumed.** A first version assembled only the implicit part. Its mesh
-// convergence study stalled: rms error 2.879 -> 2.433 -> 2.365 for n =
-// 4/6/8, i.e. observed order 0.42 then 0.10 -- a plateau, not convergence.
-// The reason is visible in maxNonOrthogonality() on these meshes (~1.5):
-// non-orthogonality is a property of cell *shape*, so refining a tet mesh
-// does not reduce it, and the dropped term settles to a mesh-quality error
-// floor instead of vanishing. Running that experiment before committing to
-// the simpler scheme is the Fase 1 lesson applied.
-//
-// The correction is handled by **deferred correction**: the implicit part
-// keeps the matrix a symmetric positive-definite M-matrix (positive
-// diagonal, negative off-diagonals, diagonally dominant once at least one
-// Dirichlet face exists) so the base's matrix-free Conjugate Gradient
-// applies unchanged, while the non-orthogonal term is evaluated from the
-// previous iterate and moved to the right-hand side. Outer sweeps repeat
-// until it stops changing. The face gradient it needs comes from
-// least-squares cell gradients averaged to the face.
+// orthogonal (maxNonOrthogonality() stays ~1.5 on these meshes). Fase 2.2
+// measured what dropping the resulting correction costs: rms error 2.879 ->
+// 2.433 -> 2.365 for n = 4/6/8, an observed order of 0.42 then 0.10 -- a
+// plateau, not convergence. Running that experiment before committing to the
+// simpler scheme is the Fase 1 lesson applied.
 class UnstructuredDiffusionSolver : public UnstructuredFvmBase {
 public:
     explicit UnstructuredDiffusionSolver(const mesh::TetrahedralMesh& mesh);
@@ -80,7 +71,7 @@ public:
     // Gradient at each cell from the current solution. Exposed because it is
     // the quantity the non-orthogonal correction is built from, so a caller
     // checking this class's accuracy can inspect it.
-    std::vector<core::Vector3> cellGradients() const;
+    std::vector<core::Vector3> cellGradients() const { return computeCellGradients(phi_); }
 
     // Largest per-cell change across the final outer sweep. The number that
     // says whether the deferred-correction loop actually converged or merely
@@ -92,26 +83,7 @@ public:
     double value(std::size_t cell) const { return phi_.at(cell); }
 
 private:
-    std::vector<double> applyOperator(const std::vector<double>& x) const;
     void rebuildCoefficients();
-
-    bool isDirichlet(const BoundaryFace& face) const { return boundaryIsDirichlet_[face.meshFace]; }
-    double dirichletValue(const BoundaryFace& face) const { return boundaryValue_[face.meshFace]; }
-
-    // The non-orthogonal flux the implicit part cannot represent, evaluated
-    // from the previous iterate and accumulated per cell.
-    std::vector<double> nonOrthogonalCorrection(const std::vector<double>& phi) const;
-
-    // Green-Gauss: cheap, but only first-order accurate on a skewed mesh --
-    // kept as the fallback for the rare cell whose least-squares stencil is
-    // rank-deficient (too few, or nearly coplanar, neighbours). Returning a
-    // zero gradient there instead would be a wrong answer that looks like a
-    // result; see UnstructuredFvmBase::leastSquaresGradients.
-    std::vector<core::Vector3> computeGradientsGreenGauss(const std::vector<double>& phi) const;
-
-    // Least-squares cell gradients, with the Green-Gauss fallback supplied
-    // only when this mesh actually has a deficient stencil to fall back for.
-    std::vector<core::Vector3> computeGradients(const std::vector<double>& phi) const;
 
     // Per-boundary-face prescribed value, or "no value" when insulated.
     // Indexed by *mesh* face, since that is what a selector resolves to and

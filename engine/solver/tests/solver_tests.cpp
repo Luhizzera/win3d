@@ -272,6 +272,7 @@ struct UnstructuredPlateResult {
     std::size_t iterations;
     double outerChange;
     double interiorRmsError;
+    std::size_t deficientStencils;
 };
 
 UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
@@ -321,7 +322,8 @@ UnstructuredPlateResult solveUnstructuredPlate(std::size_t n) {
     }
 
     return {std::sqrt(weightedSquaredError / totalVolume), solver.maxNonOrthogonality(), mesh.cellCount(),
-            iterations, solver.lastOuterChange(), std::sqrt(interiorSquaredError / interiorVolume)};
+            iterations, solver.lastOuterChange(), std::sqrt(interiorSquaredError / interiorVolume),
+            solver.deficientStencilCount()};
 }
 
 // ---------------------------------------------------------------------------
@@ -382,9 +384,41 @@ void testChannelWithOutletConservesGlobalMass() {
         }
     }
     const double net = solver.netBoundaryFlux();
+
+    // Mean streamwise velocity in the cells against the outlet, volume
+    // weighted. Reported because **a global balance cannot see a local error
+    // at the outlet**: the projection makes whatever leaves equal whatever
+    // enters no matter what the momentum equation did there, so the net flux
+    // stays at 1e-13 either way. That blindness is what let
+    // DIVIDA_TECNICA.md 1.4 sit unnoticed -- the viscous operator carried the
+    // outlet's Dirichlet coefficient on its diagonal with nothing on the
+    // right-hand side, which is the equation for u = 0 at the outlet rather
+    // than the zero gradient the comment there claimed.
+    //
+    // Measured both ways on this case: 1.00367 with the spurious term,
+    // 0.98698 without it -- a 1.7% shift in the velocity leaving the domain,
+    // with the mass balance identical to machine precision in both. Worth
+    // recording that the shift is *downward*: the term is not a simple brake
+    // whose removal speeds the flow up, because the projection responds to
+    // the changed predictor by redistributing pressure. Which way it moves is
+    // not the argument for the fix -- no viscous flux through a zero-gradient
+    // face is -- but it is the reason the effect had to be measured instead
+    // of predicted.
+    double outletSum = 0.0;
+    double outletVolume = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        if (mesh.cellCentroid(cell).x > 0.75) {
+            outletSum += mesh.cellVolume(cell) * solver.velocity(cell).x;
+            outletVolume += mesh.cellVolume(cell);
+        }
+    }
+    const double outletMean = outletSum / outletVolume;
+
     std::printf("  [solver_tests] canal com saida: %zu celulas, entrada=%.5f, "
-                "balanco liquido=%+.3e (%.2f%% da entrada)\n",
-                mesh.cellCount(), inflow, net, 100.0 * std::fabs(net) / inflow);
+                "balanco liquido=%+.3e (%.2f%% da entrada), u medio na saida=%.5f, "
+                "estencilDeficiente=%zu\n",
+                mesh.cellCount(), inflow, net, 100.0 * std::fabs(net) / inflow, outletMean,
+                solver.deficientStencilCount());
     std::fflush(stdout);
 
     AETHER_CHECK(inflow > 0.0);
@@ -475,8 +509,8 @@ void testUnstructuredCavityReproducesVortexTopology() {
     const double topMean = topSum / topVolume;
     const double bottomMean = bottomSum / bottomVolume;
     std::printf("  [solver_tests] cavidade nao-estruturada: %zu celulas, u medio topo=%+.5f fundo=%+.5f, "
-                "divergencia por faces=%.3e\n",
-                mesh.cellCount(), topMean, bottomMean, worstDivergence);
+                "divergencia por faces=%.3e, estencilDeficiente=%zu\n",
+                mesh.cellCount(), topMean, bottomMean, worstDivergence, solver.deficientStencilCount());
     std::fflush(stdout);
 
     // Direct viscous drag: the near-lid fluid must follow the lid.
@@ -484,8 +518,14 @@ void testUnstructuredCavityReproducesVortexTopology() {
     // And mass conservation in a closed box forces the return flow.
     AETHER_CHECK(bottomMean < 0.0);
     // Bounded divergence: the projection has to actually be doing its job.
-    // Bound set from the measured value with margin, not guessed.
-    AETHER_CHECK(worstDivergence < 1.0);
+    // Bound set from the measured value with margin, not guessed -- and
+    // **retightened when the measurement moved**. It was 1.0 against a
+    // measured 1.15e-01, back when the pressure Poisson operator dropped its
+    // non-orthogonal correction (DIVIDA_TECNICA.md 1.2). With the correction
+    // the peak is 7.13e-03, so a bound of 1.0 would no longer notice a 100x
+    // regression. Leaving a tolerance where the old number put it is how a
+    // gate quietly stops being one.
+    AETHER_CHECK(worstDivergence < 5e-2);
     // Guards against the whole thing passing on a dead field.
     AETHER_CHECK(topMean > 0.01);
 }
@@ -523,9 +563,9 @@ void testUnstructuredPlateMatchesFourierSeriesAndConverges() {
         }
         std::printf(
             "    n=%zu  celulas=%5zu  rmsErro=%8.5f (ordem %4.2f)  semCantos=%8.5f (ordem %4.2f)  "
-            "naoOrtog=%.2f\n",
+            "naoOrtog=%.2f  estencilDeficiente=%zu\n",
             n, result.cellCount, result.rmsError, order, result.interiorRmsError, interiorOrder,
-            result.maxNonOrthogonality);
+            result.maxNonOrthogonality, result.deficientStencils);
         std::fflush(stdout);
 
         if (previousError > 0.0) {
