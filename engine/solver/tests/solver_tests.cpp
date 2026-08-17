@@ -552,6 +552,118 @@ void testUnstructuredCavityReproducesVortexTopology() {
     AETHER_CHECK(topMean > 0.01);
 }
 
+// **Central differencing above cell Peclet 2, measured rather than cited.**
+//
+// Every textbook says central differencing of convection is unbounded above
+// cell Peclet 2, and this project has been repeating that claim in comments
+// since Fase 1 -- while its structured Navier-Stokes solvers still use
+// central differencing, and the cavity at Re=400 runs at cell Peclet 12.5.
+// DIVIDA_TECNICA.md 4.4 exists because a claim in a comment is not a
+// measurement, and this project has already been wrong twice about exactly
+// this kind of inherited expectation (the plate's "order 1", item 3.2, and
+// upwind's numerical diffusion, item 3.1 -- one was wrong, one was right, and
+// only measuring told them apart).
+//
+// This is the case where the answer is known in closed form. Steady 1D
+// convection-diffusion with no source has the exact solution
+//
+//   phi(x) = left + (right - left) (exp(u x / Gamma) - 1) / (exp(u L / Gamma) - 1)
+//
+// derived from the ODE in this solver's own header, not recalled from a
+// table. It is monotone between the two Dirichlet values, so **any overshoot
+// outside that range is the scheme failing, not the physics** -- a maximum
+// principle, which is a theorem rather than a tolerance. That is what makes
+// this case decisive where the lid-driven cavity is not: the cavity has no
+// exact solution, so a suspicious-looking field there can always be argued
+// about.
+void testConvectionSchemesAgainstCellPeclet() {
+    std::printf("  [solver_tests] esquemas de conveccao 1D vs solucao exata:\n");
+    std::fflush(stdout);
+
+    using Solver = aether::solver::ImplicitConvectionDiffusionSolver1D;
+    using Scheme = Solver::ConvectionScheme;
+
+    constexpr std::size_t nx = 40;
+    constexpr double length = 1.0;
+    constexpr double velocity = 1.0;
+    constexpr double leftValue = 0.0;
+    constexpr double rightValue = 1.0;
+
+    const auto exact = [&](double x, double diffusivity) {
+        return leftValue + (rightValue - leftValue) * (std::exp(velocity * x / diffusivity) - 1.0) /
+                                (std::exp(velocity * length / diffusivity) - 1.0);
+    };
+
+    struct Result {
+        double rmsError;
+        double overshoot;
+    };
+    const auto run = [&](double diffusivity, Scheme scheme) {
+        Solver solver(nx, length, velocity, diffusivity, 0.0, leftValue, rightValue);
+        solver.setConvectionScheme(scheme);
+        solver.solveBiCGStab(2000, 1e-12);
+        const double h = length / static_cast<double>(nx);
+        double squaredError = 0.0;
+        for (std::size_t i = 0; i < nx; ++i) {
+            const double error = solver.value(i) - exact((static_cast<double>(i) + 0.5) * h, diffusivity);
+            squaredError += error * error;
+        }
+        return Result{std::sqrt(squaredError / static_cast<double>(nx)),
+                      solver.maxBoundednessViolation()};
+    };
+
+    double centralOvershootHigh = 0.0;
+    double limitedOvershootHigh = 0.0;
+    double upwindErrorHigh = 0.0;
+    double limitedErrorHigh = 0.0;
+    double centralErrorHigh = 0.0;
+
+    for (double diffusivity : {0.5, 0.05, 0.0125, 0.003}) {
+        Solver probe(nx, length, velocity, diffusivity, 0.0, leftValue, rightValue);
+        const double peclet = probe.maxCellPeclet();
+        const Result upwind = run(diffusivity, Scheme::FirstOrderUpwind);
+        const Result central = run(diffusivity, Scheme::Central);
+        const Result limited = run(diffusivity, Scheme::LimitedLinearUpwind);
+        std::printf("    Pe=%5.1f  upwind rms=%.4e  central rms=%.4e (excesso %.3f)  "
+                    "limitado rms=%.4e (excesso %.3f)\n",
+                    peclet, upwind.rmsError, central.rmsError, central.overshoot, limited.rmsError,
+                    limited.overshoot);
+        std::fflush(stdout);
+
+        // Boundedness is not a matter of degree: below the limit central
+        // differencing must not overshoot at all.
+        if (peclet < 2.0) {
+            AETHER_CHECK(central.overshoot == 0.0);
+        }
+        // The limited scheme must never overshoot, at any Peclet number --
+        // that is the entire point of the limiter.
+        AETHER_CHECK(limited.overshoot == 0.0);
+        // And it must not be worse than plain upwind anywhere.
+        AETHER_CHECK(limited.rmsError <= upwind.rmsError);
+
+        if (peclet > 4.0) {
+            centralOvershootHigh = central.overshoot;
+            limitedOvershootHigh = limited.overshoot;
+            upwindErrorHigh = upwind.rmsError;
+            limitedErrorHigh = limited.rmsError;
+            centralErrorHigh = central.rmsError;
+        }
+    }
+
+    // **The failure, at the cell Peclet the structured cavity actually runs
+    // at.** Measured 3.17: central differencing puts the solution more than
+    // three times the boundary range outside it. Nothing about a tolerance
+    // can excuse that, and it is why DIVIDA_TECNICA.md 4.4 is about the
+    // scheme rather than about the time step -- item 4.1's safety factor
+    // cannot touch this, because it is not a temporal instability.
+    AETHER_CHECK(centralOvershootHigh > 1.0);
+    AETHER_CHECK(limitedOvershootHigh == 0.0);
+    // And the limited scheme is better than both: 1.8x on upwind, 41x on
+    // central, at Pe = 8.3.
+    AETHER_CHECK(limitedErrorHigh < upwindErrorHigh);
+    AETHER_CHECK(limitedErrorHigh < 0.1 * centralErrorHigh);
+}
+
 // **The convection scheme, measured against a known answer.**
 //
 // DIVIDA_TECNICA.md 3.1 recorded that this project's unstructured convection
@@ -2948,6 +3060,7 @@ int main() {
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
     testManufacturedSolutionReachesSecondOrder();
     testConvectionSchemeOrder();
+    testConvectionSchemesAgainstCellPeclet();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();

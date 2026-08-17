@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 namespace aether::solver {
@@ -76,6 +77,32 @@ public:
     // must not be read as "ILU(0) always solves it instantly".
     enum class Preconditioner { None, Jacobi, IncompleteLU };
 
+    // How the convected value is reconstructed at a face.
+    //
+    // **The assembled matrix is upwind whichever of these is chosen**, and
+    // the difference is carried on the right-hand side by deferred
+    // correction, re-evaluated over outer sweeps. That is the same mechanism
+    // UnstructuredFvmBase uses for its non-orthogonal term, for the same two
+    // reasons: the matrix keeps the M-matrix property that makes the Krylov
+    // solve well behaved, and a *nonlinear* scheme (any limiter) cannot be
+    // put in a linear operator at all.
+    enum class ConvectionScheme {
+        // phi_f = phi_upwind. Bounded at any cell Peclet number, first-order
+        // accurate, and its error is false diffusion -- which is why this
+        // class's own tests measure that error rather than assuming it.
+        FirstOrderUpwind,
+        // phi_f = (phi_C + phi_D)/2. Second-order accurate and
+        // **unconditionally oscillatory above cell Peclet 2** -- included so
+        // that failure can be measured rather than cited, since it is the
+        // scheme the structured Navier-Stokes solvers here still use
+        // (DIVIDA_TECNICA.md 4.4).
+        Central,
+        // Central pulled back towards upwind by a limiter wherever the field
+        // is not smooth: second order where that is safe, bounded where it is
+        // not. See ConvectionLimiter.hpp.
+        LimitedLinearUpwind,
+    };
+
     ImplicitConvectionDiffusionSolver1D(std::size_t nx, double length, double velocity, double diffusivity,
                                          double source, double leftValue, double rightValue);
 
@@ -92,6 +119,24 @@ public:
     // subspace to precondition. Changing it invalidates any cached
     // factorization, which is rebuilt on the next solve.
     void setPreconditioner(Preconditioner preconditioner);
+
+    // Defaults to FirstOrderUpwind, which is what this class has always done
+    // and what its existing tests are calibrated against. A non-upwind scheme
+    // makes every solve below run outer deferred-correction sweeps; the inner
+    // Krylov solve is unchanged.
+    void setConvectionScheme(ConvectionScheme scheme) { scheme_ = scheme; }
+
+    // Largest overshoot outside the range spanned by the two Dirichlet
+    // values, relative to that range. **Zero is not a tolerance but a
+    // theorem**: this equation obeys a maximum principle, so a solution
+    // leaving that range is the scheme failing, not the physics. It is the
+    // crisp way to catch central differencing above cell Peclet 2, which
+    // otherwise only shows up as a suspiciously large error.
+    double maxBoundednessViolation() const;
+
+    // |u| h / Gamma at the worst face: the number that decides whether
+    // central differencing is admissible at all.
+    double maxCellPeclet() const;
 
     // Reference solver: Gauss-Seidel sweeps directly on the same
     // upwind+central discretization, using each row's true diagonal
@@ -169,6 +214,24 @@ private:
     // linear system.
     double stencilAt(const std::vector<double>& x, std::size_t i) const;
 
+    // Convective face value under the active scheme, and the per-cell
+    // difference between that and the upwind value the matrix assembles --
+    // the deferred correction, ready to be added to the right-hand side.
+    double convectedFaceValue(const std::vector<double>& x, std::size_t face) const;
+    std::vector<double> convectionCorrection(const std::vector<double>& x) const;
+
+    // Runs `innerSolve` repeatedly, refreshing the deferred correction from
+    // the previous iterate between sweeps, until the solution stops moving.
+    // With FirstOrderUpwind there is no correction, so it runs exactly once
+    // and this class behaves exactly as it always did.
+    void outerSweeps(const std::function<void()>& innerSolve, double tolerance);
+
+    // The single-sweep bodies; the public methods above wrap these in the
+    // deferred-correction loop.
+    std::size_t solveGaussSeidelOnce(std::size_t maxIterations, double tolerance);
+    long long solveBiCGStabOnce(std::size_t maxIterations, double tolerance);
+    long long solveGmresOnce(std::size_t restart, std::size_t maxIterations, double tolerance);
+
     // The pure linear part of stencilAt (the boundary constants subtracted
     // out) -- what a Krylov method's matrix-vector product must be, since
     // Krylov search directions have no meaning for an affine map's constant
@@ -223,6 +286,9 @@ private:
     std::vector<double> residualHistory_;
 
     Preconditioner preconditioner_ = Preconditioner::None;
+    ConvectionScheme scheme_ = ConvectionScheme::FirstOrderUpwind;
+    // Refreshed between outer sweeps; empty (and unused) under upwind.
+    std::vector<double> convectionCorrection_;
     // Extracted matrix diagonals: sub_[i] multiplies phi[i-1], diag_[i]
     // multiplies phi[i], super_[i] multiplies phi[i+1].
     std::vector<double> sub_;

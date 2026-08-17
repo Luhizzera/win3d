@@ -205,6 +205,22 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .value("Y_MIN", MultigridPoissonSolver2D::Face::YMin)
         .value("Y_MAX", MultigridPoissonSolver2D::Face::YMax);
 
+    py::enum_<ImplicitConvectionDiffusionSolver1D::ConvectionScheme>(implicitConvectionDiffusion,
+                                                                     "ConvectionScheme")
+        .value("FIRST_ORDER_UPWIND",
+               ImplicitConvectionDiffusionSolver1D::ConvectionScheme::FirstOrderUpwind)
+        .value("CENTRAL", ImplicitConvectionDiffusionSolver1D::ConvectionScheme::Central)
+        .value("LIMITED_LINEAR_UPWIND",
+               ImplicitConvectionDiffusionSolver1D::ConvectionScheme::LimitedLinearUpwind);
+    implicitConvectionDiffusion
+        .def("set_convection_scheme", &ImplicitConvectionDiffusionSolver1D::setConvectionScheme,
+             py::arg("scheme"))
+        // Zero is a theorem here, not a tolerance: the equation obeys a
+        // maximum principle, so any overshoot is the scheme failing.
+        .def("max_boundedness_violation",
+             &ImplicitConvectionDiffusionSolver1D::maxBoundednessViolation)
+        .def("max_cell_peclet", &ImplicitConvectionDiffusionSolver1D::maxCellPeclet);
+
     py::class_<MultigridPoissonSolver2D>(m, "MultigridPoissonSolver2D")
         .def(py::init<std::size_t, std::size_t, double, double>(), py::arg("nx"), py::arg("ny"),
              py::arg("length_x"), py::arg("length_y"))

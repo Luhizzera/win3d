@@ -1,5 +1,7 @@
 #include "aether/solver/ImplicitConvectionDiffusionSolver1D.hpp"
 
+#include "aether/solver/ConvectionLimiter.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -111,7 +113,116 @@ std::vector<double> ImplicitConvectionDiffusionSolver1D::rightHandSide() const {
     for (std::size_t i = 0; i < nx_; ++i) {
         rhs[i] = source_ * h_ - stencilAt(zero, i);
     }
+    // Deferred correction: the part of the convective flux the upwind matrix
+    // cannot represent, evaluated from the previous outer iterate. Empty
+    // under FirstOrderUpwind, which is what keeps that path unchanged.
+    if (!convectionCorrection_.empty()) {
+        for (std::size_t i = 0; i < nx_; ++i) {
+            rhs[i] += convectionCorrection_[i];
+        }
+    }
     return rhs;
+}
+
+double ImplicitConvectionDiffusionSolver1D::convectedFaceValue(const std::vector<double>& x,
+                                                                std::size_t face) const {
+    const auto li = static_cast<long long>(face);
+    // Face `face` sits between cells face-1 and face.
+    const double faceVelocity = velocityAtFace(face);
+    const double phiLeft = phiAt(x, li - 1);
+    const double phiRight = phiAt(x, li);
+    const bool leftIsUpwind = faceVelocity >= 0.0;
+    const double upwind = leftIsUpwind ? phiLeft : phiRight;
+    const double downwind = leftIsUpwind ? phiRight : phiLeft;
+    const double central = 0.5 * (phiLeft + phiRight);
+
+    if (scheme_ == ConvectionScheme::FirstOrderUpwind) {
+        return upwind;
+    }
+    if (scheme_ == ConvectionScheme::Central) {
+        return central;
+    }
+
+    const double difference = downwind - upwind;
+    if (faceDifferenceIsNegligible(difference, upwind, downwind)) {
+        return upwind;
+    }
+    // The upwind-upwind cell, which a structured grid has and a tetrahedral
+    // mesh does not -- see ConvectionLimiter.hpp for why the ratio built from
+    // it is the same quantity the unstructured side builds from a gradient.
+    const double farUpwind = leftIsUpwind ? phiAt(x, li - 2) : phiAt(x, li + 1);
+    const double ratio = (upwind - farUpwind) / difference;
+    return upwind + vanLeerLimiter(ratio) * (central - upwind);
+}
+
+std::vector<double> ImplicitConvectionDiffusionSolver1D::convectionCorrection(
+    const std::vector<double>& x) const {
+    std::vector<double> correction(nx_, 0.0);
+    if (scheme_ == ConvectionScheme::FirstOrderUpwind) {
+        return correction;
+    }
+    // Cell i's west face is i and its east face is i+1; the correction enters
+    // with the opposite sign to the flux, since it moves to the other side of
+    // the equation.
+    for (std::size_t i = 0; i < nx_; ++i) {
+        const double uE = velocityAtFace(i + 1);
+        const double uW = velocityAtFace(i);
+        const double phiE = convectedFaceValue(x, i + 1);
+        const double phiW = convectedFaceValue(x, i);
+        const double upwindE = uE >= 0.0 ? phiAt(x, static_cast<long long>(i))
+                                          : phiAt(x, static_cast<long long>(i) + 1);
+        const double upwindW = uW >= 0.0 ? phiAt(x, static_cast<long long>(i) - 1)
+                                          : phiAt(x, static_cast<long long>(i));
+        correction[i] = -((uE * phiE - uW * phiW) - (uE * upwindE - uW * upwindW));
+    }
+    return correction;
+}
+
+void ImplicitConvectionDiffusionSolver1D::outerSweeps(const std::function<void()>& innerSolve,
+                                                       double tolerance) {
+    if (scheme_ == ConvectionScheme::FirstOrderUpwind) {
+        convectionCorrection_.clear();
+        innerSolve();
+        return;
+    }
+    constexpr std::size_t kMaxOuterSweeps = 300;
+    for (std::size_t sweep = 0; sweep < kMaxOuterSweeps; ++sweep) {
+        convectionCorrection_ = convectionCorrection(phi_);
+        const std::vector<double> previous = phi_;
+        innerSolve();
+        double change = 0.0;
+        for (std::size_t i = 0; i < nx_; ++i) {
+            change = std::max(change, std::fabs(phi_[i] - previous[i]));
+        }
+        if (change < tolerance) {
+            break;
+        }
+    }
+}
+
+double ImplicitConvectionDiffusionSolver1D::maxCellPeclet() const {
+    double worst = 0.0;
+    for (std::size_t face = 0; face <= nx_; ++face) {
+        const double gamma = diffusivityAtFace(face);
+        if (gamma > 0.0) {
+            worst = std::max(worst, std::fabs(velocityAtFace(face)) * h_ / gamma);
+        }
+    }
+    return worst;
+}
+
+double ImplicitConvectionDiffusionSolver1D::maxBoundednessViolation() const {
+    const double low = std::min(leftValue_, rightValue_);
+    const double high = std::max(leftValue_, rightValue_);
+    const double range = high - low;
+    if (range <= 0.0) {
+        return 0.0;
+    }
+    double worst = 0.0;
+    for (double value : phi_) {
+        worst = std::max(worst, std::max(low - value, value - high) / range);
+    }
+    return std::max(worst, 0.0);
 }
 
 double ImplicitConvectionDiffusionSolver1D::dot(const std::vector<double>& a, const std::vector<double>& b) {
@@ -207,7 +318,15 @@ void ImplicitConvectionDiffusionSolver1D::prepareSolve() {
     }
 }
 
-std::size_t ImplicitConvectionDiffusionSolver1D::solveGaussSeidel(std::size_t maxIterations, double tolerance) {
+std::size_t ImplicitConvectionDiffusionSolver1D::solveGaussSeidel(std::size_t maxIterations,
+                                                                   double tolerance) {
+    std::size_t iterations = 0;
+    outerSweeps([&] { iterations = solveGaussSeidelOnce(maxIterations, tolerance); }, tolerance);
+    return iterations;
+}
+
+std::size_t ImplicitConvectionDiffusionSolver1D::solveGaussSeidelOnce(std::size_t maxIterations,
+                                                                      double tolerance) {
     // stencilAt(x, i) is affine in x[i] alone (holding the rest fixed),
     // with slope exactly diag_[i] -- so the update that zeroes cell i's
     // residual, given every other cell's current value, is a plain
@@ -233,7 +352,15 @@ std::size_t ImplicitConvectionDiffusionSolver1D::solveGaussSeidel(std::size_t ma
     return iteration;
 }
 
-long long ImplicitConvectionDiffusionSolver1D::solveBiCGStab(std::size_t maxIterations, double tolerance) {
+long long ImplicitConvectionDiffusionSolver1D::solveBiCGStab(std::size_t maxIterations,
+                                                              double tolerance) {
+    long long iterations = 0;
+    outerSweeps([&] { iterations = solveBiCGStabOnce(maxIterations, tolerance); }, tolerance);
+    return iterations;
+}
+
+long long ImplicitConvectionDiffusionSolver1D::solveBiCGStabOnce(std::size_t maxIterations,
+                                                                  double tolerance) {
     residualHistory_.clear();
     prepareSolve();
     // Left preconditioning: solve M^-1 A x = M^-1 b. With
@@ -364,7 +491,15 @@ long long ImplicitConvectionDiffusionSolver1D::solveBiCGStab(std::size_t maxIter
     return static_cast<long long>(maxIterations);
 }
 
-long long ImplicitConvectionDiffusionSolver1D::solveGmres(std::size_t restart, std::size_t maxIterations,
+long long ImplicitConvectionDiffusionSolver1D::solveGmres(std::size_t restart,
+                                                           std::size_t maxIterations,
+                                                           double tolerance) {
+    long long iterations = 0;
+    outerSweeps([&] { iterations = solveGmresOnce(restart, maxIterations, tolerance); }, tolerance);
+    return iterations;
+}
+
+long long ImplicitConvectionDiffusionSolver1D::solveGmresOnce(std::size_t restart, std::size_t maxIterations,
                                                             double tolerance) {
     residualHistory_.clear();
     prepareSolve();

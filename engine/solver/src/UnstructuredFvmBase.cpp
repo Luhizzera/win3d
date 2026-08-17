@@ -1,5 +1,7 @@
 #include "aether/solver/UnstructuredFvmBase.hpp"
 
+#include "aether/solver/ConvectionLimiter.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -247,12 +249,7 @@ double UnstructuredFvmBase::faceValue(const InteriorFace& face, double massFlux,
     const double central =
         field[face.owner] * face.ownerWeight + field[face.neighbour] * (1.0 - face.ownerWeight);
 
-    // A vanishing difference is not an extremum, it is a locally flat field:
-    // the ratio below is meaningless there and every scheme agrees anyway, so
-    // the guard costs no accuracy. Scaled by the field's own magnitude so it
-    // stays a relative test rather than one that depends on the units.
-    const double scale = std::fabs(field[upwind]) + std::fabs(field[downwind]);
-    if (std::fabs(difference) <= 1e-12 * (scale + 1.0)) {
+    if (faceDifferenceIsNegligible(difference, field[upwind], field[downwind])) {
         return field[upwind];
     }
 
@@ -261,8 +258,7 @@ double UnstructuredFvmBase::faceValue(const InteriorFace& face, double massFlux,
     const Vector3 upwindToDownwind = ownerIsUpwind ? face.unitD * face.distance
                                                     : face.unitD * (-face.distance);
     const double ratio = 2.0 * gradients[upwind].dot(upwindToDownwind) / difference - 1.0;
-    const double limiter = (ratio + std::fabs(ratio)) / (1.0 + std::fabs(ratio)); // van Leer
-    return field[upwind] + limiter * (central - field[upwind]);
+    return field[upwind] + vanLeerLimiter(ratio) * (central - field[upwind]);
 }
 
 std::vector<double> UnstructuredFvmBase::applyLaplacian(const std::vector<double>& x,
