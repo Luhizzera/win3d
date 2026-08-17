@@ -56,6 +56,21 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
 }
 
+void UnstructuredCavitySolver3D::loadState(std::vector<Vector3> velocity, std::vector<double> pressure,
+                                            double time) {
+    if (velocity.size() != velocity_.size() || pressure.size() != pressure_.size()) {
+        throw std::invalid_argument(
+            "UnstructuredCavitySolver3D::loadState: field size does not match the mesh's cell count");
+    }
+    velocity_ = std::move(velocity);
+    pressure_ = std::move(pressure);
+    time_ = time;
+    // The recorded boundary flux belongs to the projection that produced the
+    // old field, not to this one; leaving it would make the first
+    // netBoundaryFlux() after a load report the previous run's outlets.
+    boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
+}
+
 void UnstructuredCavitySolver3D::buildBoundaryConditions() {
     boundaryConditions_.assign(boundaryFaces_.size(), {});
     hasOutlet_ = false;

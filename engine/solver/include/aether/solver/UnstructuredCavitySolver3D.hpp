@@ -159,6 +159,29 @@ public:
     // Includes outlet faces, which do carry flux.
     double maxFaceDivergence() const;
 
+    // Overwrites the velocity and pressure fields and the simulated time --
+    // the counterpart of reading them out to save a checkpoint, and the same
+    // surface StaggeredCavityBase3D has carried since the persistence module
+    // needed it.
+    //
+    // **Public here, unlike on the staggered base, and for a reason worth
+    // stating**: this class carries no state beyond these three, so loading
+    // them restores it completely. The staggered base keeps loadState()
+    // protected because five of its six derived closures own extra fields
+    // (k, epsilon, omega, nu_t) that it knows nothing about, so exposing it
+    // there would silently resume only part of the state.
+    //
+    // Beyond checkpointing, this is what makes the step operator
+    // *measurable*: DIVIDA_TECNICA.md 4.3 established that the instability on
+    // a distorted mesh is linear with a fixed growth factor per step, and
+    // narrowed the cause to one suspect -- but confirming it needs the
+    // spectral radius of a single step, which needs the ability to impose an
+    // arbitrary starting field and iterate. That was the missing piece.
+    //
+    // Throws std::invalid_argument if either field's size does not match the
+    // mesh's cell count.
+    void loadState(std::vector<core::Vector3> velocity, std::vector<double> pressure, double time);
+
     // Largest per-cell pressure change across the final corrector of the
     // last step. The number that says whether the projection converged or
     // merely ran out of correctors -- the same role lastOuterChange() plays

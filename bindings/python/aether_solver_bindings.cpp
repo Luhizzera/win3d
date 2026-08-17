@@ -449,6 +449,11 @@ PYBIND11_MODULE(aether_solver_py, m) {
              py::arg("pressure_correctors") = UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
              py::keep_alive<1, 2>())
         .def("step", &UnstructuredCavitySolver3D::step, py::arg("dt"))
+        // Imposes an initial field. Checkpointing is one use; the other is
+        // measuring the step operator itself, which is what
+        // DIVIDA_TECNICA.md 4.3 was blocked on.
+        .def("load_state", &UnstructuredCavitySolver3D::loadState, py::arg("velocity"),
+             py::arg("pressure"), py::arg("time") = 0.0)
         .def("stable_time_step", &UnstructuredCavitySolver3D::stableTimeStep)
         .def("velocity", &UnstructuredCavitySolver3D::velocity, py::arg("cell"))
         .def("pressure", &UnstructuredCavitySolver3D::pressure, py::arg("cell"))

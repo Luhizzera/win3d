@@ -483,7 +483,7 @@ o limite.
 tratamento implícito ou semi-implícito da convecção. Não urgente enquanto o
 limite convectivo for folgado.
 
-### 4.3 NaN em malha muito distorcida — DIAGNOSTICADO e contido em 2026-08-16; a causa segue aberta
+### 4.3 NaN em malha muito distorcida — CAUSA ENCONTRADA em 2026-08-16; corrigida no caso fechado, o canal ainda cai
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -550,6 +550,71 @@ da projeção, mas isso é reescrever o acoplamento pressão-velocidade e não s
 faz sobre uma suspeita.
 
 ---
+
+
+---
+
+**Atualização: a causa foi encontrada, e ela é o item 1.3.**
+
+O que faltava era impor um campo inicial arbitrário para medir o operador de
+um passo. `loadState()` passou a existir — a mesma superfície que o
+`StaggeredCavityBase3D` já tinha para checkpoint — e com ela o raio espectral
+sai por potência iterada em torno do repouso, que é ponto fixo exato quando as
+paredes estão imóveis.
+
+| malha | raio espectral |
+|---|---|
+| jitter 0,25 (roda) | 0,9840 |
+| jitter 0,35 (roda) | 0,9799 |
+| jitter 0,45 (morre) | **2,0611** |
+
+O 2,0611 bate com o 2,0524 medido antes por simulação não-linear a amplitude
+10⁻⁶ — dois caminhos independentes, mesma resposta.
+
+**A suspeita registrada estava errada.** Não era a incompatibilidade entre o
+operador de face e o gradiente de célula. Três medições apontaram para outro
+lugar:
+
+- **Viscosidade não amortece**: a ν=100, com difusão implícita, ρ ainda é
+  1,36. Não é momento nem difusão.
+- **Mais correctores pioram**: 2 → 1,58, 4 → 2,06, 16 → **6,47**. A correção
+  diferida não converge devagar ali; ela amplifica.
+- **O modo é local**: 8 de 178 células concentram 96,3% da energia, e a
+  dominante é a que tem **2 vizinhos interiores** e cai no recuo Green-Gauss.
+
+E a atribuição, desligando só o recuo (o estado anterior ao item 1.3):
+
+| malha | sem recuo | com recuo |
+|---|---|---|
+| jitter 0,25 | 0,9839 | 0,9840 |
+| jitter 0,35 | 0,9794 | 0,9799 |
+| jitter 0,45 | **0,9776** | **2,0611** |
+
+**A correção do item 1.3 criou esta instabilidade.** O argumento do 1.3
+continua de pé — gradiente zero era resposta errada, e removê-lo mexeu 2,2% no
+campo da cavidade — mas Green-Gauss numa célula com um ou dois vizinhos
+interiores não é estimativa, é chute: sua magnitude escala com |A|/V e nada a
+limita. A energia do modo instável em células de recuo é 3–7% nas malhas que
+rodam e **88,8%** na que morre.
+
+**Corrigido pela metade, e a metade que falta está medida.** O recuo passou a
+ser limitado pela maior inclinação que a célula de fato enxerga — nenhuma
+diferença de vizinho dividida pela distância. Um gradiente maior que toda
+diferença de que foi construído não é extrapolação, é invenção. Efeito:
+
+- ρ em jitter 0,45: **2,0611 → 0,9785**, praticamente o valor sem recuo, então
+  o limite devolveu a estabilidade sem voltar ao zero;
+- cavidade fechada em jitter 0,45: de **NaN no passo 31** para 1333 passos
+  completos;
+- suíte: 12/12, com a cavidade mexendo na quinta casa (u topo 0,06973 →
+  0,06972) e o canal na quarta (u saída 1,00020 → 1,00071) — o limite quase
+  não morde nas malhas da suíte, que é o que se queria.
+
+**O que ainda cai**: o canal com entrada e saída em jitter 0,45, agora no
+passo 25 em vez de 20. O raio espectral que medi é em torno do **repouso**, e
+o canal linearizado em torno do estado desenvolvido é outro operador. Medir
+ali é o próximo passo, e `loadState()` já o permite: carregar um estado
+desenvolvido, perturbar e iterar.
 
 ### 4.4 Diferença central na convecção estruturada, acima de Re de célula 2 — MEDIDO e resolvido no solver 1D; falta portar para as cavidades
 

@@ -185,16 +185,52 @@ void UnstructuredFvmBase::buildGradientStencils(bool useBoundaryValues) {
 
 std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector<double>& field) const {
     // The Green-Gauss fallback is only built when this mesh actually has a
-    // cell that needs it -- it costs a full pass over the faces.
+    // cell that needs it -- it costs two full passes over the faces.
     std::vector<Vector3> fallback;
+    std::vector<double> steepestSlope;
     if (deficientStencilCount_ > 0) {
         fallback = greenGaussGradients(field);
+        // **The bound the fallback is held to, and why it has to exist.**
+        // Green-Gauss on a cell with one or two interior neighbours is not a
+        // gradient estimate so much as a guess: its magnitude scales with
+        // |A|/V and nothing constrains it. That was measured the hard way --
+        // replacing the old silent zero with Green-Gauss (DIVIDA_TECNICA.md
+        // 1.3) is what pushed the spectral radius of a single step from
+        // 0.9776 to 2.0611 on a distorted mesh, which is the whole of item
+        // 4.3. The instability lived on exactly these cells: 88.8% of the
+        // unstable mode's energy sat on fallback cells, against 3-7% on
+        // meshes that run.
+        //
+        // The bound is the steepest slope the cell can actually see: no
+        // neighbour difference divided by its distance. A gradient larger
+        // than every difference it was built from is not extrapolation, it is
+        // invention. Where the mesh is fine the bound never binds and nothing
+        // changes; where it binds, the estimate is pulled back to the largest
+        // rate the data supports, which keeps it a bounded operator.
+        steepestSlope.assign(field.size(), 0.0);
+        for (const InteriorFace& face : interiorFaces_) {
+            const double slope = std::fabs(field[face.neighbour] - field[face.owner]) / face.distance;
+            steepestSlope[face.owner] = std::max(steepestSlope[face.owner], slope);
+            steepestSlope[face.neighbour] = std::max(steepestSlope[face.neighbour], slope);
+        }
+        for (const BoundaryFace& face : boundaryFaces_) {
+            if (boundaryHasValue_[face.meshFace] == 0) {
+                continue; // a zero-gradient face supports no slope at all
+            }
+            const double slope =
+                std::fabs(boundaryValueCache_[face.meshFace] - field[face.cell]) / face.distance;
+            steepestSlope[face.cell] = std::max(steepestSlope[face.cell], slope);
+        }
     }
 
     std::vector<Vector3> gradients(field.size());
     for (std::size_t cell = 0; cell < field.size(); ++cell) {
         if (!gradientMatrixInverse_[cell].valid) {
-            gradients[cell] = fallback[cell];
+            const Vector3& candidate = fallback[cell];
+            const double magnitude = candidate.norm();
+            gradients[cell] = magnitude > steepestSlope[cell] && magnitude > 0.0
+                                  ? candidate * (steepestSlope[cell] / magnitude)
+                                  : candidate;
             continue;
         }
         Vector3 rhs;
