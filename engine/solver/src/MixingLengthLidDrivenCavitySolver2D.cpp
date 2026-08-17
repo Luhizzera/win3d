@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/MixingLengthLidDrivenCavitySolver2D.hpp"
 
 #include <algorithm>
@@ -46,10 +47,7 @@ double MixingLengthLidDrivenCavitySolver2D::stableTimeStep() const {
         maxNut = std::max(maxNut, n);
     }
     const double effectiveViscosity = viscosity_ + maxNut;
-    const double diffusiveLimit =
-        1.0 / (2.0 * effectiveViscosity * (1.0 / (dx_ * dx_) + 1.0 / (dy_ * dy_)));
-    const double convectiveLimit = std::min(dx_, dy_) / std::max(lidVelocity_, 1e-12);
-    return std::min(diffusiveLimit, convectiveLimit);
+    return explicitStableTimeStep(effectiveViscosity, lidVelocity_, {dx_, dy_});
 }
 
 double MixingLengthLidDrivenCavitySolver2D::dirichletAt(const std::vector<double>& field, std::size_t i,

@@ -598,7 +598,7 @@ int run() {
     const double lidVelocity = 1.0; // Re = lidVelocity*length/viscosity = 10, safely laminar
 
     LidDrivenCavitySolver2D solver(n, n, length, length, viscosity, lidVelocity);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     const int steps = 800;
     for (int s = 0; s < steps; ++s) {
         solver.step(dt);
@@ -874,7 +874,7 @@ int run() {
                                      // class's own validated test case
 
     StaggeredLidDrivenCavitySolver3D solver(n, n, n, length, length, length, viscosity, lidVelocity);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     const int steps = 400;
     for (int s = 0; s < steps; ++s) {
         solver.step(dt);
@@ -1191,12 +1191,12 @@ int run() {
     const double lidVelocity = 1.0; // Re = 100, matching this class's own validated test case
 
     KOmegaSSTLidDrivenCavitySolver3D solver(n, n, n, length, length, length, viscosity, lidVelocity);
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
     const int steps = 300;
     for (int s = 0; s < steps; ++s) {
         solver.step(dt);
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -1817,7 +1817,7 @@ struct Simulation {
     }
 
     void step() {
-        const auto advance = [](auto& solver) { solver.step(0.3 * solver.stableTimeStep()); };
+        const auto advance = [](auto& solver) { solver.step(solver.stableTimeStep()); };
         if (laminar) {
             advance(*laminar);
         } else if (mixingLength) {
@@ -2205,7 +2205,7 @@ public:
         if (!ready_) {
             return;
         }
-        visitMutable([](auto& solver) { solver.step(0.3 * solver.stableTimeStep()); });
+        visitMutable([](auto& solver) { solver.step(solver.stableTimeStep()); });
         ++steps_;
     }
 

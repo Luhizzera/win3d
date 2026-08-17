@@ -31,7 +31,7 @@ KEpsilonLidDrivenCavitySolver3D::KEpsilonLidDrivenCavitySolver3D(std::size_t nx,
     setEddyViscosityField(&nut_);
 
     MixingLengthLidDrivenCavitySolver3D primer(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity);
-    const double primerDt = 0.3 * primer.stableTimeStep();
+    const double primerDt = primer.stableTimeStep();
     for (int s = 0; s < 400; ++s) {
         primer.step(primerDt);
     }

@@ -1,5 +1,6 @@
 add_library(aether_solver STATIC
     src/DiffusionProblem.cpp
+    src/ExplicitTimeStep.cpp
     src/SteadyDiffusionSolver.cpp
     src/TransientDiffusionSolver.cpp
     src/TaylorGreenVortexSolver2D.cpp

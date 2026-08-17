@@ -422,20 +422,74 @@ concluir que não importa. O resultado nulo é válido só para o caso testado.
 
 ## 4. Estabilidade sobre margem nula
 
-### 4.1 Solvers estruturados em CFL exatamente 1,0000
+### 4.1 ~~Solvers estruturados em CFL exatamente 1,0000~~ — RESOLVIDO em 2026-08-16
 
-`LidDrivenCavitySolver2D::stableTimeStep()` devolve o limite convectivo sem
+`LidDrivenCavitySolver2D::stableTimeStep()` devolvia o limite convectivo sem
 fator de segurança, e a cavidade a Re=400 roda com Re de célula 16,7 — muito
 acima do limite 2 da diferença central.
 
-**Evidência**: durante a Fase 1, uma perturbação modesta no esquema levou esse
-caso a NaN em ~500 passos. Ele estava à beira o tempo todo.
+**Evidência original**: durante a Fase 1, uma perturbação modesta no esquema
+levou esse caso a NaN em ~500 passos. Ele estava à beira o tempo todo.
 
-**Por que não dá para contornar**: qualquer mudança futura no esquema tem
-chance de derrubá-lo, e o modo de falha é NaN — não um aviso.
+**O que se encontrou ao olhar de perto foi pior que o registrado.** O fator de
+segurança existia — morava em **49 cópias no chamador**. Testes, o app do
+viewer e os primers dos solvers turbulentos escreviam cada um seu
+`0.3 * solver.stableTimeStep()`. Uma função chamada `stableTimeStep()` que
+devolve um passo instável é uma armadilha, e ela **já tinha sido acionada**:
+`engine/analysis` e `engine/persistence` chamam
+`solver.step(solver.stableTimeStep())` sem fator nenhum, tendo lido o nome e
+acreditado. Essas duas suítes rodavam em CFL 1,0000.
 
-**O que fazer**: fator de segurança em `stableTimeStep()` (como o solver
-não-estruturado já tem) e/ou upwind na convecção 2D.
+**E uma das sete cópias da fórmula estava simplesmente errada.**
+`TransientDiffusionSolver::stableTimeStep()` devolvia `1/Σ(1/h²)`, sem o fator
+2 de `1/(2ν Σ1/h²)` — ou seja, **o dobro do limite de estabilidade**, com um
+comentário mandando o chamador dividir por dois. Medido em vez de argumentado:
+perfil senoidal em 41 células, passo exatamente no valor devolvido, **NaN no
+passo 654**.
+
+É a mesma "duplicação que vai divergir" do item 2.1, do lado estruturado, e
+com a divergência já materializada.
+
+**Resolvido**: `explicitStableTimeStep()` — uma fórmula, o fator dentro dela,
+os sete solvers chamando-a, e as 49 margens privadas dos chamadores removidas.
+
+**Preservador de comportamento onde já havia margem, e isso é verificável**:
+0,3 é o valor em que 49 chamadores independentes tinham convergido, então
+movê-lo para dentro deixa esses casos idênticos. A saída da suíte de solvers
+saiu **bit a bit igual** antes e depois. O que mudou foi exatamente o que
+devia: os chamadores que confiavam no nome passaram a receber margem, e o
+solver de difusão transiente passou a devolver um passo que é de fato estável.
+
+**Margem medida, não declarada**: o mesmo perfil senoidal agora sobrevive a
+**3,33×** o valor devolvido e diverge em **3,40×**. 3,33 = 1/0,3 exatamente —
+o valor devolvido está no fator de segurança que a constante declara, e o
+ponto de falha está onde a teoria diz.
+
+**O que este item não resolve, e o texto original já dava a escolha**: "fator
+de segurança **e/ou** upwind na convecção 2D". O fator entrou; a diferença
+central a Re de célula 16,7 continua. Essa metade é propriedade do *esquema*,
+não do passo, e passo menor não cura — oscilação de diferença central acima de
+Re 2 não é instabilidade temporal. O item 3.1 agora produziu um esquema
+limitado medido em segunda ordem para o lado não-estruturado; portá-lo para os
+solvers estruturados é o trabalho que fecha essa metade, e fica registrado
+como **4.4**.
+
+### 4.4 Diferença central na convecção 2D/3D estruturada, acima de Re de célula 2 [separada do 4.1]
+
+Os solvers estruturados usam diferença central na convecção, e a cavidade a
+Re=400 roda com Re de célula 16,7. Acima de 2, diferença central produz
+oscilação — não é instabilidade temporal, é propriedade do esquema, e o fator
+de segurança do 4.1 não a toca.
+
+**Por que não é urgente**: os casos existentes rodam e a suíte mede o que
+afirma. O sintoma aparece como divergência de estêncil largo (a cavidade 2D
+reporta 4,978e-02 contra 1,066e-14 por faces), que é o mesmo padrão de
+"diagnóstico mede outro operador" já registrado na Fase 1.
+
+**O que fazer**: portar o `faceValue()` limitado do `UnstructuredFvmBase`
+(item 3.1, medido em ordem 2 contra 1 do upwind) para os solvers
+estruturados, e medir o ganho com uma solução manufaturada, como o item 3.1
+fez. A régua já existe.
 
 ### 4.2 Convecção ainda explícita no solver não-estruturado [criada nesta sessão]
 
@@ -654,8 +708,10 @@ Por dependência, não por tamanho:
    segue aberta e precisa de uma API de carregar estado para ser medida
 7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
 8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
-9. **4.1** (margem nos estruturados) — independente, pode entrar quando quiser
-10. **5.1** (push) — um comando
+9. ~~**4.1** (margem nos estruturados)~~ — FEITO; abriu o 4.4
+10. **4.4** (esquema limitado nos estruturados) — a régua e o esquema já
+    existem, falta portar e medir
+11. **5.1** (push) — um comando
 
 O item **6** (tetraedralização restrita) fica por último não por prioridade,
 mas porque é o único que não se resolve com disciplina — se resolve com

@@ -1059,7 +1059,7 @@ void testTransientDiffusionMatchesSineDecay() {
         solver.setValue(i, 0, 0, std::sin(kPi * x / lengthX));
     }
 
-    const double dt = 0.4 * solver.stableTimeStep(); // safety margin below the marginal-stability limit
+    const double dt = solver.stableTimeStep(); // safety margin below the marginal-stability limit
     const double targetTime = 0.01;
     const auto steps = static_cast<std::size_t>(targetTime / dt);
     for (std::size_t s = 0; s < steps; ++s) {
@@ -1101,7 +1101,7 @@ void testTaylorGreenVortexMatchesExactDecay() {
         }
     }
 
-    const double dt = 0.3 * solver.stableTimeStep(u0);
+    const double dt = solver.stableTimeStep(u0);
     const double targetTime = 0.3;
     const auto steps = static_cast<std::size_t>(targetTime / dt);
     for (std::size_t s = 0; s < steps; ++s) {
@@ -1177,7 +1177,7 @@ void testStaggeredNavierStokes3DMatchesBeltramiDecay() {
     }
 
     const double velocityScale = 2.0; // |sin(.)| + |cos(.)| <= 2 componentwise
-    const double dt = 0.3 * solver.stableTimeStep(velocityScale);
+    const double dt = solver.stableTimeStep(velocityScale);
     const double targetTime = 0.5;
     const auto steps = static_cast<std::size_t>(targetTime / dt);
     for (std::size_t s = 0; s < steps; ++s) {
@@ -1226,7 +1226,7 @@ void testStaggeredNavierStokes3DMatchesBeltramiDecay() {
 void testStaggeredLidDrivenCavity3DStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1263,7 +1263,7 @@ void testStaggeredLidDrivenCavity3DStaysAtRestWhenLidStationary() {
 void testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology() {
     const std::size_t n = 16;
     StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0); // Re = 10
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 400; ++s) {
         solver.step(dt);
@@ -1300,7 +1300,7 @@ void testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology() {
 void testMixingLengthCavity3DStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     MixingLengthLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1344,13 +1344,13 @@ void testMixingLengthCavity3DStaysAtRestWhenLidStationary() {
 void testMixingLengthCavity3DMassConservationTopologyAndEddyViscosity() {
     const std::size_t n = 12;
     MixingLengthLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0); // Re = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 400; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 1e-9);
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep(); // re-tighten as nu_t grows
+            dt = solver.stableTimeStep(); // re-tighten as nu_t grows
         }
     }
 
@@ -1399,7 +1399,7 @@ void testMixingLengthCavity3DMassConservationTopologyAndEddyViscosity() {
 void testKEpsilonCavity3DVelocityStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     KEpsilonLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1448,13 +1448,13 @@ void testKEpsilonCavity3DVelocityStaysAtRestWhenLidStationary() {
 void testKEpsilonCavity3DMassConservationTopologyAndStructure() {
     const std::size_t n = 12;
     KEpsilonLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0); // Re = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 600; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 1e-6);
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -1501,7 +1501,7 @@ void testKEpsilonCavity3DMassConservationTopologyAndStructure() {
 void testSmagorinskyLes3DStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     SmagorinskyLesLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1567,7 +1567,7 @@ void testSmagorinskyLes3DSubgridViscosityVanishesUnderMeshRefinement() {
     auto runLes = [&](std::size_t n) {
         SmagorinskyLesLidDrivenCavitySolver3D solver(n, n, n, length, length, length, viscosity,
                                                       lidVelocity);
-        const double dt = 0.3 * solver.stableTimeStep();
+        const double dt = solver.stableTimeStep();
         const int steps = static_cast<int>(endTime / dt);
         for (int s = 0; s < steps; ++s) {
             solver.step(dt);
@@ -1586,12 +1586,12 @@ void testSmagorinskyLes3DSubgridViscosityVanishesUnderMeshRefinement() {
     auto runRans = [&](std::size_t n) {
         MixingLengthLidDrivenCavitySolver3D solver(n, n, n, length, length, length, viscosity,
                                                     lidVelocity);
-        double dt = 0.3 * solver.stableTimeStep();
+        double dt = solver.stableTimeStep();
         const int steps = static_cast<int>(endTime / dt);
         for (int s = 0; s < steps; ++s) {
             solver.step(dt);
             if (s % 100 == 0) {
-                dt = 0.3 * solver.stableTimeStep();
+                dt = solver.stableTimeStep();
             }
         }
         double maxNut = 0.0;
@@ -1631,13 +1631,13 @@ void testSmagorinskyLes3DSubgridViscosityVanishesUnderMeshRefinement() {
 void testSmagorinskyLes3DMassConservationTopologyAndStructure() {
     const std::size_t n = 12;
     SmagorinskyLesLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0); // Re = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 400; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 1e-9); // measured ~4.2e-13
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -1686,7 +1686,7 @@ void testSmagorinskyLes3DMassConservationTopologyAndStructure() {
 void testKOmegaSSTCavity3DVelocityStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     KOmegaSSTLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1731,13 +1731,13 @@ void testKOmegaSSTCavity3DVelocityStaysAtRestWhenLidStationary() {
 void testKOmegaSSTCavity3DMassConservationTopologyAndStructure() {
     const std::size_t n = 12;
     KOmegaSSTLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0); // Re = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 600; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 1e-6);
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -1781,7 +1781,7 @@ void testKOmegaSSTCavity3DMassConservationTopologyAndStructure() {
 void testDesSst3DVelocityStaysAtRestWhenLidStationary() {
     const std::size_t n = 6;
     DesSstLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -1833,9 +1833,9 @@ void testDesSst3DReducesToPlainSstWhenCDesIsLarge() {
     KOmegaSSTLidDrivenCavitySolver3D sst(n, n, n, length, length, length, viscosity, lidVelocity);
 
     for (int s = 0; s < 80; ++s) {
-        const double desDt = 0.3 * des.stableTimeStep();
+        const double desDt = des.stableTimeStep();
         des.step(desDt);
-        const double sstDt = 0.3 * sst.stableTimeStep();
+        const double sstDt = sst.stableTimeStep();
         sst.step(sstDt);
 
         for (std::size_t k = 0; k < n; ++k) {
@@ -1885,7 +1885,7 @@ void testDesSst3DFactorGrowsUnderMeshRefinementAtHighReynolds() {
     auto coreAverageFDes = [&](std::size_t n) {
         DesSstLidDrivenCavitySolver3D solver(n, n, n, length, length, length, viscosity, lidVelocity);
         for (int s = 0; s < steps; ++s) {
-            const double dt = 0.3 * solver.stableTimeStep();
+            const double dt = solver.stableTimeStep();
             solver.step(dt);
         }
         double total = 0.0;
@@ -1917,13 +1917,13 @@ void testDesSst3DFactorGrowsUnderMeshRefinementAtHighReynolds() {
 void testDesSst3DMassConservationTopologyAndStructure() {
     const std::size_t n = 10;
     DesSstLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0); // Re = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 400; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 1e-6); // measured ~5.8e-13
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -2405,7 +2405,7 @@ void testImplicitConvectionDiffusion1DJacobiHelpsOnlyWhenDiagonalVaries() {
 // strong, exact regression check, not a qualitative one.
 void testLidDrivenCavityStaysAtRestWhenLidStationary() {
     LidDrivenCavitySolver2D solver(16, 16, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -2423,7 +2423,7 @@ void testLidDrivenCavityStaysAtRestWhenLidStationary() {
 // caveat applies).
 void testLidDrivenCavityMassConservation() {
     LidDrivenCavitySolver2D solver(32, 32, 1.0, 1.0, 0.1, 1.0); // Re = lid*L/nu = 10, safely laminar
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     // Measured directly: divergence rises to a peak of ~0.185 within the
     // first few steps (transient adjustment away from the zero initial
     // condition) then steadily decays past 0.05 by step 200. The bound
@@ -2458,7 +2458,7 @@ void testLidDrivenCavityMassConservation() {
 // real regression while not being brittle about the last digits.
 void testLidDrivenCavityFaceDivergenceIsAtSolverTolerance() {
     LidDrivenCavitySolver2D solver(32, 32, 1.0, 1.0, 0.1, 1.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 200; ++s) {
         solver.step(dt);
     }
@@ -2485,7 +2485,7 @@ void testLidDrivenCavityFaceDivergenceIsAtSolverTolerance() {
 void testLidDrivenCavityPrimaryVortexTopology() {
     const std::size_t n = 32;
     LidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.1, 1.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 400; ++s) {
         solver.step(dt);
     }
@@ -2680,7 +2680,7 @@ void testKOmegaSSTChannelFlowMatchesLogLawSlopeAndIsSymmetric() {
 // testLidDrivenCavityStaysAtRestWhenLidStationary.
 void testMixingLengthCavityStaysAtRestWhenLidStationary() {
     MixingLengthLidDrivenCavitySolver2D solver(16, 16, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -2703,7 +2703,7 @@ void testMixingLengthCavityStaysAtRestWhenLidStationary() {
 void testMixingLengthCavityMassConservationTopologyAndEddyViscosity() {
     const std::size_t n = 32;
     MixingLengthLidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.01, 1.0); // Re = lid*L/nu = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     // Measured directly: divergence peaks around ~0.18 within the first
     // steps, comparable to LidDrivenCavitySolver2D's own ~0.185 -- the same
@@ -2713,7 +2713,7 @@ void testMixingLengthCavityMassConservationTopologyAndEddyViscosity() {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 0.3);
         if (s % 100 == 0) {
-            dt = 0.3 * solver.stableTimeStep(); // re-tighten as nu_t grows
+            dt = solver.stableTimeStep(); // re-tighten as nu_t grows
         }
     }
 
@@ -2758,7 +2758,7 @@ void testMixingLengthCavityMassConservationTopologyAndEddyViscosity() {
 void testKEpsilonCavityVelocityStaysAtRestWhenLidStationary() {
     const std::size_t n = 12;
     KEpsilonLidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -2790,7 +2790,7 @@ void testKEpsilonCavityVelocityStaysAtRestWhenLidStationary() {
 void testKEpsilonCavityMassConservationTopologyAndStructure() {
     const std::size_t n = 20;
     KEpsilonLidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.01, 1.0); // Re = lid*L/nu = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     // Measured directly: divergence peaks around ~0.145 over this run,
     // the same collocated-grid/no-Rhie-Chow order of magnitude as every
@@ -2799,7 +2799,7 @@ void testKEpsilonCavityMassConservationTopologyAndStructure() {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 0.3);
         if (s % 50 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 
@@ -2839,7 +2839,7 @@ void testKEpsilonCavityMassConservationTopologyAndStructure() {
 void testKOmegaSSTCavityVelocityStaysAtRestWhenLidStationary() {
     const std::size_t n = 12;
     KOmegaSSTLidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.1, 0.0);
-    const double dt = 0.3 * solver.stableTimeStep();
+    const double dt = solver.stableTimeStep();
     for (int s = 0; s < 20; ++s) {
         solver.step(dt);
     }
@@ -2870,13 +2870,13 @@ void testKOmegaSSTCavityVelocityStaysAtRestWhenLidStationary() {
 void testKOmegaSSTCavityMassConservationTopologyAndStructure() {
     const std::size_t n = 20;
     KOmegaSSTLidDrivenCavitySolver2D solver(n, n, 1.0, 1.0, 0.01, 1.0); // Re = lid*L/nu = 100
-    double dt = 0.3 * solver.stableTimeStep();
+    double dt = solver.stableTimeStep();
 
     for (int s = 0; s < 600; ++s) {
         solver.step(dt);
         AETHER_CHECK(solver.maxDivergence() < 0.3);
         if (s % 50 == 0) {
-            dt = 0.3 * solver.stableTimeStep();
+            dt = solver.stableTimeStep();
         }
     }
 

@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/LidDrivenCavitySolver2D.hpp"
 
 #include <algorithm>
@@ -37,10 +38,7 @@ double LidDrivenCavitySolver2D::lidVelocityAt(std::size_t i) const {
 }
 
 double LidDrivenCavitySolver2D::stableTimeStep() const {
-    const double diffusiveLimit =
-        1.0 / (2.0 * viscosity_ * (1.0 / (dx_ * dx_) + 1.0 / (dy_ * dy_)));
-    const double convectiveLimit = std::min(dx_, dy_) / std::max(lidVelocity_, 1e-12);
-    return std::min(diffusiveLimit, convectiveLimit);
+    return explicitStableTimeStep(viscosity_, lidVelocity_, {dx_, dy_});
 }
 
 double LidDrivenCavitySolver2D::dirichletAt(const std::vector<double>& field, std::size_t i, std::size_t j,

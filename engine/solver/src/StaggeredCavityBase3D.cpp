@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/StaggeredCavityBase3D.hpp"
 
 #include <algorithm>
@@ -66,10 +67,7 @@ double StaggeredCavityBase3D::maxEddyViscosity() const {
 
 double StaggeredCavityBase3D::stableTimeStep() const {
     const double effectiveViscosity = viscosity_ + maxEddyViscosity();
-    const double diffusiveLimit = 1.0 / (2.0 * effectiveViscosity *
-                                          (1.0 / (dx_ * dx_) + 1.0 / (dy_ * dy_) + 1.0 / (dz_ * dz_)));
-    const double convectiveLimit = std::min({dx_, dy_, dz_}) / std::max(lidVelocity_, 1e-12);
-    return std::min(diffusiveLimit, convectiveLimit);
+    return explicitStableTimeStep(effectiveViscosity, lidVelocity_, {dx_, dy_, dz_});
 }
 
 double StaggeredCavityBase3D::uAt(long long i, long long j, long long k) const {

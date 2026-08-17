@@ -44,6 +44,19 @@ public:
     LidDrivenCavitySolver2D(std::size_t nx, std::size_t ny, double lengthX, double lengthY,
                              double viscosity, double lidVelocity);
 
+    // The explicit stability limit **with the safety factor applied**, so
+    // the returned value may be stepped with directly -- see
+    // ExplicitTimeStep.hpp for why that is worth stating. It used to return
+    // the marginal value, with every caller writing its own `0.3 *` in front
+    // and two other engine layers not writing one at all
+    // (DIVIDA_TECNICA.md 4.1).
+    //
+    // The margin this buys is against *perturbation*, which is what Fase 1
+    // measured biting: a modest change to the scheme took this case to NaN in
+    // ~500 steps at CFL 1.0000. It is not a fix for the other half of that
+    // item -- central differencing of convection at cell Reynolds 16.7, which
+    // is a property of the scheme and not of the step, and which a smaller dt
+    // cannot cure.
     double stableTimeStep() const;
 
     void step(double dt);

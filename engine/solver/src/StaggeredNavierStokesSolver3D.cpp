@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/StaggeredNavierStokesSolver3D.hpp"
 
 #include <algorithm>
@@ -31,11 +32,7 @@ std::size_t StaggeredNavierStokesSolver3D::wrap(long long i, std::size_t n) cons
 }
 
 double StaggeredNavierStokesSolver3D::stableTimeStep(double velocityScale) const {
-    const double diffusiveLimit =
-        1.0 / (2.0 * viscosity_ *
-               (1.0 / (dx_ * dx_) + 1.0 / (dy_ * dy_) + 1.0 / (dz_ * dz_)));
-    const double convectiveLimit = std::min({dx_, dy_, dz_}) / std::max(velocityScale, 1e-12);
-    return std::min(diffusiveLimit, convectiveLimit);
+    return explicitStableTimeStep(viscosity_, velocityScale, {dx_, dy_, dz_});
 }
 
 double StaggeredNavierStokesSolver3D::u(std::size_t i, std::size_t j, std::size_t k) const {

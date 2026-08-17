@@ -14,12 +14,22 @@ namespace aether::solver {
 // SteadyDiffusionSolver's nabla^2(phi) = -source, so the two agree at
 // t -> infinity for the same boundary conditions and source.
 //
-// Forward Euler is conditionally stable: step(dt) is only accurate/stable
-// for dt no larger than stableTimeStep() (the classic explicit-diffusion
-// von Neumann limit, 1/(1/hx^2 + 1/hy^2 + 1/hz^2) over whichever axes
-// actually have more than one cell); callers should use a safety margin
-// below that (e.g. half), not the exact marginal value. Implicit
-// (unconditionally stable) time-stepping is future work.
+// Forward Euler is conditionally stable: step(dt) is only stable for dt no
+// larger than stableTimeStep(), which returns the von Neumann limit
+// 1/(2 * sum over resolved axes of 1/h^2) **with a safety factor already
+// applied** -- so a caller may use the value as returned, which is the whole
+// point of the name.
+//
+// It did not always mean that. This class used to return 1/(sum 1/h^2),
+// missing the factor of two, i.e. exactly twice the stability limit, with a
+// comment telling callers to halve it themselves. Measured rather than
+// argued when that was found (DIVIDA_TECNICA.md 4.1): a 41-cell sine profile
+// stepped at the value it returned reached NaN in 654 steps. The limit now
+// lives in explicitStableTimeStep(), shared with every other explicit solver
+// here, and the margin is measurable -- the same profile survives up to 3.33x
+// the returned value and diverges at 3.40x, which is the 0.3 factor exactly.
+//
+// Implicit (unconditionally stable) time-stepping is future work.
 class TransientDiffusionSolver : public DiffusionProblem {
 public:
     using DiffusionProblem::DiffusionProblem;

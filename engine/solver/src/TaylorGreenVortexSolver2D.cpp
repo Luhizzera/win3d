@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/TaylorGreenVortexSolver2D.hpp"
 
 #include <algorithm>
@@ -25,10 +26,7 @@ std::size_t TaylorGreenVortexSolver2D::wrap(long long i, std::size_t n) const {
 }
 
 double TaylorGreenVortexSolver2D::stableTimeStep(double velocityScale) const {
-    const double diffusiveLimit =
-        1.0 / (2.0 * viscosity_ * (1.0 / (dx_ * dx_) + 1.0 / (dy_ * dy_)));
-    const double convectiveLimit = std::min(dx_, dy_) / std::max(velocityScale, 1e-12);
-    return std::min(diffusiveLimit, convectiveLimit);
+    return explicitStableTimeStep(viscosity_, velocityScale, {dx_, dy_});
 }
 
 double TaylorGreenVortexSolver2D::u(std::size_t i, std::size_t j) const { return u_[index(i, j)]; }

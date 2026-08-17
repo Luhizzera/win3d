@@ -1,3 +1,4 @@
+#include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/TransientDiffusionSolver.hpp"
 
 #include <limits>
@@ -12,18 +13,14 @@ void TransientDiffusionSolver::setValue(std::size_t i, std::size_t j, std::size_
 }
 
 double TransientDiffusionSolver::stableTimeStep() const {
+    // Unit diffusivity (the equation solved here is d(phi)/dt = lap(phi))
+    // and no convection. Axes with a single cell carry no second difference
+    // and are left out, which is why the spacings are filtered rather than
+    // passed wholesale.
     const Vector3 h = grid_->spacing();
-    double totalWeight = 0.0;
-    if (grid_->nx() > 1) {
-        totalWeight += 1.0 / (h.x * h.x);
-    }
-    if (grid_->ny() > 1) {
-        totalWeight += 1.0 / (h.y * h.y);
-    }
-    if (grid_->nz() > 1) {
-        totalWeight += 1.0 / (h.z * h.z);
-    }
-    return totalWeight > 0.0 ? 1.0 / totalWeight : std::numeric_limits<double>::infinity();
+    return explicitStableTimeStep(1.0, 0.0,
+                                   {grid_->nx() > 1 ? h.x : 0.0, grid_->ny() > 1 ? h.y : 0.0,
+                                    grid_->nz() > 1 ? h.z : 0.0});
 }
 
 void TransientDiffusionSolver::step(double dt) {
