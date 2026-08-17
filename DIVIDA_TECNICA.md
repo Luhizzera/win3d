@@ -474,6 +474,83 @@ limitado medido em segunda ordem para o lado não-estruturado; portá-lo para os
 solvers estruturados é o trabalho que fecha essa metade, e fica registrado
 como **4.4**.
 
+### 4.2 Convecção ainda explícita no solver não-estruturado [criada nesta sessão]
+
+A difusão virou implícita e destravou o passo. A convecção não — e agora é ela
+o limite.
+
+**O que fazer**: se malhas finas com escoamento rápido passarem a importar,
+tratamento implícito ou semi-implícito da convecção. Não urgente enquanto o
+limite convectivo for folgado.
+
+### 4.3 NaN em malha muito distorcida — DIAGNOSTICADO e contido em 2026-08-16; a causa segue aberta
+
+Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
+(contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
+**NaN no passo 20 de 1333**.
+
+**O que foi medido, e o que cada medição eliminou.** A instrução deste item
+era instrumentar antes de propor qualquer correção; foi o que se fez, e a
+resposta fácil estava errada em todas as tentativas:
+
+| hipótese | teste | resultado |
+|---|---|---|
+| NaN súbito (divisão por zero) | traçar \|u\|max por passo | **não** — cresce exponencialmente desde o passo 1 |
+| passo de tempo (CFL) | dt × 0,25 e × 0,1 | **não** — morre no *mesmo passo* (20→21), não no mesmo tempo |
+| face descartada (`A·d ≤ 0`) | contar em Python | **não** — zero em toda malha; cos(A,d) mínimo é 0,436 em jitter 0,45 contra 0,464 em jitter 0,25 |
+| estêncil deficiente | `deficientStencilCount()` | **não** — 15 nas duas malhas |
+| a saída | rodar cavidade fechada na mesma malha | **não** — morre também (passo 31) |
+| convecção / Reynolds | entrada 0,1; ν = 1,0 (Re=1) | **não** — morre nos dois (passo 29) |
+| correctores de pressão | 2, 4 e 16 | **não** — morre nos três |
+
+**O que sobrou, e é um resultado positivo, não uma eliminação.** Rodando a
+cavidade fechada com tampa a 10⁻⁶ e o *mesmo* dt do caso a 1,0 — amplitude
+seis ordens de grandeza menor, onde a convecção (quadrática em u) é
+irrelevante:
+
+| malha | tampa 1,0 | tampa 10⁻⁶ |
+|---|---|---|
+| jitter 0,25 | razão 1,0293 por passo | razão 1,0294 |
+| jitter 0,45 | NaN no passo 31 | **razão 2,0524 por passo** |
+
+A razão de crescimento é a mesma em 10⁶ de amplitude. **A instabilidade é
+linear, com fator ≈ 2,05 por passo, propriedade da malha e do operador — não
+da física, não do passo, não da convecção.** Em jitter 0,45 ela sobrevive 40
+passos com tampa 10⁻⁶ apenas porque começou seis ordens abaixo; é a mesma
+instabilidade.
+
+**A suspeita restante, registrada como suspeita e não como conclusão**: o
+único elemento do passo que é linear, independente de dt e independente de
+amplitude é a incompatibilidade entre os dois operadores da projeção — a
+pressão é resolvida contra o operador *de face* (compacto mais correção
+não-ortogonal), e a velocidade é corrigida com o gradiente *de célula* por
+mínimos quadrados. A difusão é implícita (incondicionalmente estável) e a
+convecção foi excluída pela medição de amplitude. Confirmar isso exige medir
+o raio espectral do operador de um passo, o que precisa de uma API para impor
+um campo de velocidade inicial — não existe hoje.
+
+**Contido, não resolvido.** `step()` passa a recusar em vez de propagar: se o
+campo perde finitude, levanta com uma mensagem que diz o que foi medido,
+inclusive que reduzir o passo não adianta — o primeiro instinto de quem vê
+uma explosão, e aqui só desperdiça tempo. Antes disso, todo número devolvido
+depois era NaN, **inclusive os diagnósticos que um chamador consultaria para
+perceber o problema**.
+
+**Por que não há portão de qualidade de malha na construção**: porque não há
+critério a-priori honesto para usar, e isso foi medido, não suposto. Uma malha
+com não-ortogonalidade 2,24 (jitter 0,35) roda bem; esta, com 2,07, diverge.
+Nenhuma quantidade que esta classe calcula hoje separa as duas. Inventar um
+limiar seria fingir um critério.
+
+**O que fazer**: expor um modo de carregar estado (velocidade e pressão), que
+serve tanto para checkpoint quanto para medir o raio espectral do operador de
+um passo diretamente — potência iterada em Python, poucos minutos. Só depois
+propor correção; o candidato natural é tornar consistentes os dois operadores
+da projeção, mas isso é reescrever o acoplamento pressão-velocidade e não se
+faz sobre uma suspeita.
+
+---
+
 ### 4.4 Diferença central na convecção estruturada, acima de Re de célula 2 — MEDIDO e resolvido no solver 1D; falta portar para as cavidades
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a
