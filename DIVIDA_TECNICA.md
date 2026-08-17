@@ -479,9 +479,15 @@ como **4.4**.
 A difusão virou implícita e destravou o passo. A convecção não — e agora é ela
 o limite.
 
-**O que fazer**: se malhas finas com escoamento rápido passarem a importar,
-tratamento implícito ou semi-implícito da convecção. Não urgente enquanto o
-limite convectivo for folgado.
+**O que fazer**: tratamento implícito ou semi-implícito da convecção.
+
+**Deixou de ser "não urgente" em 2026-08-16**, e o item 5.3 é quem mediu: na
+convergência de malha da cavidade, dt cai de 7,3e-04 (n=3) para 7,7e-05 (n=6)
+e o estudo custa 309 s em n=7 contra 8 s em n=4. Pior, dt **sobe** de n=6 para
+n=7 — o limite é posto pelo sliver que a tetraedralização por acaso produziu,
+não pela resolução, então refinar a malha não dá controle sobre o custo. O
+limite convectivo não é mais folgado; é o que impede qualquer afirmação
+quantitativa sobre este solver.
 
 ### 4.3 NaN em malha muito distorcida — CAUSA ENCONTRADA em 2026-08-16; corrigida no caso fechado, o canal ainda cai
 
@@ -768,7 +774,7 @@ permitir. Passou a ser avaliado uma vez por face e cacheado. Números da suíte
 idênticos; o canal de 5016 passos roda em 1,4 s a partir de Python (0,28
 ms/passo).
 
-### 5.3 Caso da cavidade não-estruturada em malha grosseira por custo
+### 5.3 ~~Caso da cavidade não-estruturada em malha grosseira por custo~~ — RESOLVIDO em 2026-08-16
 
 n=3 (177 células) e t=4 foram escolhidos para caber no tempo de suíte, não
 pela física. A afirmação de topologia é válida nessa resolução; qualquer
@@ -778,6 +784,34 @@ afirmação quantitativa não seria.
 convergência de malha de verdade fora da suíte de testes.
 
 ---
+
+
+**Resolvido: a convergência foi rodada, fora da suíte, e o item deixou de ser
+afirmação.** Mesma cavidade, mesma família de malha, marchada a t = 8:
+
+| n | células | u topo | u fundo | E cinética | Δ topo | Δ E |
+|---|---|---|---|---|---|---|
+| 3 (suíte) | 177 | +0,050504 | −0,011337 | 1,830e-03 | — | — |
+| 4 | 415 | +0,069719 | −0,011931 | 2,716e-03 | +38,1% | +48,4% |
+| 5 | 790 | +0,081655 | −0,011524 | 3,208e-03 | +17,1% | +18,1% |
+| 6 | 1358 | +0,088595 | −0,011102 | 3,586e-03 | +8,5% | +11,8% |
+| 7 | 2146 | +0,090057 | −0,011816 | 3,837e-03 | **+1,7%** | +7,0% |
+
+**O item dizia "qualquer afirmação quantitativa não seria válida"; agora se
+sabe o tamanho disso**: a malha da suíte está 44% abaixo do valor mais fino, e
+o n = 4 do teste de topologia, 23% abaixo. O *sinal* está assentado em toda
+resolução — que é exatamente a afirmação que o teste faz, e a razão de ser um
+teste de topologia. A energia cinética ainda se move 7% entre as duas malhas
+mais finas, então nem n = 7 está convergido.
+
+A divergência por faces fica em 1e-12 em toda resolução: a projeção não é o
+que limita.
+
+**E a medição decidiu o item 4.2.** Custou 309 s em n = 7 contra 8 s em n = 4,
+e o custo é o *passo*: dt cai de 7,3e-04 para 7,7e-05 entre n = 3 e n = 6 — e
+então **sobe** para 8,3e-05 em n = 7, porque o limite é posto pelo sliver que
+a tetraedralização por acaso produziu, não pela resolução. O item 4.2 dizia
+"não urgente enquanto o limite convectivo for folgado". Ele não é mais.
 
 ### 5.4 ~~Projeção com contagem fixa de correctores~~ — RESOLVIDO em 2026-08-16
 

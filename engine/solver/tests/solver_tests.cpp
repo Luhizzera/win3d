@@ -535,6 +535,29 @@ void testUnstructuredCavityReproducesVortexTopology() {
                 solver.lastPressureChange());
     std::fflush(stdout);
 
+    // **What this number is, and what it is not.** The mesh convergence study
+    // this case is too coarse for was run out of suite (DIVIDA_TECNICA.md
+    // 5.3), marching the same case to t = 8 on n = 3 through 7:
+    //
+    //   n=3  177 cells  u topo +0.050504   E 1.830e-03
+    //   n=4  415        +0.069719          2.716e-03   (+38.1%, +48.4%)
+    //   n=5  790        +0.081655          3.208e-03   (+17.1%, +18.1%)
+    //   n=6 1358        +0.088595          3.586e-03   ( +8.5%, +11.8%)
+    //   n=7 2146        +0.090057          3.837e-03   ( +1.7%,  +7.0%)
+    //
+    // So the *sign* is settled at every resolution -- which is the claim this
+    // test makes and the reason it is a topology test -- while the
+    // *magnitude* at n = 4 is 23% below the finest mesh tried and the coarser
+    // n = 3 is 44% below. Reading either as a quantitative result would be
+    // wrong, and now the size of that wrongness is measured rather than
+    // asserted.
+    //
+    // It stays out of suite because it costs 309s at n = 7 against 8s here,
+    // and the cost is the *step*: dt falls from 7.3e-04 to 7.7e-05 between
+    // n = 3 and n = 6 -- and then *rises* to 8.3e-05 at n = 7, because the
+    // limit is set by whichever sliver the tetrahedralizer happened to
+    // produce, not by the resolution.
+    //
     // Direct viscous drag: the near-lid fluid must follow the lid.
     AETHER_CHECK(topMean > 0.0);
     // And mass conservation in a closed box forces the return flow.
