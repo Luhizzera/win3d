@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <limits>
 
 namespace aether::solver {
 
@@ -365,6 +367,21 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
                                                           std::size_t maxOuterSweeps,
                                                           double& lastOuterChange) const {
     const std::size_t n = x.size();
+    // **The deferred correction is a fixed-point iteration, and it is not
+    // always a contraction.** On a mesh with non-orthogonality around 15 it
+    // diverges outright: the per-sweep change reaches 7e+07 and the returned
+    // field 1e+08, which this function used to hand back as a solution
+    // (DIVIDA_TECNICA.md 3.3). That is the same failure the Navier-Stokes
+    // step already refuses -- a wrong answer that looks like a result -- and
+    // it is worse here, because a caller reading a convergence order off a
+    // diverging solve gets a number that means nothing at all.
+    //
+    // Detected by comparing against the best sweep so far rather than the
+    // first: the correction legitimately makes things worse for a sweep or
+    // two before settling, so growth from the *start* is not evidence, while
+    // growth of three orders of magnitude away from the best point ever
+    // reached is not something a converging iteration does.
+    double bestChange = std::numeric_limits<double>::infinity();
     std::size_t sweep = 0;
     for (; sweep < maxOuterSweeps; ++sweep) {
         // On the first sweep the correction comes from whatever `x` already
@@ -408,6 +425,14 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
         lastOuterChange = maxChange;
         if (maxChange < tolerance || maxChange < tolerance * scale) {
             break;
+        }
+        bestChange = std::min(bestChange, maxChange);
+        if (!std::isfinite(maxChange) || maxChange > 1e3 * bestChange) {
+            throw std::runtime_error(
+                "UnstructuredFvmBase: the non-orthogonal deferred correction is diverging, not "
+                "converging slowly -- the per-sweep change grew by more than three orders of "
+                "magnitude away from its best value. This is a property of the mesh, not of the "
+                "sweep cap: raising the cap makes it worse. See DIVIDA_TECNICA.md 3.3.");
         }
     }
     return sweep;

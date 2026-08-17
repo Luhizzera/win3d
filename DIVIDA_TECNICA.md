@@ -409,7 +409,7 @@ mínimos quadrados — a parte compartilhada. A convecção continua upwind de
 primeira ordem (item 3.1), e agora existe uma régua confiável para medir o que
 um esquema de alta ordem melhoraria.
 
-### 3.3 Interpolação de face sem correção de skewness
+### 3.3 ~~Interpolação de face sem correção de skewness~~ — MEDIDO em 2026-08-16; a conclusão nula não generaliza, e a atribuição não fecha
 
 Implementada e medida como **nula** na malha de rede com jitter. Mas essa
 malha é benigna: gerada de uma rede regular perturbada. Malha de geometria
@@ -417,6 +417,52 @@ real tem skewness muito pior.
 
 **O que fazer**: repetir a medição numa malha de geometria real antes de
 concluir que não importa. O resultado nulo é válido só para o caso testado.
+
+---
+
+
+**Medido, com a régua que o item 3.2 construiu** — a solução manufaturada mede
+ordem sem precisar implementar nada. Malhas graduadas geometricamente, que é o
+que produz skewness alta, contra a rede uniforme com jitter em que o resultado
+nulo foi obtido:
+
+| malha | skew máx | naoOrtog | ordem | convergiu? |
+|---|---|---|---|---|
+| uniforme + jitter (a original) | 1,15 | 1,63 | **2,02** | sim, 99 varreduras |
+| graduada 6× | 3,17 | 4,90 | **1,77** | sim, **282** varreduras |
+| graduada 20× | 10,05 | 15,08 | — | **não: diverge** |
+
+**A conclusão nula não generaliza**: em skewness 3,17 a ordem cai de 2,02 para
+1,77, num solve genuinamente convergido (o teto de 200 varreduras não bastava;
+com 2000 ele fecha em 282 com o mesmo rms). O item estava certo em dizer que o
+nulo valia só para o caso testado.
+
+**Mas a atribuição não fecha, e isso precisa ser dito.** As malhas graduadas
+têm skewness *e* não-ortogonalidade altas juntas (1,63 → 4,90 → 15,08), então
+esta medição não separa as duas causas. Concluir "é a skewness" seria
+exatamente o erro que os itens 1.1, 1.2 e 4.3 já custaram. Separar exige uma
+malha de skewness alta e não-ortogonalidade baixa, que não é trivial de
+construir.
+
+**O achado que veio de graça, e é maior que o item.** A primeira leitura desta
+medição deu "ordem 0,62" para a malha graduada 20× — e era **lixo**: aquele
+solve estava divergindo, e o número saiu de onde o teto de varreduras por acaso
+o interrompeu. Com teto 2000 a mudança por varredura chega a 7,14e+07 e o
+campo devolvido a 1,2e+08. **A correção diferida é um ponto fixo que não é
+sempre contração**, e `solveDeferredCorrection()` devolvia o resultado
+divergente como se fosse solução.
+
+Passou a recusar: se a mudança por varredura cresce mais de três ordens de
+grandeza acima do melhor ponto já alcançado, levanta. Comparado contra o
+*melhor* e não contra o primeiro, porque a correção legitimamente piora por
+uma ou duas varreduras antes de assentar. É a mesma família do 4.3 — mas aqui
+sem nenhuma célula deficiente, então não é o recuo Green-Gauss: é a correção
+não-ortogonal em si, a não-ortogonalidade 15.
+
+**O que fazer**: para atribuir, uma malha que isole skewness de
+não-ortogonalidade. Para usar malha de geometria real, o limite prático agora
+é a divergência da correção acima de não-ortogonalidade ~15, não a
+interpolação de face.
 
 ---
 
