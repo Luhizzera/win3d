@@ -779,7 +779,7 @@ convergência de malha de verdade fora da suíte de testes.
 
 ---
 
-### 5.4 ~~Projeção com contagem fixa de correctores~~ — REDUZIDO em 2026-08-16, a evidência era do 2.3
+### 5.4 ~~Projeção com contagem fixa de correctores~~ — RESOLVIDO em 2026-08-16
 
 Registrado quando o canal precisava de 64 correctores não-ortogonais para
 fechar o balanço de massa, e lido como "o número necessário é propriedade da
@@ -800,6 +800,33 @@ botão existe (argumento de construtor), então hoje é escolha informada e não
 erro silencioso. E a evidência que fazia isso parecer urgente já foi explicada
 por outra coisa — o que é, por si, motivo para não agir sobre a próxima
 suspeita antes de medi-la.
+
+
+**Resolvido, e a objeção que restava caiu junto com o 4.3.** O critério de
+parada passou a ser **relativo à escala do campo**, com a forma absoluta
+mantida só como piso para o campo identicamente nulo — um estado de repouso é
+solução legítima e não tem escala. `tolerance` passou a significar a mesma
+coisa em qualquer unidade, que é o que quem passa 1e-10 espera.
+
+Isso só é seguro porque o item 4.3 mudou o quadro. Antes, **mais correctores
+amplificavam**: 2 → 1,58, 4 → 2,06, 16 → 6,47 de raio espectral na malha
+distorcida, então um critério que iterasse até convergir seria pior que o teto
+fixo. Com o recuo Green-Gauss limitado, o raio espectral ficou **independente
+da contagem**:
+
+| malha | 2 corr. | 4 corr. | 16 corr. |
+|---|---|---|---|
+| jitter 0,25 | 0,9819 | 0,9819 | 0,9819 |
+| jitter 0,35 | 0,9773 | 0,9773 | 0,9773 |
+| jitter 0,45 | 0,9764 | 0,9760 | 0,9760 |
+
+A amplificação por corrector era inteiramente o recuo ilimitado. Iterar voltou
+a ser seguro.
+
+**Medido**: a solução manufaturada cai de 90/84/105 varreduras para 87/80/99
+com o erro **idêntico em todos os dígitos** (2,338802e-02 / 1,033868e-02 /
+5,775569e-03). O ganho é modesto ali porque a escala do campo é ~2,7; ele
+cresce com a magnitude do campo, que é exatamente o caso da pressão.
 
 ## 6. Continua sendo pesquisa, não dívida
 

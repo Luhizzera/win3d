@@ -387,12 +387,26 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
             rhs, x, maxIterations, tolerance);
 
         // Outer convergence: the correction has stopped moving the solution.
+        // **Relative, not absolute, and that distinction was measured.**
+        // `tolerance` used to be compared against the raw change, so a
+        // pressure field of order 100 needed to settle to 1e-10 in absolute
+        // terms -- a criterion that essentially never fired, leaving every
+        // solve to run its full sweep cap (DIVIDA_TECNICA.md 5.4). Scaling by
+        // the field's own magnitude makes the same number mean the same thing
+        // whatever the units are, which is what a caller passing 1e-10
+        // expects it to mean.
+        //
+        // The absolute form is kept as a floor for the case the relative one
+        // cannot express: a field that is identically zero has no scale, and
+        // a rest state is a legitimate solution.
         double maxChange = 0.0;
+        double scale = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
             maxChange = std::max(maxChange, std::fabs(x[i] - previous[i]));
+            scale = std::max(scale, std::fabs(x[i]));
         }
         lastOuterChange = maxChange;
-        if (maxChange < tolerance) {
+        if (maxChange < tolerance || maxChange < tolerance * scale) {
             break;
         }
     }
