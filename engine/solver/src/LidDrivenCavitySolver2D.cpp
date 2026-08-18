@@ -1,6 +1,8 @@
 #include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/LidDrivenCavitySolver2D.hpp"
 
+#include "aether/solver/ConvectionLimiter.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -8,10 +10,62 @@
 namespace aether::solver {
 
 LidDrivenCavitySolver2D::LidDrivenCavitySolver2D(std::size_t nx, std::size_t ny, double lengthX,
-                                                   double lengthY, double viscosity, double lidVelocity)
+                                                   double lengthY, double viscosity, double lidVelocity,
+                                                   ConvectionScheme convection)
     : nx_(nx), ny_(ny), dx_(lengthX / static_cast<double>(nx)), dy_(lengthY / static_cast<double>(ny)),
       viscosity_(viscosity), lidVelocity_(lidVelocity), u_(nx * ny, 0.0), v_(nx * ny, 0.0),
-      p_(nx * ny, 0.0) {}
+      p_(nx * ny, 0.0), convection_(convection) {}
+
+double LidDrivenCavitySolver2D::schemeFaceValue(double upwind, double downwind, double farUpwind) const {
+    if (convection_ == ConvectionScheme::FirstOrderUpwind) {
+        return upwind;
+    }
+    const double difference = downwind - upwind;
+    if (faceDifferenceIsNegligible(difference, upwind, downwind)) {
+        return upwind;
+    }
+    // Uniform grid, so the second-order face value is the plain average and
+    // the ratio is the classic (phi_C - phi_CC)/(phi_D - phi_C). See
+    // ConvectionLimiter.hpp for why that is the same quantity the
+    // unstructured side builds from a gradient.
+    const double ratio = (upwind - farUpwind) / difference;
+    return upwind + vanLeerLimiter(ratio) * (0.5 * (upwind + downwind) - upwind);
+}
+
+double LidDrivenCavitySolver2D::conservativeConvection(const std::vector<double>& field,
+                                                        const std::vector<double>& u,
+                                                        const std::vector<double>& v, std::size_t i,
+                                                        std::size_t j, double wallValue,
+                                                        double dt) const {
+    // Face-normal velocities, the same ones the projection balances -- using a
+    // different face velocity here than the one mass conservation is enforced
+    // with is exactly the error ROADMAP Fase 1 and DIVIDA_TECNICA.md 1.1 both
+    // cost this project.
+    const double uE = (i + 1 < nx_) ? rhieChowFaceU(u, i, j, dt) : 0.0;
+    const double uW = (i > 0) ? rhieChowFaceU(u, i - 1, j, dt) : 0.0;
+    const double vN = (j + 1 < ny_) ? rhieChowFaceV(v, i, j, dt) : 0.0;
+    const double vS = (j > 0) ? rhieChowFaceV(v, i, j - 1, dt) : 0.0;
+
+    const double phiP = field[index(i, j)];
+    const double phiE = dirichletAt(field, i, j, 1, 0, wallValue);
+    const double phiW = dirichletAt(field, i, j, -1, 0, wallValue);
+    const double phiN = dirichletAt(field, i, j, 0, 1, wallValue);
+    const double phiS = dirichletAt(field, i, j, 0, -1, wallValue);
+    // One cell further out, for the limiter ratio. A wall mirror is a
+    // legitimate far-upwind value: it is what the boundary condition says the
+    // field does beyond the wall.
+    const double phiEE = dirichletAt(field, i, j, 2, 0, wallValue);
+    const double phiWW = dirichletAt(field, i, j, -2, 0, wallValue);
+    const double phiNN = dirichletAt(field, i, j, 0, 2, wallValue);
+    const double phiSS = dirichletAt(field, i, j, 0, -2, wallValue);
+
+    const double faceE = uE >= 0.0 ? schemeFaceValue(phiP, phiE, phiW) : schemeFaceValue(phiE, phiP, phiEE);
+    const double faceW = uW >= 0.0 ? schemeFaceValue(phiW, phiP, phiWW) : schemeFaceValue(phiP, phiW, phiE);
+    const double faceN = vN >= 0.0 ? schemeFaceValue(phiP, phiN, phiS) : schemeFaceValue(phiN, phiP, phiNN);
+    const double faceS = vS >= 0.0 ? schemeFaceValue(phiS, phiP, phiSS) : schemeFaceValue(phiP, phiS, phiN);
+
+    return -((uE * faceE - uW * faceW) / dx_ + (vN * faceN - vS * faceS) / dy_);
+}
 
 void LidDrivenCavitySolver2D::loadState(std::vector<double> u, std::vector<double> v, std::vector<double> p,
                                          double time) {
@@ -285,11 +339,35 @@ void LidDrivenCavitySolver2D::step(double dt) {
             const double d2vdx2 = (vE - 2.0 * v_[idx] + vW) / (dx_ * dx_);
             const double d2vdy2 = (vN - 2.0 * v_[idx] + vS) / (dy_ * dy_);
 
-            const double uConvection = u_[idx] * dudx + v_[idx] * dudy;
-            const double vConvection = u_[idx] * dvdx + v_[idx] * dvdy;
+            // Central keeps the original non-conservative form so every
+            // number this solver has ever produced is reproducible bit for
+            // bit; the other two use conservative face fluxes, which is what
+            // a limiter needs to be defined on at all.
+            double uConvectionTerm;
+            double vConvectionTerm;
+            if (convection_ == ConvectionScheme::Central) {
+                uConvectionTerm = -(u_[idx] * dudx + v_[idx] * dudy);
+                vConvectionTerm = -(u_[idx] * dvdx + v_[idx] * dvdy);
+            } else {
+                // The face flux belongs to the *corrected* field, so it uses
+                // the step that correction was made with -- except on the
+                // first step after construction or a loadState(), where there
+                // is no previous step and the current one is the only estimate
+                // available.
+                //
+                // That fallback is not cosmetic: without it, resuming from a
+                // checkpoint stops reproducing an uninterrupted run bit for
+                // bit, because the resumed solver would convect with dt = 0 on
+                // its first step while the uninterrupted one had a real dt.
+                // engine/persistence's own test caught exactly that.
+                const double convectingDt = lastDt_ > 0.0 ? lastDt_ : dt;
+                uConvectionTerm =
+                    conservativeConvection(u_, u_, v_, i, j, lidVelocityAt(i), convectingDt);
+                vConvectionTerm = conservativeConvection(v_, u_, v_, i, j, 0.0, convectingDt);
+            }
 
-            uStar[idx] = u_[idx] + dt * (-uConvection + viscosity_ * (d2udx2 + d2udy2));
-            vStar[idx] = v_[idx] + dt * (-vConvection + viscosity_ * (d2vdx2 + d2vdy2));
+            uStar[idx] = u_[idx] + dt * (uConvectionTerm + viscosity_ * (d2udx2 + d2udy2));
+            vStar[idx] = v_[idx] + dt * (vConvectionTerm + viscosity_ * (d2vdx2 + d2vdy2));
         }
     }
 

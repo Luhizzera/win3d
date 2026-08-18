@@ -41,8 +41,50 @@ namespace aether::solver {
 // checkerboard-prone without Rhie-Chow interpolation (not implemented).
 class LidDrivenCavitySolver2D {
 public:
+    // How the convected velocity is reconstructed at a face.
+    //
+    // **The default is the limited scheme, and it was measured before being
+    // made the default** -- the whole content of DIVIDA_TECNICA.md 4.4.
+    //
+    // Central differencing is unbounded above cell Reynolds 2, which the 1D
+    // case with a known exact solution shows costing 3.17 times the boundary
+    // range in overshoot at cell Peclet 8.3
+    // (testConvectionSchemesAgainstCellPeclet). Whether that harm actually
+    // reaches this solver was a separate question, and the answer needed a
+    // reference: the cavity at Re=400 on n=128 (cell Reynolds 3.1), against
+    // which the three schemes were run at n=16 and n=32. RMS deviation of u
+    // along the vertical centreline:
+    //
+    //         n=16      n=32     cell Reynolds 25.0 and 12.5
+    //   central    0.066457  0.023450
+    //   upwind     0.072535  0.040897
+    //   limited    0.054422  0.021399    <- best at both
+    //
+    // So the limited scheme is not merely safer, it is more accurate here --
+    // 18% better than central at n=16 and 9% at n=32, and 25% to 48% better
+    // than plain upwind. That, plus boundedness central cannot offer, is what
+    // justified changing a validated solver's default.
+    //
+    // Central is kept because every number this solver produced before this
+    // change was measured with it, and reproducing them has to stay possible.
+    // The six 3D closures built on StaggeredCavityBase3D are **still
+    // central**: they share a different predictor, and porting it is its own
+    // measurement.
+    enum class ConvectionScheme {
+        // The original: u . grad(u) with central differences, non-conservative.
+        Central,
+        // Conservative face fluxes with the upwind face value. Bounded at any
+        // cell Reynolds number, first-order.
+        FirstOrderUpwind,
+        // Conservative face fluxes with the limited linear-upwind value --
+        // second order where the field is smooth, upwind where it is not. Uses
+        // the same limiter as the unstructured side (ConvectionLimiter.hpp).
+        LimitedLinearUpwind,
+    };
+
     LidDrivenCavitySolver2D(std::size_t nx, std::size_t ny, double lengthX, double lengthY,
-                             double viscosity, double lidVelocity);
+                             double viscosity, double lidVelocity,
+                             ConvectionScheme convection = ConvectionScheme::LimitedLinearUpwind);
 
     // The explicit stability limit **with the safety factor applied**, so
     // the returned value may be stepped with directly -- see
@@ -135,6 +177,19 @@ private:
     // step it is 0, which makes the correction term vanish and the flux
     // fall back to plain interpolation -- correct, since an unstepped field
     // has no pressure correction to be consistent with.
+    // Conservative convective flux of `field` for cell (i,j): the divergence
+    // of (u_face * phi_face) over the cell's four faces, with the face value
+    // taken from the active scheme. Returns the value that goes on the
+    // right-hand side of the predictor, i.e. -div(u phi).
+    double conservativeConvection(const std::vector<double>& field, const std::vector<double>& u,
+                                   const std::vector<double>& v, std::size_t i, std::size_t j,
+                                   double wallValue, double dt) const;
+    // One face's value under the active scheme. `upwind`/`downwind` are the
+    // two cell values with the flow direction already resolved, `farUpwind`
+    // the cell beyond the upwind one -- which a structured grid has and a
+    // tetrahedral mesh does not.
+    double schemeFaceValue(double upwind, double downwind, double farUpwind) const;
+
     double rhieChowFaceU(const std::vector<double>& u, std::size_t i, std::size_t j, double dt) const;
     double rhieChowFaceV(const std::vector<double>& v, std::size_t i, std::size_t j, double dt) const;
 
@@ -157,6 +212,7 @@ private:
     std::vector<double> v_;
     std::vector<double> p_;
     double time_ = 0.0;
+    ConvectionScheme convection_;
     double lastDt_ = 0.0; // step size of the most recent correction; see rhieChowFaceU()
 };
 

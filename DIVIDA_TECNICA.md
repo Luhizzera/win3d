@@ -778,7 +778,7 @@ o que exige poder pular a projeção. Isso separaria o preditor de momento da
 correção de velocidade por gradiente de célula, que é o único elemento do
 passo ainda não isolado.
 
-### 4.4 Diferença central na convecção estruturada, acima de Re de célula 2 — MEDIDO e resolvido no solver 1D; falta portar para as cavidades
+### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a
 Re=400 roda com Re de célula 12,5 (medido, não estimado). Acima de 2,
@@ -885,6 +885,42 @@ custaram caro.
 mantendo o default atual, e comparar os dois contra a solução em n=128 no
 mesmo Re. Se o limitado ficar mais perto da referência em n=32, o port se
 justifica e o default vira dado; se não, o item vira nota de rodapé.
+
+---
+
+
+**Fechado para o `LidDrivenCavitySolver2D`, e o default só mudou depois de
+medido.** A pergunta que faltava era se o esquema limitado de fato ganha *na
+cavidade*, e não só no caso 1D com resposta exata. Referência: a própria
+cavidade a Re=400 em n=128 (Re de célula 3,1). Desvio rms de u na linha
+vertical central, marchando a t=12:
+
+| | n=16 (ReCel 25,0) | n=32 (ReCel 12,5) |
+|---|---|---|
+| central | 0,066457 | 0,023450 |
+| upwind 1ª ordem | 0,072535 | 0,040897 |
+| **limitado** | **0,054422** | **0,021399** |
+
+O limitado é o melhor nas duas resoluções: 18% melhor que a central em n=16,
+9% em n=32, e 25% a 48% melhor que o upwind. **Não é só mais seguro, é mais
+exato** — e isso, somado à limitação que a central não oferece, é o que
+justificou mexer no default de um solver validado. A forma conservativa usa
+os mesmos fluxos de face que a projeção equilibra, porque usar um fluxo aqui e
+outro lá é exatamente o erro que os itens 1.1 e 1.2 custaram.
+
+`ConvectionScheme::Central` continua disponível: todo número que este solver
+produziu antes foi medido com ela, e reproduzi-los tem de continuar possível.
+
+**Um efeito que só o teste de persistência pegaria**: o preditor conservativo
+usa `lastDt_`, e um solver recém-carregado não tem passo anterior — retomar de
+checkpoint deixou de reproduzir bit a bit uma corrida ininterrupta. O recuo é
+usar o dt corrente quando não há anterior, o que restaura a igualdade exata.
+Vale registrar que foi um teste de *outra camada* que pegou.
+
+**O que fica**: os seis fechamentos 3D construídos sobre
+`StaggeredCavityBase3D` continuam com diferença central. Eles compartilham um
+preditor diferente, e portá-lo é a sua própria medição — a régua e o esquema
+agora existem, então é trabalho de repetir o que está acima, não de inventar.
 
 ---
 

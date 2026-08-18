@@ -78,10 +78,19 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("time", &TaylorGreenVortexSolver2D::time)
         .def("max_divergence", &TaylorGreenVortexSolver2D::maxDivergence);
 
-    py::class_<LidDrivenCavitySolver2D>(m, "LidDrivenCavitySolver2D")
-        .def(py::init<std::size_t, std::size_t, double, double, double, double>(), py::arg("nx"),
+    py::class_<LidDrivenCavitySolver2D> lidCavity2D(m, "LidDrivenCavitySolver2D");
+    py::enum_<LidDrivenCavitySolver2D::ConvectionScheme>(lidCavity2D, "ConvectionScheme")
+        .value("CENTRAL", LidDrivenCavitySolver2D::ConvectionScheme::Central)
+        .value("FIRST_ORDER_UPWIND", LidDrivenCavitySolver2D::ConvectionScheme::FirstOrderUpwind)
+        .value("LIMITED_LINEAR_UPWIND",
+               LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind);
+    lidCavity2D
+        .def(py::init<std::size_t, std::size_t, double, double, double, double,
+                      LidDrivenCavitySolver2D::ConvectionScheme>(), py::arg("nx"),
              py::arg("ny"), py::arg("length_x"), py::arg("length_y"), py::arg("viscosity"),
-             py::arg("lid_velocity"))
+             py::arg("lid_velocity"),
+             py::arg("convection") =
+                 LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind)
         .def("stable_time_step", &LidDrivenCavitySolver2D::stableTimeStep)
         .def("step", &LidDrivenCavitySolver2D::step, py::arg("dt"))
         .def("u", &LidDrivenCavitySolver2D::u)
