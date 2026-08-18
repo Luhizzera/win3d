@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — CAUSA ENCONTRADA em 2026-08-16; corrigida no caso fechado, o canal ainda cai
+### 4.3 NaN em malha muito distorcida — CAUSA ISOLADA em 2026-08-16: a correção de velocidade da projeção
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -777,6 +777,52 @@ próximo corte é decompor o passo — medir o operador com a projeção desliga
 o que exige poder pular a projeção. Isso separaria o preditor de momento da
 correção de velocidade por gradiente de célula, que é o único elemento do
 passo ainda não isolado.
+
+
+**A causa foi isolada, e é a suspeita original — que eu registrei ao abrir o
+item, depois declarei errada, e que volta confirmada.**
+
+O que faltava era rodar o passo *sem uma de suas peças*. `stepWith()` faz
+isso: um passo com convecção, viscosidade ou projeção desligadas. Não é modo
+físico — um passo sem projeção não conserva massa — é instrumento de medida, e
+nada no solver o chama.
+
+Raio espectral do operador de um passo, em torno do repouso:
+
+| malha | completo | **sem projeção** | sem convecção | sem viscosidade | só projeção |
+|---|---|---|---|---|---|
+| jitter 0,25 | 0,9791 | 0,9839 | 0,9791 | 1,0007 | 1,0007 |
+| jitter 0,45 | 0,9729 | 0,9803 | 0,9729 | 1,0000 | 1,0000 |
+| jitter 0,55 | **5,1924** | **0,9880** | 5,1924 | 5,2363 | 5,2363 |
+| jitter 0,65 | **2,4259** | **0,9918** | 2,4259 | 2,4356 | 2,4356 |
+
+Três leituras, e juntas fecham:
+
+- **Sem a projeção, ρ < 1 em toda malha.** O preditor de momento — convecção,
+  difusão, contornos — é estável mesmo onde o passo completo explode.
+- **Sem convecção, ρ é idêntico ao completo.** Em torno do repouso a convecção
+  não contribui: já se supunha, agora está medido.
+- **Só a projeção reproduz o número inteiro.** Ela carrega toda a amplificação.
+
+E dentro da projeção, o solve de Poisson **já está sub-relaxado** e isso não
+mudou o resultado. O que sobra é a **correção de velocidade**:
+`velocity = velocityStar − ∇p·dt` usa o gradiente de *célula* por mínimos
+quadrados, enquanto a pressão foi resolvida contra o operador *de face*. São
+dois operadores diferentes, e é o único elemento que a decomposição não
+consegue desligar separadamente — porque ele *é* a projeção.
+
+Vale registrar o percurso: essa suspeita foi anotada ao abrir o item;
+declarada errada quando a medição do recuo Green-Gauss explicou o jitter 0,45;
+e volta confirmada para as malhas piores. **As duas coisas eram verdade ao
+mesmo tempo** — o recuo ilimitado dominava numa faixa de malha, a
+incompatibilidade da projeção domina na seguinte. Foi por isso que eliminá-la
+cedo pareceu justificado e não era.
+
+**O que fecha**: corrigir a velocidade com um gradiente consistente com o
+operador que a projeção resolveu — reconstruir a correção de célula a partir
+dos fluxos de face que foram zerados, em vez do gradiente de mínimos
+quadrados. É reescrever o acoplamento pressão-velocidade, agora sobre causa
+medida em vez de suspeita.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 

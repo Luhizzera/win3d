@@ -458,6 +458,19 @@ PYBIND11_MODULE(aether_solver_py, m) {
              py::arg("pressure_correctors") = UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
              py::keep_alive<1, 2>())
         .def("step", &UnstructuredCavitySolver3D::step, py::arg("dt"))
+        // Measurement instrument: one step with pieces switched off, so the
+        // step operator can be taken apart. See the header -- a step without
+        // the projection does not conserve mass, and is not meant to.
+        .def("step_with", [](UnstructuredCavitySolver3D& self, double dt, bool convection,
+                              bool viscous, bool projection) {
+                 UnstructuredCavitySolver3D::StepParts parts;
+                 parts.convection = convection;
+                 parts.viscous = viscous;
+                 parts.projection = projection;
+                 self.stepWith(dt, parts);
+             },
+             py::arg("dt"), py::arg("convection") = true, py::arg("viscous") = true,
+             py::arg("projection") = true)
         // Imposes an initial field. Checkpointing is one use; the other is
         // measuring the step operator itself, which is what
         // DIVIDA_TECNICA.md 4.3 was blocked on.

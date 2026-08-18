@@ -144,6 +144,28 @@ public:
 
     void step(double dt);
 
+    // Runs one step with pieces of it switched off, so the step operator can
+    // be taken apart and measured a piece at a time.
+    //
+    // **Why this exists.** DIVIDA_TECNICA.md 4.3 established, by power
+    // iteration around the rest state, that a distorted mesh makes the whole
+    // step operator amplify -- and then eliminated cause after cause without
+    // isolating the one that remains, because every experiment could only
+    // move the *whole* step. Viscosity, the corrector count, the convection
+    // scheme and the Green-Gauss fallback were all ruled out that way; what
+    // was left was a suspicion about the projection, and a suspicion is where
+    // it stayed for want of a way to run the step without it.
+    //
+    // This is a measurement instrument, not a physical mode: a step with the
+    // projection off does not conserve mass and a step with convection off is
+    // not the momentum equation. Nothing in the solver calls it.
+    struct StepParts {
+        bool convection = true;
+        bool viscous = true;
+        bool projection = true;
+    };
+    void stepWith(double dt, StepParts parts);
+
     // A step size that is stable, and now with a great deal of room to spare.
     //
     // **It is no longer a stability limit, and saying so precisely matters**
@@ -243,9 +265,11 @@ private:
     // operator, since the V/dt shift only adds to the diagonal -- so the same
     // Conjugate Gradient applies unchanged.
     std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt,
-                                                const std::vector<double>& convectionOutflow) const;
+                                                const std::vector<double>& convectionOutflow,
+                                                bool viscous = true) const;
     std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt,
-                                        const std::vector<double>& convectionOutflow) const;
+                                        const std::vector<double>& convectionOutflow,
+                                        bool viscous = true) const;
 
     // The boundary mass flux **as the projection left it**, filled in by
     // projectToDivergenceFree(). Stored rather than recomputed because the

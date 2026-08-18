@@ -132,10 +132,12 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
 }
 
 std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(
-    const std::vector<double>& x, double dt, const std::vector<double>& convectionOutflow) const {
+    const std::vector<double>& x, double dt, const std::vector<double>& convectionOutflow,
+    bool viscous) const {
+    const double viscosity = viscous ? viscosity_ : 0.0;
     std::vector<double> result(x.size());
     for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * interiorDiagonal_[cell] +
+        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity * interiorDiagonal_[cell] +
                         convectionOutflow[cell]) *
                        x[cell];
     }
@@ -145,25 +147,27 @@ std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(
         if (boundaryConditions_[i].isOutlet) {
             continue; // zero-gradient: no viscous flux through an outlet
         }
-        result[boundaryFaces_[i].cell] += viscosity_ * boundaryFaces_[i].coefficient * x[boundaryFaces_[i].cell];
+        result[boundaryFaces_[i].cell] +=
+            viscosity * boundaryFaces_[i].coefficient * x[boundaryFaces_[i].cell];
     }
     for (const InteriorFace& face : interiorFaces_) {
-        result[face.owner] -= viscosity_ * face.coefficient * x[face.neighbour];
-        result[face.neighbour] -= viscosity_ * face.coefficient * x[face.owner];
+        result[face.owner] -= viscosity * face.coefficient * x[face.neighbour];
+        result[face.neighbour] -= viscosity * face.coefficient * x[face.owner];
     }
     return result;
 }
 
 std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(
-    const std::vector<double>& rhs, double dt, const std::vector<double>& convectionOutflow) const {
+    const std::vector<double>& rhs, double dt, const std::vector<double>& convectionOutflow,
+    bool viscous) const {
     // Plain CG. This operator is far more diagonally dominant than the
     // pressure Poisson one -- the V/dt shift only adds to the diagonal -- so
     // it converges in very few iterations, which is why making diffusion
     // implicit costs much less than the step limit it removes.
     std::vector<double> x(rhs.size(), 0.0);
     conjugateGradient(
-        [this, dt, &convectionOutflow](const std::vector<double>& v) {
-            return applyHelmholtzOperator(v, dt, convectionOutflow);
+        [this, dt, &convectionOutflow, viscous](const std::vector<double>& v) {
+            return applyHelmholtzOperator(v, dt, convectionOutflow, viscous);
         },
         rhs, x, rhs.size(), 1e-12);
     return x;
@@ -245,7 +249,9 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     }
 }
 
-void UnstructuredCavitySolver3D::step(double dt) {
+void UnstructuredCavitySolver3D::step(double dt) { stepWith(dt, StepParts{}); }
+
+void UnstructuredCavitySolver3D::stepWith(double dt, StepParts parts) {
     const std::size_t n = velocity_.size();
     std::vector<Vector3> flux(n, Vector3{});
 
@@ -323,6 +329,11 @@ void UnstructuredCavitySolver3D::step(double dt) {
         }
     }
 
+    if (!parts.convection) {
+        std::fill(flux.begin(), flux.end(), Vector3{});
+        std::fill(convectionOutflow.begin(), convectionOutflow.end(), 0.0);
+    }
+
     // --- Viscous diffusion, **implicit**. Per component,
     //   (V/dt + nu L) u* = (V/dt) (u^n + dt * convection / V) + nu * wall terms
     // so no diffusive stability bound applies at all. The three components
@@ -359,9 +370,28 @@ void UnstructuredCavitySolver3D::step(double dt) {
         component[2][cell] += coefficient * condition.wallVelocity.z;
     }
 
+    if (!parts.viscous) {
+        // Undo the wall viscous source added just above; the operator's own
+        // viscous terms are switched off inside solveHelmholtz by the same
+        // flag, so the two have to be dropped together or the equation is
+        // inconsistent.
+        for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+            const BoundaryCondition& condition = boundaryConditions_[i];
+            if (condition.isOutlet) {
+                continue;
+            }
+            const std::size_t cell = boundaryFaces_[i].cell;
+            const double coefficient = viscosity_ * boundaryFaces_[i].coefficient;
+            component[0][cell] -= coefficient * condition.wallVelocity.x;
+            component[1][cell] -= coefficient * condition.wallVelocity.y;
+            component[2][cell] -= coefficient * condition.wallVelocity.z;
+        }
+    }
+
     std::vector<Vector3> velocityStar(n);
     for (int c = 0; c < 3; ++c) {
-        const std::vector<double> solved = solveHelmholtz(component[c], dt, convectionOutflow);
+        const std::vector<double> solved =
+            solveHelmholtz(component[c], dt, convectionOutflow, parts.viscous);
         for (std::size_t cell = 0; cell < n; ++cell) {
             if (c == 0) {
                 velocityStar[cell].x = solved[cell];
@@ -373,7 +403,11 @@ void UnstructuredCavitySolver3D::step(double dt) {
         }
     }
 
-    projectToDivergenceFree(velocityStar, dt);
+    if (parts.projection) {
+        projectToDivergenceFree(velocityStar, dt);
+    } else {
+        velocity_ = velocityStar;
+    }
     lastDt_ = dt;
     time_ += dt;
 
