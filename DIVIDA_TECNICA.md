@@ -851,6 +851,43 @@ erro que os itens 1.1 e 1.2 já custaram caro.
 
 ---
 
+
+**Medido em 2026-08-16 o que faltava para decidir o port — e ele não se
+justifica ainda.** A pergunta era se a diferença central causa dano
+*mensurável* na cavidade estruturada no regime em que ela é teoricamente
+ilimitada. Cavidade 2D a Re=400, marchada a t=12, comparando o perfil de u na
+linha vertical central entre resoluções:
+
+| n | Re de célula | E cinética | desvio do perfil vs. n anterior |
+|---|---|---|---|
+| 16 | 25,00 | 6,978e-03 | — |
+| 32 | 12,50 | 1,337e-02 | 0,0445 |
+| 64 | 6,25 | 1,619e-02 | 0,0180 |
+
+**Ela converge.** O desvio cai pela metade a cada refino e o campo não
+apresenta o colapso que o caso 1D exibe acima de Pe 2 — lá, com a resposta
+exata conhecida, a diferença central põe a solução a 3,17× a faixa dos
+contornos fora dela; aqui, a Pe 12,5 e 25, não há excesso visível. A diferença
+provável é que o campo da cavidade é suave em relação à malha, enquanto o caso
+1D impõe uma camada limite exponencial íngreme.
+
+**Por que isso decide contra o port por ora**: trocar o preditor de sete
+solvers validados — `LidDrivenCavitySolver2D` mais os seis que herdam de
+`StaggeredCavityBase3D` — exige uma medição que mostre o ganho, e a que existe
+mostra que o dano no regime real ainda não foi quantificado. Atribuir o erro
+de 21% em energia cinética entre n=32 e n=64 ao *esquema* seria confundi-lo
+com falta de resolução, que é exatamente o erro que os itens 1.1, 1.2 e 4.3
+custaram caro.
+
+**O que fecharia**: implementar o esquema conservativo limitado no
+`LidDrivenCavitySolver2D` (os fluxos de face já existem em
+`rhieChowFaceU/rhieChowFaceV`, então a forma conservativa está ao alcance),
+mantendo o default atual, e comparar os dois contra a solução em n=128 no
+mesmo Re. Se o limitado ficar mais perto da referência em n=32, o port se
+justifica e o default vira dado; se não, o item vira nota de rodapé.
+
+---
+
 ## 5. Verificação incompleta
 
 ### 5.1 O CI nunca rodou
