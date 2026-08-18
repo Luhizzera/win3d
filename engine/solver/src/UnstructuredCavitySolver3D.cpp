@@ -131,11 +131,13 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
     return fluxes;
 }
 
-std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(const std::vector<double>& x,
-                                                                        double dt) const {
+std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(
+    const std::vector<double>& x, double dt, const std::vector<double>& convectionOutflow) const {
     std::vector<double> result(x.size());
     for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * interiorDiagonal_[cell]) * x[cell];
+        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity_ * interiorDiagonal_[cell] +
+                        convectionOutflow[cell]) *
+                       x[cell];
     }
     // A wall face stiffens its cell's equation even though the wall value
     // itself is known and belongs on the right-hand side.
@@ -152,15 +154,18 @@ std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(const std
     return result;
 }
 
-std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(const std::vector<double>& rhs,
-                                                                double dt) const {
+std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(
+    const std::vector<double>& rhs, double dt, const std::vector<double>& convectionOutflow) const {
     // Plain CG. This operator is far more diagonally dominant than the
     // pressure Poisson one -- the V/dt shift only adds to the diagonal -- so
     // it converges in very few iterations, which is why making diffusion
     // implicit costs much less than the step limit it removes.
     std::vector<double> x(rhs.size(), 0.0);
-    conjugateGradient([this, dt](const std::vector<double>& v) { return applyHelmholtzOperator(v, dt); },
-                      rhs, x, rhs.size(), 1e-12);
+    conjugateGradient(
+        [this, dt, &convectionOutflow](const std::vector<double>& v) {
+            return applyHelmholtzOperator(v, dt, convectionOutflow);
+        },
+        rhs, x, rhs.size(), 1e-12);
     return x;
 }
 
@@ -263,6 +268,27 @@ void UnstructuredCavitySolver3D::step(double dt) {
     for (int c = 0; c < 3; ++c) {
         velocityGradient[c] = computeCellGradients(velocityComponent[c]);
     }
+    // **The outflow part of convection goes implicit**, which is what removes
+    // the convective step limit (DIVIDA_TECNICA.md 4.2). Accumulated here as a
+    // per-cell coefficient: the mass flux leaving through every face where
+    // this cell is the upwind one.
+    //
+    // Why this particular split, and why it keeps the Conjugate Gradient this
+    // project already has: a fully implicit upwind operator is
+    // **non-symmetric** -- the two neighbour coefficients differ by flow
+    // direction -- and would need BiCGSTAB or GMRES. Moving only the outflow
+    // makes the addition purely diagonal, so the operator stays symmetric
+    // positive definite and nothing about the linear solve changes.
+    //
+    // And it is unconditionally bounded, which is the point. Writing the
+    // first-order part of the update out,
+    //
+    //   u* = [ (V/dt) u^n + sum_in F u_N^n ] / [ V/dt + sum_out F ]
+    //
+    // and using sum_in F = sum_out F for a divergence-free face flux, u* is a
+    // **convex combination** of u^n and the neighbours' u^n at any dt. No step
+    // size can make it overshoot.
+    std::vector<double> convectionOutflow(n, 0.0);
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         const InteriorFace& face = interiorFaces_[i];
         const double massFlux = massFluxes[i];
@@ -272,6 +298,7 @@ void UnstructuredCavitySolver3D::step(double dt) {
             faceValue(face, massFlux, velocityComponent[2], velocityGradient[2], convection_)};
         flux[face.owner] -= faceVelocity * massFlux;
         flux[face.neighbour] += faceVelocity * massFlux;
+        convectionOutflow[massFlux >= 0.0 ? face.owner : face.neighbour] += std::fabs(massFlux);
     }
 
     // Convective transport across the boundary. Without this, momentum enters
@@ -288,6 +315,12 @@ void UnstructuredCavitySolver3D::step(double dt) {
         // inflow brings the prescribed boundary value in.
         const Vector3 upwind = massFlux >= 0.0 ? velocity_[face.cell] : condition.wallVelocity;
         flux[face.cell] -= upwind * massFlux;
+        if (massFlux >= 0.0) {
+            // Leaving through this face carries the cell value away, the same
+            // implicit outflow term an interior face contributes. Inflow
+            // carries a *prescribed* value and stays a source.
+            convectionOutflow[face.cell] += massFlux;
+        }
     }
 
     // --- Viscous diffusion, **implicit**. Per component,
@@ -302,6 +335,15 @@ void UnstructuredCavitySolver3D::step(double dt) {
         component[0][cell] = volumeOverDt * explicitPart.x;
         component[1][cell] = volumeOverDt * explicitPart.y;
         component[2][cell] = volumeOverDt * explicitPart.z;
+        // Adding the outflow term back cancels, exactly, the part of `flux`
+        // that carried this cell own value away: on a face where this cell is
+        // upwind, the upwind component of the face value *is* u^n here. What
+        // stays explicit is only the limiter correction to it -- the same
+        // deferred-correction structure the non-orthogonal term uses. The
+        // cancelled part reappears on the operator diagonal.
+        component[0][cell] += convectionOutflow[cell] * velocity_[cell].x;
+        component[1][cell] += convectionOutflow[cell] * velocity_[cell].y;
+        component[2][cell] += convectionOutflow[cell] * velocity_[cell].z;
     }
     // The wall velocity is known, so its viscous flux is a source rather than
     // part of the operator. This is where the lid drives the flow.
@@ -319,7 +361,7 @@ void UnstructuredCavitySolver3D::step(double dt) {
 
     std::vector<Vector3> velocityStar(n);
     for (int c = 0; c < 3; ++c) {
-        const std::vector<double> solved = solveHelmholtz(component[c], dt);
+        const std::vector<double> solved = solveHelmholtz(component[c], dt, convectionOutflow);
         for (std::size_t cell = 0; cell < n; ++cell) {
             if (c == 0) {
                 velocityStar[cell].x = solved[cell];

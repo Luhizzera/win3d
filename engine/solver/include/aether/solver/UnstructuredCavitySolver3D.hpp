@@ -51,9 +51,12 @@ namespace aether::solver {
 //   the field is not smooth. Pass ConvectionScheme::FirstOrderUpwind to get
 //   the old behaviour back, which is how the two were compared.
 //
-// - **Explicit time stepping** for convection, implicit for diffusion, with
-//   stableTimeStep() deriving a limit from the actual cell sizes rather than
-//   a uniform spacing.
+// - **Implicit diffusion and semi-implicit convection.** The viscous term is
+//   fully implicit; convection has its outflow part implicit and the rest
+//   explicit, which is what removed the convective step limit
+//   (DIVIDA_TECNICA.md 4.2) while keeping the operator symmetric so the
+//   project's Conjugate Gradient still applies. Measured stable at 100x the
+//   step stableTimeStep() returns.
 //
 // - **Mass conservation is measured on faces, not on a cell-centred
 //   difference.** Fase 1 established that the wide cell-centred divergence
@@ -141,13 +144,32 @@ public:
 
     void step(double dt);
 
-    // **Only the convective limit, because diffusion is implicit.** That is
-    // the whole point of the implicit treatment: the explicit viscous bound
+    // A step size that is stable, and now with a great deal of room to spare.
+    //
+    // **It is no longer a stability limit, and saying so precisely matters**
+    // -- item 4.1 of DIVIDA_TECNICA.md is exactly the trap of a name that
+    // promises stability while returning something else. This returns *less*
+    // than the limit rather than more, so the name stays honest; what changed
+    // is that the number is now an accuracy suggestion rather than a bound.
+    //
+    // Diffusion has been implicit for a while (the explicit viscous bound
     // scales with the square of the smallest cell, and every Delaunay
     // tetrahedralization produces slivers, so it -- not the physics -- was
-    // dictating the step. A safety factor is still applied: Fase 1 found the
-    // structured cavity at CFL exactly 1.0000 with no margin, which is what
-    // made it so fragile.
+    // setting the step). Convection followed: its outflow term is implicit
+    // too, which makes the first-order part of the momentum update a convex
+    // combination at any dt (see step()). Measured on the n=4 cavity, marching
+    // to t = 8 at multiples of this value:
+    //
+    //     1x   16356 steps   u topo +0.069704   div 1.3e-11
+    //    10x    1635         +0.072180          1.8e-10
+    //   100x     163         +0.073137          1.4e-09
+    //
+    // Stable at a hundred times the returned step, with the answer drifting
+    // 5% -- accuracy, not stability, and well inside the 44% the mesh itself
+    // costs at this resolution (item 5.3). The value is kept conservative
+    // because it is what the suite is calibrated against and because a step
+    // chosen for accuracy is a caller decision; DIVIDA_TECNICA.md 4.2 records
+    // the measurement so that decision can be made from evidence.
     double stableTimeStep() const;
 
     core::Vector3 velocity(std::size_t cell) const { return velocity_.at(cell); }
@@ -216,8 +238,10 @@ private:
     // Still symmetric positive definite -- more strongly so than the Poisson
     // operator, since the V/dt shift only adds to the diagonal -- so the same
     // Conjugate Gradient applies unchanged.
-    std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt) const;
-    std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt) const;
+    std::vector<double> applyHelmholtzOperator(const std::vector<double>& x, double dt,
+                                                const std::vector<double>& convectionOutflow) const;
+    std::vector<double> solveHelmholtz(const std::vector<double>& rhs, double dt,
+                                        const std::vector<double>& convectionOutflow) const;
 
     // The boundary mass flux **as the projection left it**, filled in by
     // projectToDivergenceFree(). Stored rather than recomputed because the

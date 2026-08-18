@@ -520,20 +520,57 @@ limitado medido em segunda ordem para o lado não-estruturado; portá-lo para os
 solvers estruturados é o trabalho que fecha essa metade, e fica registrado
 como **4.4**.
 
-### 4.2 Convecção ainda explícita no solver não-estruturado [criada nesta sessão]
+### 4.2 ~~Convecção ainda explícita no solver não-estruturado~~ — RESOLVIDO em 2026-08-16
 
-A difusão virou implícita e destravou o passo. A convecção não — e agora é ela
-o limite.
+A difusão virou implícita e destravou o passo. A convecção não — e passou a
+ser ela o limite, o que o item 5.3 mediu: dt caindo de 7,3e-04 a 7,7e-05 entre
+n=3 e n=6, e o estudo de convergência custando 309 s.
 
-**O que fazer**: tratamento implícito ou semi-implícito da convecção.
+**Resolvido pela metade que importa: a parte de saída da convecção foi para o
+implícito.** Não é o implícito completo, e a escolha tem uma razão precisa. Um
+operador upwind totalmente implícito é **não-simétrico** — os dois
+coeficientes de vizinho diferem conforme a direção do escoamento — e exigiria
+BiCGSTAB ou GMRES. Mover só o fluxo de *saída* torna a adição puramente
+diagonal, então o operador continua simétrico positivo-definido e nada no
+solve linear muda.
 
-**Deixou de ser "não urgente" em 2026-08-16**, e o item 5.3 é quem mediu: na
-convergência de malha da cavidade, dt cai de 7,3e-04 (n=3) para 7,7e-05 (n=6)
-e o estudo custa 309 s em n=7 contra 8 s em n=4. Pior, dt **sobe** de n=6 para
-n=7 — o limite é posto pelo sliver que a tetraedralização por acaso produziu,
-não pela resolução, então refinar a malha não dá controle sobre o custo. O
-limite convectivo não é mais folgado; é o que impede qualquer afirmação
-quantitativa sobre este solver.
+E é incondicionalmente limitado, que é o ponto. Escrevendo a parte de primeira
+ordem da atualização,
+
+    u* = [ (V/dt) u^n + Σ_entrada F u_N^n ] / [ V/dt + Σ_saída F ]
+
+e usando Σ_entrada F = Σ_saída F para um fluxo de face de divergência nula,
+`u*` é **combinação convexa** de `u^n` e dos vizinhos, para qualquer dt.
+Nenhum passo consegue fazê-la ultrapassar. A parte do limitador fica
+explícita, na mesma estrutura de correção diferida do termo não-ortogonal.
+
+**Medido na cavidade n=4, marchando a t=8 em múltiplos do passo devolvido:**
+
+| fator | passos | u topo | divergência | estável |
+|---|---|---|---|---|
+| 1× | 16356 | +0,069704 | 1,3e-11 | sim |
+| 10× | 1635 | +0,072180 | 1,8e-10 | sim |
+| 25× | 654 | +0,073303 | 2,9e-10 | sim |
+| 100× | 163 | +0,073137 | 1,4e-09 | sim |
+
+**Estável a cem vezes o passo devolvido**, com a resposta deslocando 5% — que
+é *acurácia*, não estabilidade, e está bem dentro dos 44% que a própria malha
+custa nessa resolução (item 5.3). O limite convectivo deixou de existir.
+
+`stableTimeStep()` continua devolvendo o valor conservador de antes, e o
+cabeçalho passou a dizer o que ele significa agora: **menos** que o limite, não
+mais — o nome segue honesto, no sentido exato que o item 4.1 cobra. O que
+mudou é que o número virou sugestão de acurácia em vez de barreira.
+
+**Efeito colateral que não era o alvo**: o caso do item 4.3 (canal em malha
+jitter ±0,45) ia a NaN no passo 20; com a convecção semi-implícita ele vai ao
+passo **292**. Não sumiu — em jitter ±0,65 o raio espectral em torno do
+repouso é 44,05 e o caso levanta no passo 25 —, mas o guarda que o 4.3
+instalou passou a disparar tão mais tarde que o teste Python que o exercitava
+**parou de falhar por conta própria**, e precisou de uma malha pior. Vale
+registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
+o guarda quebrou.
+
 
 ### 4.3 NaN em malha muito distorcida — CAUSA ENCONTRADA em 2026-08-16; corrigida no caso fechado, o canal ainda cai
 
@@ -937,6 +974,7 @@ Por dependência, não por tamanho:
 7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
 8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
 9. ~~**4.1** (margem nos estruturados)~~ — FEITO; abriu o 4.4
+9b. ~~**5.4**, ~~**5.3**~~, ~~**3.3**~~ (medido), ~~**4.2**~~ — FEITOS nesta rodada
 10. **4.4** — MEDIDO (central overshoot 3,17 em Pe 8,3) e resolvido no solver
     1D; portar para as cavidades precisa antes de um caso a Re=400 na suíte
 11. **5.1** (push) — um comando
