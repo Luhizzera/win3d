@@ -1,6 +1,8 @@
 #include "aether/mesh/DelaunayTetrahedralization3D.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/core/VectorField.hpp"
+#include "aether/core/ScalarField.hpp"
 #include "aether/solver/UnstructuredCavitySolver3D.hpp"
 #include "aether/solver/UnstructuredDiffusionSolver.hpp"
 #include "aether/solver/UnstructuredScalarTransportSolver.hpp"
@@ -800,6 +802,77 @@ void testConvectionSchemeOrder() {
     AETHER_CHECK(limitedFinest < 0.5 * upwindFinest);
     std::printf("      erro %0.2fx menor na malha mais fina, com o mesmo custo de malha\n",
                 upwindFinest / limitedFinest);
+    std::fflush(stdout);
+}
+
+// **The engine's own field types, over a tetrahedral mesh.**
+//
+// This is the check DIVIDA_TECNICA.md 2.2 was about. ScalarField and
+// VectorField are defined over core::Mesh; TetrahedralMesh was built beside
+// core::Mesh rather than on top of it, so the two representations did not know
+// about each other and every unstructured solver here carried raw
+// std::vector<double> instead of the engine's fields. The item's warning was
+// that this "vai forcar conversoes manuais em todo ponto de integracao --
+// pos-processamento, persistencia, visualizacao".
+//
+// With TetrahedralMesh holding a core::Mesh rather than a second copy of the
+// vertices, that conversion is gone: coreMesh() *is* the mesh the fields are
+// defined over, cell for cell and in the same order. What this test pins down
+// is that identity -- indices agreeing, counts agreeing, and the two
+// centroid definitions agreeing **exactly** rather than to a tolerance, which
+// holds because a tetrahedron's vertex average is its centroid.
+void testTetrahedralMeshCarriesEngineFields() {
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(4);
+    const aether::core::Mesh& core = mesh.coreMesh();
+
+    AETHER_CHECK(core.cellCount() == mesh.cellCount());
+    AETHER_CHECK(core.vertexCount() == mesh.vertexCount());
+
+    // The centroids are the same number, not merely close: core::Mesh averages
+    // the cell's vertices and TetrahedralMesh stores (a+b+c+d)/4, which for a
+    // tetrahedron is the same expression. An exact comparison is the right
+    // check here and would be the wrong one for any other cell shape.
+    double worstCentroidDifference = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        AETHER_CHECK(mesh.cellVertices(cell).size() == 4);
+        const Vector3 difference = core.cellCentroid(cell) - mesh.cellCentroid(cell);
+        worstCentroidDifference = std::max(worstCentroidDifference, difference.norm());
+    }
+    AETHER_CHECK(worstCentroidDifference == 0.0);
+
+    // A field built over the core mesh is indexed by the same cells the solver
+    // indexes, so reading a solved field into one needs no mapping at all --
+    // which is the whole point of the item.
+    aether::solver::UnstructuredCavitySolver3D solver(mesh, 0.1, [](const Vector3& p) {
+        return p.z > 1.0 - 1e-9 ? Vector3{1.0, 0.0, 0.0} : Vector3{0.0, 0.0, 0.0};
+    });
+    const double dt = solver.stableTimeStep();
+    for (int step = 0; step < 200; ++step) {
+        solver.step(dt);
+    }
+
+    aether::core::ScalarField pressure(core);
+    aether::core::VectorField velocity(core);
+    AETHER_CHECK(pressure.size() == mesh.cellCount());
+    AETHER_CHECK(velocity.size() == mesh.cellCount());
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        pressure[cell] = solver.pressure(cell);
+        velocity[cell] = solver.velocity(cell);
+    }
+
+    // And the fields carry the solver's own numbers, not a resampling of them.
+    double worstFieldDifference = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        worstFieldDifference = std::max(worstFieldDifference,
+                                         std::fabs(pressure[cell] - solver.pressure(cell)));
+        worstFieldDifference =
+            std::max(worstFieldDifference, (velocity[cell] - solver.velocity(cell)).norm());
+    }
+    AETHER_CHECK(worstFieldDifference == 0.0);
+
+    std::printf("  [solver_tests] campos do engine sobre malha tetraedrica: %zu celulas, "
+                "centroides identicos, ScalarField/VectorField sem conversao\n",
+                mesh.cellCount());
     std::fflush(stdout);
 }
 
@@ -3084,6 +3157,7 @@ int main() {
     testManufacturedSolutionReachesSecondOrder();
     testConvectionSchemeOrder();
     testConvectionSchemesAgainstCellPeclet();
+    testTetrahedralMeshCarriesEngineFields();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();

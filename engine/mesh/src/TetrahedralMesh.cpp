@@ -50,9 +50,8 @@ TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
     const DelaunayTetrahedralization3D& tetrahedralization) {
     TetrahedralMesh mesh;
 
-    mesh.vertices_.reserve(tetrahedralization.pointCount());
     for (std::size_t i = 0; i < tetrahedralization.pointCount(); ++i) {
-        mesh.vertices_.push_back(tetrahedralization.point(i));
+        mesh.mesh_.addVertex(tetrahedralization.point(i));
     }
 
     // First pass: cell geometry. A tetrahedron's centroid is exactly the
@@ -61,10 +60,10 @@ TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
     std::vector<std::array<std::size_t, 4>> cellVertices;
     for (std::size_t t = 0; t < tetrahedralization.tetrahedronCount(); ++t) {
         const auto& tet = tetrahedralization.tetrahedron(t);
-        const Vector3& a = mesh.vertices_[tet.vertices[0]];
-        const Vector3& b = mesh.vertices_[tet.vertices[1]];
-        const Vector3& c = mesh.vertices_[tet.vertices[2]];
-        const Vector3& d = mesh.vertices_[tet.vertices[3]];
+        const Vector3& a = mesh.mesh_.vertex(tet.vertices[0]);
+        const Vector3& b = mesh.mesh_.vertex(tet.vertices[1]);
+        const Vector3& c = mesh.mesh_.vertex(tet.vertices[2]);
+        const Vector3& d = mesh.mesh_.vertex(tet.vertices[3]);
 
         const double signedVolume = (b - a).dot((c - a).cross(d - a)) / 6.0;
         if (std::fabs(signedVolume) == 0.0) {
@@ -72,6 +71,9 @@ TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
         }
 
         cellVertices.push_back(tet.vertices);
+        // Registered in the core mesh too, so a ScalarField built over
+        // coreMesh() is indexed by exactly these cells, in this order.
+        mesh.mesh_.addCell({tet.vertices[0], tet.vertices[1], tet.vertices[2], tet.vertices[3]});
         mesh.cellVolumes_.push_back(std::fabs(signedVolume));
         mesh.cellCentroids_.push_back((a + b + c + d) / 4.0);
     }
@@ -89,10 +91,10 @@ TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
         // construction, but a mesh assembled some other way might not be;
         // checking costs one determinant and makes the winding table below
         // correct either way.
-        const Vector3& a = mesh.vertices_[tv[0]];
-        const Vector3& b = mesh.vertices_[tv[1]];
-        const Vector3& c = mesh.vertices_[tv[2]];
-        const Vector3& d = mesh.vertices_[tv[3]];
+        const Vector3& a = mesh.mesh_.vertex(tv[0]);
+        const Vector3& b = mesh.mesh_.vertex(tv[1]);
+        const Vector3& c = mesh.mesh_.vertex(tv[2]);
+        const Vector3& d = mesh.mesh_.vertex(tv[3]);
         const bool positivelyOriented = (b - a).dot((c - a).cross(d - a)) > 0.0;
 
         for (const auto& localFace : kFaceVertexTable) {
@@ -113,9 +115,9 @@ TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
                 continue;
             }
 
-            const Vector3& p0 = mesh.vertices_[faceVerts[0]];
-            const Vector3& p1 = mesh.vertices_[faceVerts[1]];
-            const Vector3& p2 = mesh.vertices_[faceVerts[2]];
+            const Vector3& p0 = mesh.mesh_.vertex(faceVerts[0]);
+            const Vector3& p1 = mesh.mesh_.vertex(faceVerts[1]);
+            const Vector3& p2 = mesh.mesh_.vertex(faceVerts[2]);
 
             Face face;
             face.vertices = faceVerts;

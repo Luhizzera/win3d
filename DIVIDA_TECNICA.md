@@ -208,7 +208,7 @@ fez. Suíte inteira: 11/11.
 **O que isso destrava**: 1.2 e 1.3 agora são correção em um lugar só, que era
 o motivo de este item vir primeiro na ordem.
 
-### 2.2 Duas representações de malha que não se falam
+### 2.2 ~~Duas representações de malha que não se falam~~ — RESOLVIDO em 2026-08-16
 
 `core::Mesh` (vértices + células) existe desde o Módulo 1 e é o que
 `ScalarField`/`VectorField` usam. `TetrahedralMesh` foi criada na Fase 2.1 e
@@ -221,6 +221,28 @@ ponto de integração — pós-processamento, persistência, visualização.
 
 **O que fazer**: decidir qual é a representação canônica e fazer a outra
 construir sobre ela. Não manter as duas.
+
+
+**Resolvido: `TetrahedralMesh` passou a guardar um `core::Mesh` em vez de uma
+segunda cópia dos vértices.** `core::Mesh` é a canônica porque é o que a
+camada de campos já fala; o que a `TetrahedralMesh` acrescenta é
+**conectividade** — quais células dividem uma face, e a geometria dessa face —
+que é a parte de que o método de volumes finitos precisa e que uma lista de
+vértices e células não expressa. Uma representação com uma camada em cima, em
+vez de duas paralelas.
+
+**As duas concordam exatamente, não aproximadamente**, e isso vale dizer
+porque não é verdade em geral: `core::Mesh::cellCentroid()` é a média dos
+vértices da célula, e para um tetraedro isso *é* o centroide. Para qualquer
+outra forma de célula seria aproximação e a identidade precisaria ser
+reexaminada. O teste compara os dois com `== 0.0`, não com tolerância.
+
+**O dano que o item descrevia era "conversões manuais em todo ponto de
+integração"**. `coreMesh()` devolve a malha sobre a qual `ScalarField` e
+`VectorField` são definidos, célula por célula e na mesma ordem, então não há
+conversão: o teste constrói os dois campos sobre ela, preenche a partir de um
+solver que rodou 200 passos e confirma que carregam os números do solver, não
+uma reamostragem deles.
 
 ### 2.3 ~~Pressão da saída fica de fora do ajuste de mínimos quadrados~~ — RESOLVIDO em 2026-08-16
 

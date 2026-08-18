@@ -1,5 +1,6 @@
 #pragma once
 
+#include "aether/core/Mesh.hpp"
 #include "aether/core/Vector3.hpp"
 #include "aether/mesh/DelaunayTetrahedralization3D.hpp"
 
@@ -52,12 +53,35 @@ public:
     // zero downstream.
     static TetrahedralMesh fromTetrahedralization(const DelaunayTetrahedralization3D& tetrahedralization);
 
+    // **Vertices and cells live in a core::Mesh, not in a second copy here.**
+    // That was DIVIDA_TECNICA.md 2.2: this class was built in Fase 2.1
+    // alongside core::Mesh rather than on top of it, so the engine carried two
+    // unstructured mesh representations that did not know about each other --
+    // and since ScalarField/VectorField are defined over core::Mesh, every
+    // unstructured solver here had to carry raw std::vector<double> instead of
+    // the engine's own field types. Two representations of one thing is the
+    // situation item 2.1 dealt with for solvers, one level down.
+    //
+    // core::Mesh is the canonical one because it is what the field layer
+    // already speaks. What this class adds on top is *connectivity* -- which
+    // cells share a face, and that face's geometry -- which is the part a
+    // finite-volume method needs and a vertex-and-cell list cannot express.
+    //
+    // The two agree **exactly**, not approximately, and that is worth stating
+    // because it is not true in general: core::Mesh::cellCentroid() is the
+    // average of a cell's vertices, and for a tetrahedron that *is* the
+    // centroid. For any other cell shape it would be an approximation and this
+    // identity would need re-examining.
+    const core::Mesh& coreMesh() const { return mesh_; }
+
     std::size_t cellCount() const { return cellVolumes_.size(); }
     std::size_t faceCount() const { return faces_.size(); }
-    std::size_t vertexCount() const { return vertices_.size(); }
+    std::size_t vertexCount() const { return mesh_.vertexCount(); }
 
     const Face& face(std::size_t index) const { return faces_.at(index); }
-    const core::Vector3& vertex(std::size_t index) const { return vertices_.at(index); }
+    const core::Vector3& vertex(std::size_t index) const { return mesh_.vertex(index); }
+    // A tetrahedron's four vertices, as core::Mesh stores them.
+    const std::vector<std::size_t>& cellVertices(std::size_t cell) const { return mesh_.cell(cell); }
     double cellVolume(std::size_t cell) const { return cellVolumes_.at(cell); }
     const core::Vector3& cellCentroid(std::size_t cell) const { return cellCentroids_.at(cell); }
     const std::vector<std::size_t>& cellFaces(std::size_t cell) const { return cellFaces_.at(cell); }
@@ -82,7 +106,7 @@ public:
     double totalVolume() const;
 
 private:
-    std::vector<core::Vector3> vertices_;
+    core::Mesh mesh_;
     std::vector<Face> faces_;
     std::vector<double> cellVolumes_;
     std::vector<core::Vector3> cellCentroids_;
