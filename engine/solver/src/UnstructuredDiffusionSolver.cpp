@@ -98,8 +98,11 @@ std::size_t UnstructuredDiffusionSolver::solveConjugateGradient(std::size_t maxI
         }
     }
 
+    // Fresh each solve: this class runs the whole iteration in one call, so
+    // there is nothing to carry between calls.
+    double relaxation = 1.0;
     return solveDeferredCorrection(phi_, baseRhs, kNoPinnedCell, maxIterations, tolerance, maxOuterSweeps,
-                                    lastOuterChange_);
+                                    lastOuterChange_, relaxation);
 }
 
 } // namespace aether::solver

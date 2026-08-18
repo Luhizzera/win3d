@@ -320,10 +320,16 @@ protected:
     // to `lastOuterChange` -- the number that distinguishes a solve that
     // settled from one that merely hit the sweep cap, which mean very
     // different things about the result.
+    // `relaxation` is in/out and starts at 1.0. It is a parameter rather than
+    // a local because a solver that runs this every time step needs it to
+    // **persist**: the damping is learned from watching the iteration
+    // misbehave, and a projection that allows only four sweeps per step never
+    // gets far enough to learn it if the factor resets each time. Carrying it
+    // means the mesh is diagnosed once and the answer kept.
     std::size_t solveDeferredCorrection(std::vector<double>& x, const std::vector<double>& baseRhs,
                                          std::size_t pinnedCell, std::size_t maxIterations,
                                          double tolerance, std::size_t maxOuterSweeps,
-                                         double& lastOuterChange) const;
+                                         double& lastOuterChange, double& relaxation) const;
 
     // Matrix-free Conjugate Gradient. `apply(v)` returns A v; `x` is both the
     // initial guess and the result, which matters -- the pressure Poisson

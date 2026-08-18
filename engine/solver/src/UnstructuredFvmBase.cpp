@@ -365,7 +365,8 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
                                                           std::size_t pinnedCell,
                                                           std::size_t maxIterations, double tolerance,
                                                           std::size_t maxOuterSweeps,
-                                                          double& lastOuterChange) const {
+                                                          double& lastOuterChange,
+                                                          double& relaxation) const {
     const std::size_t n = x.size();
     // **The deferred correction is a fixed-point iteration, and it is not
     // always a contraction.** On a mesh with non-orthogonality around 15 it
@@ -382,6 +383,22 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
     // growth of three orders of magnitude away from the best point ever
     // reached is not something a converging iteration does.
     double bestChange = std::numeric_limits<double>::infinity();
+    // **Under-relaxation, applied only when the iteration misbehaves.**
+    // Deferred correction is a fixed point whose contraction factor is
+    // ρ(A⁻¹C); on a bad enough mesh that exceeds 1 and the iteration diverges
+    // -- measured at three separate places in this project, and no static mesh
+    // metric predicted any of them (non-orthogonality, the non-orthogonal to
+    // orthogonal area ratio, and the deficient-stencil count were all tried
+    // and all failed to separate a mesh that runs from one that does not).
+    //
+    // So the damping is adaptive rather than mesh-derived: applying α to the
+    // correction scales the contraction factor by α, so halving until the
+    // iteration behaves finds a working α without needing to predict it. It
+    // engages only after the change has grown ten-fold past its best value,
+    // which a converging iteration never does -- the correction legitimately
+    // makes things worse for a sweep or two, and damping that would be
+    // slowing down a solve that was fine.
+    constexpr double kMinimumRelaxation = 1.0 / 64.0;
     std::size_t sweep = 0;
     for (; sweep < maxOuterSweeps; ++sweep) {
         // On the first sweep the correction comes from whatever `x` already
@@ -391,7 +408,7 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
         const std::vector<double> correction = nonOrthogonalCorrection(x);
         std::vector<double> rhs(n);
         for (std::size_t i = 0; i < n; ++i) {
-            rhs[i] = baseRhs[i] + correction[i];
+            rhs[i] = baseRhs[i] + relaxation * correction[i];
         }
         if (pinnedCell != kNoPinnedCell) {
             rhs[pinnedCell] = 0.0; // the pinned row is the identity; its value is fixed
@@ -427,12 +444,21 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
             break;
         }
         bestChange = std::min(bestChange, maxChange);
-        if (!std::isfinite(maxChange) || maxChange > 1e3 * bestChange) {
+        if (!std::isfinite(maxChange) || maxChange > 10.0 * bestChange) {
+            if (relaxation > kMinimumRelaxation) {
+                // Diverging at this α: damp and let it try again. `bestChange`
+                // is reset because the iteration being measured is now a
+                // different one, and judging the new α against the old one's
+                // best would trip the guard immediately.
+                relaxation *= 0.5;
+                bestChange = std::numeric_limits<double>::infinity();
+                continue;
+            }
             throw std::runtime_error(
-                "UnstructuredFvmBase: the non-orthogonal deferred correction is diverging, not "
-                "converging slowly -- the per-sweep change grew by more than three orders of "
-                "magnitude away from its best value. This is a property of the mesh, not of the "
-                "sweep cap: raising the cap makes it worse. See DIVIDA_TECNICA.md 3.3.");
+                "UnstructuredFvmBase: the non-orthogonal deferred correction is diverging even "
+                "under-relaxed to 1/64 -- the per-sweep change keeps growing past ten times its "
+                "best value at every damping level tried. This is a property of the mesh, not of "
+                "the sweep cap: raising the cap makes it worse. See DIVIDA_TECNICA.md 3.3.");
         }
     }
     return sweep;

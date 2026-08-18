@@ -470,6 +470,8 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("max_non_orthogonality", &UnstructuredCavitySolver3D::maxNonOrthogonality)
         // Whether the projection converged or merely ran out of correctors.
         .def("last_pressure_change", &UnstructuredCavitySolver3D::lastPressureChange)
+        // Below 1.0 means this mesh forced the correction to be damped.
+        .def("pressure_relaxation", &UnstructuredCavitySolver3D::pressureRelaxation)
         // How many cells fall back to Green-Gauss because their
         // least-squares stencil is rank-deficient. Not a curiosity: it was
         // 7% of the cavity and 12% of the channel, and those cells used to

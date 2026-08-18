@@ -464,6 +464,26 @@ não-ortogonalidade. Para usar malha de geometria real, o limite prático agora
 é a divergência da correção acima de não-ortogonalidade ~15, não a
 interpolação de face.
 
+
+**Atualização 2026-08-16: o bloqueio prático caiu.** A correção diferida
+ganhou sub-relaxação adaptativa — o fator multiplica a correção, portanto
+multiplica também o fator de contração do ponto fixo, e é reduzido pela metade
+sempre que a mudança por varredura cresce dez vezes acima do seu melhor valor.
+Adaptativo e não derivado da malha porque **três métricas estáticas já
+falharam** em separar uma malha que roda de uma que não roda
+(não-ortogonalidade, a razão |A_nonorth|/|A_orth| e a contagem de estêncils
+deficientes).
+
+| malha graduada | não-ortogonalidade | antes | depois |
+|---|---|---|---|
+| 6× | 4,9 | 282 varreduras | 282 varreduras |
+| 20× | 15,1 | **divergia** | 344 varreduras, rms 8,61e-02 |
+| 50× | **563,1** | divergia | 175 varreduras, rms 1,13e-01 |
+
+O limite prático que este item registrava — "a divergência da correção acima
+de não-ortogonalidade ~15" — subiu para além de 563. A atribuição
+skewness-versus-não-ortogonalidade continua aberta.
+
 ---
 
 ## 4. Estabilidade sobre margem nula
@@ -704,6 +724,37 @@ passo 25 em vez de 20. O raio espectral que medi é em torno do **repouso**, e
 o canal linearizado em torno do estado desenvolvido é outro operador. Medir
 ali é o próximo passo, e `loadState()` já o permite: carregar um estado
 desenvolvido, perturbar e iterar.
+
+
+**Atualização 2026-08-16: melhorou muito, não fechou, e o que resta está
+localizado.**
+
+Duas mudanças desta rodada mexeram no item. A convecção semi-implícita (4.2)
+levou o canal em jitter ±0,45 do passo 20 ao passo 292. E a correção diferida
+ganhou sub-relaxação adaptativa, **persistente entre passos** — um projeção
+que permite quatro varreduras por passo nunca aprende o amortecimento se o
+fator reinicia a cada passo, então ele é carregado, e `pressureRelaxation()`
+o expõe porque um valor abaixo de 1 é uma afirmação sobre a malha.
+
+Isso resolveu o lado da *difusão* de forma decisiva (ver 3.3: converge agora
+até não-ortogonalidade 563, contra 15 antes). **Não resolveu o solver de
+Navier-Stokes em malha muito distorcida**, e a medição diz por quê: em jitter
+±0,55 e acima o que dispara é o guarda de finitude do `step()`, não o da
+correção — ou seja, a amplificação restante **não está na correção de
+pressão**, que é a única coisa que a sub-relaxação toca.
+
+| jitter | raio espectral (4 correctores) | canal até t=2 |
+|---|---|---|
+| 0,25 | 0,981 | ok |
+| 0,45 | 0,974 | levanta no passo 292 |
+| 0,55 | 5,19 | levanta no passo 13 |
+| 0,65 | 44,05 | levanta no passo 25 |
+
+**O que fazer**: o raio espectral já é mensurável em torno do repouso, e o
+próximo corte é decompor o passo — medir o operador com a projeção desligada,
+o que exige poder pular a projeção. Isso separaria o preditor de momento da
+correção de velocidade por gradiente de célula, que é o único elemento do
+passo ainda não isolado.
 
 ### 4.4 Diferença central na convecção estruturada, acima de Re de célula 2 — MEDIDO e resolvido no solver 1D; falta portar para as cavidades
 

@@ -205,7 +205,7 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     // which is why it converges in a handful of iterations.
     const std::size_t pinnedCell = hasOutlet_ ? kNoPinnedCell : 0;
     solveDeferredCorrection(pressure_, rhs, pinnedCell, n, 1e-10, pressureCorrectors_,
-                            lastPressureChange_);
+                            lastPressureChange_, pressureRelaxation_);
 
     const std::vector<Vector3> pressureGradients = computeCellGradients(pressure_);
     for (std::size_t cell = 0; cell < n; ++cell) {

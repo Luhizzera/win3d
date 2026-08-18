@@ -211,6 +211,10 @@ public:
     // chosen from evidence instead of guessed.
     double lastPressureChange() const { return lastPressureChange_; }
 
+    // 1.0 when the non-orthogonal correction converged on its own; smaller
+    // when this mesh forced the iteration to be damped to converge at all.
+    double pressureRelaxation() const { return pressureRelaxation_; }
+
     // Net mass flux through every non-wall boundary face: negative where
     // fluid enters, positive where it leaves. For a steady incompressible
     // flow the two must cancel, which is the global check that outlets
@@ -266,6 +270,11 @@ private:
     double time_ = 0.0;
     ConvectionScheme convection_;
     std::size_t pressureCorrectors_;
+    // Carried across steps on purpose -- see solveDeferredCorrection. Exposed
+    // through pressureRelaxation() because a value below 1 is a statement
+    // about the mesh, and a caller comparing results across meshes needs to
+    // know the solver had to damp to get them.
+    mutable double pressureRelaxation_ = 1.0;
     double lastPressureChange_ = 0.0;
     double lastDt_ = 0.0;
     double maxWallSpeed_ = 0.0;
