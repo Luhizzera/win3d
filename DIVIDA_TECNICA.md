@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — CAUSA ISOLADA; a correção óbvia foi TESTADA E DESCARTADA em 2026-08-16
+### 4.3 NaN em malha muito distorcida — DUAS CORREÇÕES TESTADAS E DESCARTADAS em 2026-08-16; causa isolada, remédio ainda não
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -884,6 +884,52 @@ existem na literatura), ou (2) sub-relaxar especificamente a correção de
 velocidade, do mesmo jeito que a correção não-ortogonal do Poisson já é
 sub-relaxada — mais barato de testar e mais próximo do que já funcionou
 alhures neste item.
+
+
+**Segunda tentativa, e ela é mais informativa que a primeira porque falhou de
+um jeito diferente.**
+
+A primeira tentativa (reconstrução por fluxo de face) trocava o operador de
+correção por um adjunto ao operador de face — falhou ao piorar malhas já
+ruins. A segunda tentativa manteve o operador original (gradiente de mínimos
+quadrados) e tentou **iterá-lo com amortecimento**, exatamente o padrão que já
+funciona para a correção não-ortogonal do Poisson: um laço de correctores
+extras, cada um resolvendo uma correção de pressão contra o resíduo de
+divergência da velocidade *já corrigida*, aceito só se o resíduo encolhe,
+desfeito e re-tentado com metade da relaxação caso contrário — relaxação
+persistente entre passos.
+
+**Não funciona, e falha pior**: numa malha que **já convergia bem** (n=4 da
+suíte, 415 células, antes chegando a divergência ~7e-03 em 16 mil passos), o
+laço de correctores extras esgota o teto de 8 tentativas em **todo passo**,
+sem nunca atingir a tolerância, e a divergência cresce monotonicamente —
+4,6e-02 no passo 0, 1,1e-01 no passo 29, sem sinal de estabilizar. É pior que
+não fazer nada.
+
+**Por que isto é mais informativo que o primeiro fracasso**: o padrão
+"amortecer até parar de crescer" funciona para a correção não-ortogonal
+porque aquele mapa, perto do ponto fixo, tem um fator de contração
+essencialmente escalar — sub-relaxar por um fator α reduz o fator de
+crescimento pelo mesmo α, e "parou de crescer" é teste suficiente. **A
+composição interpolação-para-face → Poisson → gradiente-de-célula não parece
+ter essa estrutura**: iterá-la sem melhorar monotonicamente sugere autovalores
+complexos ou um subespaço onde reduzir α não move na direção certa — halving
+ingênuo baseado em "o resíduo cresceu, tente metade" não é a estratégia
+correta para esse tipo de operador. Confirma, por outro ângulo, que o problema
+não está na magnitude da correção (que sub-relaxação resolveria) mas na
+**direção**: o operador de correção aponta para um lugar que o operador de
+divergência não reconhece como progresso.
+
+**Revertido por inteiro.**
+
+**O que isso deixa para a próxima tentativa**: nem trocar o operador nem
+amortecer o existente resolveu sozinho. O caminho que resta e não foi tentado
+é medir os **autovalores** (não só o raio espectral) do operador
+projeção-sozinha nas malhas ruins — se de fato há um par complexo dominante,
+a estratégia certa não é escalar a correção, é girar a direção (um passo tipo
+GMRES/Anderson na correção, não Richardson simples). Isso é uma ferramenta de
+diagnóstico nova (não existe hoje: só a magnitude ρ é medida, via potência
+iterada), e vale mais que uma terceira tentativa às cegas.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
