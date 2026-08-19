@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — TRÊS CORREÇÕES TESTADAS E DESCARTADAS; a causa da resistência agora está clara
+### 4.3 NaN em malha muito distorcida — QUATRO CORREÇÕES TESTADAS E DESCARTADAS; a causa da resistência agora está clara, e mais funda do que se pensava
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -995,6 +995,99 @@ malha em si (item 3.3 mostrou a correção não-ortogonal convergindo até
 não-ortogonalidade 563 com o amortecimento certo — aquele problema *é*
 escalar). É especificamente o acoplamento pressão-velocidade desta projeção,
 que não é.
+
+
+**Quarta tentativa: o Krylov genuíno que a terceira tentativa pedia — e ele
+resolve o problema errado.** Este é o achado mais importante do item até
+agora, porque não é "a correção não funcionou": é "a correção estava mirando
+a métrica errada o tempo todo", o que muda o diagnóstico de toda a
+investigação anterior.
+
+**O que foi construído.** `UnstructuredFvmBase` ganhou um `gmres()` genérico
+— GMRES(m) reiniciado, matriz-livre, extraído fielmente do
+`ImplicitConvectionDiffusionSolver1D::solveGmresOnce()` já testado (Gram-Schmidt
+modificado, rotações de Givens incrementais). `UnstructuredCavitySolver3D`
+ganhou um segundo corretor, depois do corretor CG original (mantido
+bit-idêntico): mede o resíduo de divergência remanescente após a primeira
+correção e, se não-desprezível, resolve por GMRES um `correctionOperator`
+construído para ser a parte genuinamente linear de `projectionDivergenceRhs`
+— a divergência que uma correção adicional de pressão `x` introduziria via
+`-dt·∇x`. Dois bugs de implementação foram encontrados e corrigidos *durante*
+esta mesma tentativa, o que já é informativo por si:
+
+1. **Erro de sinal**: a primeira versão resolvia `correctionOperator(δp) =
+   +resíduo` em vez de `= -resíduo` — a correção *somava* à divergência em vez
+   de cancelá-la, e como isso realimenta a cada passo de tempo, o campo
+   explodia para ~1e60 em poucos passos mesmo em malha boa. Corrigido.
+2. **Operador que mentia sobre ser linear**: `computeCellGradients()` aplica
+   um corte não-linear (limita o recuo Green-Gauss à maior inclinação que a
+   célula enxerga — exatamente o limite do item 1.3/4.3 anterior) nas células
+   de estêncil deficiente. Usar essa função dentro do operador do GMRES viola
+   a premissa fundamental de um método de Krylov: com o sinal corrigido, a
+   malha boa (415 células, 29 estênceis deficientes) que sempre convergiu bem
+   **regrediu** — divergência 1,86e-01 contra o teto de 5e-2 que ela sempre
+   cumpriu. Corrigido expondo uma variante `computeCellGradients(field,
+   clampFallback=false)` usada só dentro do operador de correção, com o
+   incremento de velocidade aplicado depois do mesmo jeito (não recomputando
+   o gradiente clampeado do total).
+
+**Depois dos dois bugs corrigidos, medi de novo — e o número não mudou em
+nada perceptível** (divergência 1,860e-01, idêntica às três primeiras casas
+decimais, antes e depois do segundo bug). Isso é o sinal de que havia um
+terceiro problema, mais fundamental que os outros dois, e a instrumentação
+direta (script Python chamando `last_coupling_iterations()`,
+`last_coupling_residual_before/after()`, `max_face_divergence()` a cada
+passo) o expôs:
+
+| passo | iterações GMRES | resíduo antes (alvo do GMRES) | resíduo depois | `max_face_divergence()` (métrica real) |
+|---|---|---|---|---|
+| 0 | 200 (teto) | 0,0729 | 2,29e-09 | 0,4358 |
+| 5 | 200 (teto) | 0,0784 | 2,17e-09 | 0,2923 |
+| 14 | 200 (teto) | 0,0849 | 2,19e-10 | 0,2239 |
+
+**O GMRES resolve exatamente o que foi pedido — o resíduo que ele mira cai de
+~0,08 para ~1e-9 a cada passo, um fator de 10⁷ — e a divergência real
+(`max_face_divergence()`) mal se move.** A razão é estrutural, não numérica:
+`projectionDivergenceRhs()` (o alvo do GMRES, herdado sem alteração da
+construção original do lado direito de Poisson) chama
+`faceMassFluxes(velocity, pressure_, 0.0)` — **dt = 0 fixo no termo
+Rhie-Chow**, decisão original e correta para montar o RHS a partir do
+preditor sem pressão. Mas `max_face_divergence()` — a métrica que de fato
+importa, e a mesma que a convecção usa para o fluxo de massa por face — chama
+`faceMassFluxes(velocity_, pressure_, lastDt_)`, com o **dt real** no termo
+Rhie-Chow. São duas definições de fluxo diferentes por construção, não por
+acidente: o corretor CG original **já zera o resíduo dt=0 até 1e-10** (é
+literalmente o critério de parada da correção diferida) — por isso o GMRES,
+mirando esse mesmo resíduo, não tinha quase nada a fazer, e resolveu-o ainda
+melhor sem que isso tivesse qualquer efeito sobre a divergência que a
+instabilidade do item 4.3 de fato mede.
+
+**Revertido por inteiro** (as cinco alterações — `gmres()`,
+`projectionDivergenceRhs()`, o `correctionOperator`, os três getters de
+diagnóstico e seus bindings Python) via cópia do conteúdo commitado por cima
+do working tree, com `git diff` confirmando zero diferença de conteúdo antes
+do commit deste registro. Suíte de volta a 12/12.
+
+**O que isto muda para a próxima tentativa.** A hipótese da não-adjunção
+(gradiente de célula vs. divergência de face) segue de pé, mas incompleta: há
+uma segunda incompatibilidade, independente dela, entre **duas definições de
+fluxo** dentro do próprio código — uma com o termo Rhie-Chow em dt=0 (usada
+para montar e resolver o Poisson) e outra com dt real (usada para medir a
+divergência e para a convecção). Um GMRES apontado corretamente precisa
+resolver contra a *segunda* definição, não a primeira — o que por sua vez
+exige decidir se o RHS original do Poisson (que usa dt=0 de propósito, por um
+motivo documentado e válido: o preditor não carrega correção de pressão
+nenhuma) também deveria mudar, ou se apenas o resíduo pós-correção deve ser
+reavaliado com dt real antes de alimentar o Krylov. Qualquer um dos dois
+caminhos é uma mudança na formulação do Poisson desta projeção, não mais um
+ajuste no corretor extra — escopo maior do que as quatro tentativas feitas
+até aqui, e não tentado.
+
+**As quatro tentativas, juntas, delimitam o problema com mais precisão que
+as três**: não é a malha em si (item 3.3). Não é falta de um método de
+Krylov (quarta tentativa: o Krylov funciona perfeitamente para o problema que
+recebeu). É o acoplamento pressão-velocidade desta projeção **e** uma
+inconsistência de definição de fluxo dentro dele, ambas ainda sem correção.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
