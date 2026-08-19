@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — DUAS CORREÇÕES TESTADAS E DESCARTADAS em 2026-08-16; causa isolada, remédio ainda não
+### 4.3 NaN em malha muito distorcida — TRÊS CORREÇÕES TESTADAS E DESCARTADAS; a causa da resistência agora está clara
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -930,6 +930,71 @@ a estratégia certa não é escalar a correção, é girar a direção (um passo
 GMRES/Anderson na correção, não Richardson simples). Isso é uma ferramenta de
 diagnóstico nova (não existe hoje: só a magnitude ρ é medida, via potência
 iterada), e vale mais que uma terceira tentativa às cegas.
+
+
+**Correção do que este documento afirmou antes**: "sugere autovalores
+complexos" estava errado, e a medição que o corrige está registrada abaixo.
+Isso importa porque orientou mal a segunda tentativa.
+
+**A medição que corrige**: rastreando o ângulo entre iterados sucessivos da
+potência iterada (não só a magnitude), `cos(ângulo) → 1,00000` em toda malha
+testada — a direção do estado converge para um vetor fixo, não gira. Autovalor
+dominante **real**, não complexo. A composição interpolação-para-face →
+Poisson → gradiente-de-célula não tem a estrutura que a hipótese anterior
+propunha.
+
+**Terceira tentativa, mais cuidadosa que a segunda**: em vez de amortecer a
+partir de α=1 (que a medição isolada mostrou divergir 2,5–5,8× num único
+corretor extra, mesmo em malha boa), medi α diretamente antes de tentar de
+novo:
+
+| α | resíduo depois / antes (malha boa, vários passos) |
+|---|---|
+| 1,0 | 2,5×–5,8× |
+| 0,4 | 1,2×–2,4× |
+| 0,2 | 0,8×–1,3× |
+| 0,15 | 0,8×–1,1× |
+
+Contração real, ainda que fraca, em torno de α ≈ 0,15–0,2 — medida um
+corretor de cada vez, a partir do estado que o primeiro corretor já produziu.
+Implementei o laço com α inicial 0,15 (não 1,0) e até 16 correctores (a
+contração fraca, ~0,85×, precisa de mais iterações que a correção
+não-ortogonal do Poisson, que corta pela metade a cada uma).
+
+**Também não funciona, e de um jeito que ensina algo específico**: mesmo na
+malha *boa* (jitter 0,25, que sempre convergiu bem), em marcha real no tempo
+(sem o protocolo sintético de potência iterada) a divergência **cresce**:
+8,5e-02 no passo 0 → 2,6e-01 no passo 14, sempre esgotando os 16 correctores,
+α nunca saindo de 0,15 — ou seja, o laço nunca detecta que está piorando o
+suficiente para amortecer mais, mas está.
+
+**Por que a medição isolada (que era boa) não previu isto**: o teste de um
+corretor mede a contração a partir de um resíduo *genérico*, cuja direção é
+dominada pelas componentes que o primeiro corretor já resolveu bem. **Cadear
+muitos correctores filtra essas componentes e isola progressivamente a que
+sobrou** — exatamente o mesmo mecanismo, em espírito, de por que a potência
+iterada revela o autovalor dominante em vez da média: iteração repetida
+converge para o pior caso, não para o caso típico. Se essa componente
+remanescente tiver, sob α=0,15, um fator de amplificação *acima* de 1 — o que
+a medição de um único corretor, dominada por outras direções, não conseguiria
+enxergar — o laço a persegue e amplifica precisamente por insistir nela passo
+após passo.
+
+**O que isto estabelece, e é a conclusão real deste item**: **relaxação
+escalar não pode consertar isto**, porque o operador tem comportamento
+diferente por direção no espaço de resíduos — nenhum α único serve para
+todas. Um remédio de fato precisa de um método que adapte a *direção* da
+correção, não só sua magnitude: um Krylov genuíno (GMRES ou BiCGSTAB, que este
+projeto já tem implementado para `ImplicitConvectionDiffusionSolver1D`)
+aplicado ao sistema acoplado pressão-velocidade não-simétrico, em vez de CG
+mais um escalar por fora. É trabalho de escopo maior — um solver novo, não um
+parâmetro — e não foi tentado aqui.
+
+**As três tentativas, juntas, delimitam o problema com precisão**: não é a
+malha em si (item 3.3 mostrou a correção não-ortogonal convergindo até
+não-ortogonalidade 563 com o amortecimento certo — aquele problema *é*
+escalar). É especificamente o acoplamento pressão-velocidade desta projeção,
+que não é.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
