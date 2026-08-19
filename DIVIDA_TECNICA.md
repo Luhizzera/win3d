@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — CAUSA ISOLADA em 2026-08-16: a correção de velocidade da projeção
+### 4.3 NaN em malha muito distorcida — CAUSA ISOLADA; a correção óbvia foi TESTADA E DESCARTADA em 2026-08-16
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -823,6 +823,67 @@ operador que a projeção resolveu — reconstruir a correção de célula a par
 dos fluxos de face que foram zerados, em vez do gradiente de mínimos
 quadrados. É reescrever o acoplamento pressão-velocidade, agora sobre causa
 medida em vez de suspeita.
+
+
+**Atualização: a correção que a isolação sugeria foi implementada e medida —
+e não funciona.** Registro porque é achado, não silêncio: a hipótese era
+sólida e a medição a derrubou, o que é exatamente o padrão que os itens 3.2 e
+3.1 já mostraram (inferência plausível, decidida por medição em vez de
+argumento).
+
+**A hipótese.** A correção de velocidade usa `computeCellGradients(pressure_)`
+— mínimos quadrados sobre diferenças célula-a-célula ao longo de `d` — para
+corrigir `velocity_[cell] = velocityStar[cell] - ∇p[cell]·dt`. Mas o Poisson
+foi resolvido contra o operador **de face**. Teoria de métodos de projeção diz
+que a composição divergência→Poisson→gradiente só é um projetor não-expansivo
+(ρ ≤ 1 garantido) quando divergência e gradiente são **adjuntos discretos**; a
+divergência daqui é construída de fluxos de face e o gradiente de mínimos
+quadrados não é o adjunto dela.
+
+**A correção testada**: reconstruir a correção por célula a partir dos
+próprios fluxos de face corrigidos, ao estilo `fvc::reconstruct` do OpenFOAM —
+ajustar por mínimos quadrados o vetor `v` que melhor reproduz
+`v·n_f ≈ deltaFlux_f/|A_f|` em cada face da célula, com `deltaFlux_f` sendo a
+correção exata que a projeção aplicou àquele fluxo (0 numa parede, o termo de
+gradiente consistente em face interior ou de saída). A matriz
+`M = Σ_f n_f⊗n_f` depende só da geometria e foi extraída como estêncil
+compartilhado; a extração do inversor 3×3 comum (`invertSymmetric3x3`) que a
+viabilizou **foi mantida** — verificada bit-idêntica em toda a suíte e é
+limpeza de código legítima independente do resultado abaixo.
+
+**Medido — raio espectral, antes e depois:**
+
+| malha | antes | depois |
+|---|---|---|
+| jitter 0,25 | 0,9791 | 0,9826 |
+| jitter 0,45 | 0,9729 | 0,9751 |
+| jitter 0,55 | **5,1924** | 4,4704 |
+| jitter 0,65 | **2,4259** | **32,9884** |
+| jitter 0,75 | — | 12,3937 |
+
+**Não funciona.** Melhora em jitter 0,55, mas **piora em treze vezes** em
+jitter 0,65. Verificado que não é bug óbvio nem estêncil mal condicionado: zero
+células inválidas na malha 0,65, e as células que dominam o modo instável têm
+número de condição do estêncil de fluxo entre 2 e 29 — tão bem-condicionado
+quanto o estêncil de gradiente original. **A reconstrução por fluxo de face
+não é universalmente melhor, é apenas um operador diferente**, com sua própria
+estrutura de acoplamento entre células que pode amplificar em topologias que a
+versão anterior não amplificava.
+
+**Revertido**: a mudança na projeção foi descartada por inteiro. O código de
+`UnstructuredCavitySolver3D` volta ao estado anterior; só a extração do
+inversor 3×3 compartilhado permanece, verificada bit-idêntica.
+
+**O que isso ensina para a próxima tentativa**: a hipótese da adjunção
+continua matematicamente correta como explicação de *por que* ρ pode exceder
+1, mas "usar fluxos de face em vez de gradiente de célula" não é a única forma
+de restaurar a adjunção, e a forma testada introduz seu próprio modo de
+amplificação. Duas direções ficam abertas e não testadas: (1) um peso
+diferente no ajuste de mínimos quadrados do fluxo (o `1/|A_f|²` — variantes
+existem na literatura), ou (2) sub-relaxar especificamente a correção de
+velocidade, do mesmo jeito que a correção não-ortogonal do Poisson já é
+sub-relaxada — mais barato de testar e mais próximo do que já funcionou
+alhures neste item.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 

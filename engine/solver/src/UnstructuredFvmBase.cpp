@@ -156,33 +156,38 @@ void UnstructuredFvmBase::buildGradientStencils(bool useBoundaryValues) {
 
     for (std::size_t cell = 0; cell < n; ++cell) {
         const Sym& m = matrices[cell];
-        // Cofactors of a symmetric 3x3.
-        const double c11 = m.yy * m.zz - m.yz * m.yz;
-        const double c12 = m.xz * m.yz - m.xy * m.zz;
-        const double c13 = m.xy * m.yz - m.yy * m.xz;
-        const double det = m.xx * c11 + m.xy * c12 + m.xz * c13;
-
-        // Rank-deficient when the neighbour directions are too close to
-        // coplanar to pin all three components -- scaled by the matrix's own
-        // magnitude so the test is dimensionless rather than an absolute
-        // threshold that would depend on the mesh's units.
-        const double scale = m.xx + m.yy + m.zz;
-        if (scale <= 0.0 || std::fabs(det) < 1e-12 * scale * scale * scale) {
-            gradientMatrixInverse_[cell].valid = false;
+        gradientMatrixInverse_[cell] = invertSymmetric3x3(m.xx, m.xy, m.xz, m.yy, m.yz, m.zz);
+        if (!gradientMatrixInverse_[cell].valid) {
             ++deficientStencilCount_;
-            continue;
         }
-
-        const double inverseDet = 1.0 / det;
-        SymmetricInverse& inverse = gradientMatrixInverse_[cell];
-        inverse.xx = c11 * inverseDet;
-        inverse.xy = c12 * inverseDet;
-        inverse.xz = c13 * inverseDet;
-        inverse.yy = (m.xx * m.zz - m.xz * m.xz) * inverseDet;
-        inverse.yz = (m.xy * m.xz - m.xx * m.yz) * inverseDet;
-        inverse.zz = (m.xx * m.yy - m.xy * m.xy) * inverseDet;
-        inverse.valid = true;
     }
+}
+
+UnstructuredFvmBase::SymmetricInverse UnstructuredFvmBase::invertSymmetric3x3(double xx, double xy,
+                                                                              double xz, double yy,
+                                                                              double yz, double zz) {
+    // Cofactors of a symmetric 3x3.
+    const double c11 = yy * zz - yz * yz;
+    const double c12 = xz * yz - xy * zz;
+    const double c13 = xy * yz - yy * xz;
+    const double det = xx * c11 + xy * c12 + xz * c13;
+
+    SymmetricInverse inverse;
+    const double scale = xx + yy + zz;
+    if (scale <= 0.0 || std::fabs(det) < 1e-12 * scale * scale * scale) {
+        inverse.valid = false;
+        return inverse;
+    }
+
+    const double inverseDet = 1.0 / det;
+    inverse.xx = c11 * inverseDet;
+    inverse.xy = c12 * inverseDet;
+    inverse.xz = c13 * inverseDet;
+    inverse.yy = (xx * zz - xz * xz) * inverseDet;
+    inverse.yz = (xy * xz - xx * yz) * inverseDet;
+    inverse.zz = (xx * yy - xy * xy) * inverseDet;
+    inverse.valid = true;
+    return inverse;
 }
 
 std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector<double>& field) const {

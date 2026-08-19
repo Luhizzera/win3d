@@ -195,6 +195,16 @@ protected:
         }
     };
 
+    // Inverse of a symmetric 3x3 matrix given by its six unique components,
+    // via cofactor expansion. `invalid` (false) when the matrix is singular
+    // relative to its own magnitude -- scaled by scale^3 so the test is
+    // dimensionless rather than an absolute threshold that would depend on
+    // the mesh's units. Shared by every symmetric 3x3 solve in this class:
+    // the least-squares gradient stencil below, and the flux-reconstruction
+    // stencil UnstructuredCavitySolver3D builds on top of this base.
+    static SymmetricInverse invertSymmetric3x3(double xx, double xy, double xz, double yy, double yz,
+                                                double zz);
+
     // Builds the inverse-distance-weighted least-squares stencil: the fit
     // that best reproduces the measured differences to every neighbour,
     // minimising sum_i w_i (grad(phi)_P . d_i - (phi_i - phi_P))^2 with
