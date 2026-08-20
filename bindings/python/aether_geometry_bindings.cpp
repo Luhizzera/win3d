@@ -18,6 +18,16 @@ PYBIND11_MODULE(aether_geometry_py, m) {
         .def("vertex_count", &TriangleMesh::vertexCount)
         .def("triangle_count", &TriangleMesh::triangleCount)
         .def("vertex", &TriangleMesh::vertex)
+        // Exposes a triangle's three vertex indices as a plain tuple rather
+        // than binding the Triangle struct itself -- this is the one piece
+        // of TriangleMesh connectivity Python couldn't see at all before
+        // (only vertex positions and counts were bound), and a tuple is all
+        // a caller building facets for DelaunayTetrahedralization3D needs.
+        .def("triangle",
+             [](const TriangleMesh& mesh, std::size_t index) {
+                 const Triangle& t = mesh.triangle(index);
+                 return std::make_tuple(t.vertices[0], t.vertices[1], t.vertices[2]);
+             })
         .def("face_normal", &TriangleMesh::faceNormal)
         .def("face_area", &TriangleMesh::faceArea)
         .def("surface_area", &TriangleMesh::surfaceArea)

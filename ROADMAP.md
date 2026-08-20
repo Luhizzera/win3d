@@ -351,6 +351,70 @@ tornar prático rodar malhas finas por tempos longos, **difusão implícita**:
 o limite difusivo explícito escala com o quadrado da menor célula, o que é a
 restrição real aqui, não a capacidade do esquema.
 
+### Estado em 2026-08-20: pipeline geometria→malha→solver conectado pela primeira vez; dois bloqueios novos, precisos, ainda não corrigidos
+
+**O bloqueio (1) registrado acima (sem condição de saída) já não existe** —
+`UnstructuredCavitySolver3D` ganhou `is_outlet`/`outletPressure` em trabalho
+posterior a esta entrada (ver DIVIDA_TECNICA.md 1.1, 2.3). Esta nota do
+roadmap ficou desatualizada nesse ponto; corrigido aqui. O que **ainda**
+falta do lado do solver: domínio com saída em malha muito distorcida segue
+com um raio espectral instável (DIVIDA_TECNICA.md 4.3, correção restrita a
+domínio fechado por ora).
+
+**O bloqueio (2) (tetraedralização restrita preservando a superfície
+importada) foi exercitado de ponta a ponta pela primeira vez**, via novo
+`python/aether/pipeline.py::mesh_flow_around_object()`: importa/constrói uma
+`TriangleMesh`, tetraedraliza pontos do objeto + cantos de uma caixa
+delimitadora, recupera as facetas do objeto (`recover_facets`), esculpe o
+interior do objeto (`remove_region`) e devolve um `TetrahedralMesh` pronto
+para `UnstructuredCavitySolver3D` — o encadeamento que **não existia
+nenhum código ligando** antes desta entrada (confirmado por grep: `load_stl`/
+`load_obj` não eram usados em lugar nenhum fora dos próprios bindings).
+
+Testado num icosaedro real (12 vértices, 20 triângulos, convexo, estanque) —
+não a rede jitterada canônica que toda a suíte usa até aqui:
+- 0 facetas não recuperadas.
+- Volume esculpido bate com caixa-menos-objeto **essencialmente exato**
+  (1061,111279737648 vs. 1061,1112797376475).
+- Classificação de face por posição (`classify_boundary_face`) separa
+  corretamente as 20 faces do objeto das 12 faces da caixa (2 por lado, como
+  esperado de uma caixa cortada por um tetraedro por face).
+
+**Dois bloqueios novos, medidos, não presentes na malha jitterada canônica
+que toda a validação anterior usou**:
+
+1. **Malha sem refino interior explode o solver** — não é o item 4.3
+   (não-ortogonalidade máxima medida em 0,80, zero estêncil deficiente,
+   ambos bem dentro do que já roda estável em outros lugares). É razão de
+   volume entre células: **80x** entre a menor e a maior, porque só os
+   vértices do objeto e os 8 cantos da caixa entram como pontos —
+   praticamente toda a caixa vazia vira poucos tetraedros enormes. Instalado
+   e medido diretamente: divergência por faces foi a **3,9e6** em 50 passos.
+   Uma malha real de CFD nunca tetraedraliza só o contorno; sempre distribui
+   pontos de fundo no volume, e é exatamente essa etapa que falta aqui.
+2. **Refino por pontos de Steiner não é seguro perto de paredes
+   recuperadas.** Tentativa: inserir o centroide de cada tetraedro grande
+   como ponto de Steiner (`insert_steiner_point`, já validado para outros
+   usos) até reduzir a razão de volume. Resultado medido: **5 das 20 facetas
+   do objeto, antes recuperadas, desapareceram** depois do refino
+   (`missing_facets()` confirmou). `insertSteinerPoint()` não tem noção
+   nenhuma de "parede protegida" — sua retriangulação local pode atravessar
+   uma faceta que `remove_region()` já havia respeitado. Isto é uma lacuna
+   real e específica na ferramenta de refino, não um bug do pipeline novo.
+
+**Próximo passo concreto para fechar o item 2 do portão**: refino
+consciente de parede, de uma das duas formas — (a) distribuir os pontos de
+fundo **antes** de `tetrahedralize()` (grade de fundo graduada por
+distância ao objeto, mais pontos perto da superfície) em vez de refinar
+depois via Steiner, evitando o problema por completo; ou (b) verificar
+`missing_facets()` após cada inserção de Steiner e re-recuperar
+imediatamente as que se perderam. (a) é mais simples de implementar e mais
+parecido com o que geradores de malha reais fazem; (b) reaproveita mais
+código já validado. Nenhum dos dois foi tentado ainda.
+
+Suíte completa (12 suítes, incluindo o novo binding
+`TriangleMesh::triangle()` que este trabalho precisou adicionar): 12/12.
+
 ## Fase 4 — GPU para valer
 
 **Objetivo**: (4.1) solve de CG inteiramente residente na GPU; (4.2)

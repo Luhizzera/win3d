@@ -66,6 +66,7 @@ try:
     from aether_analysis_py import FieldStatistics, checkerboard_index, compute_statistics, max_courant_number, summarize_field
     from aether_ml_py import MultiLayerPerceptron
     from aether_plugin_py import DiagnosticInfo, PluginHost
+    from aether.pipeline import FlowDomain, MeshGenerationError, classify_boundary_face, mesh_flow_around_object
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "aether_*_py extensions not found. Build the C++ core first:\n"
@@ -151,4 +152,8 @@ __all__ = [
     "DiagnosticInfo",
     "PoissonOperatorCuda",
     "GPU_AVAILABLE",
+    "mesh_flow_around_object",
+    "classify_boundary_face",
+    "FlowDomain",
+    "MeshGenerationError",
 ]
