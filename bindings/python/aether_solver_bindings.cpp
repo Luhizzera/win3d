@@ -494,6 +494,12 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("last_pressure_change", &UnstructuredCavitySolver3D::lastPressureChange)
         // Below 1.0 means this mesh forced the correction to be damped.
         .def("pressure_relaxation", &UnstructuredCavitySolver3D::pressureRelaxation)
+        // The GMRES coupling correction from DIVIDA_TECNICA.md 4.3: how many
+        // matrix-vector products the last step's correction used (0 means
+        // the mesh did not need one), and the residual before/after.
+        .def("last_coupling_iterations", &UnstructuredCavitySolver3D::lastCouplingIterations)
+        .def("last_coupling_residual_before", &UnstructuredCavitySolver3D::lastCouplingResidualBefore)
+        .def("last_coupling_residual_after", &UnstructuredCavitySolver3D::lastCouplingResidualAfter)
         // How many cells fall back to Green-Gauss because their
         // least-squares stencil is rank-deficient. Not a curiosity: it was
         // 7% of the cavity and 12% of the channel, and those cells used to

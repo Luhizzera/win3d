@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — QUATRO CORREÇÕES TESTADAS E DESCARTADAS; a causa da resistência agora está clara, e mais funda do que se pensava
+### 4.3 NaN em malha muito distorcida — RESOLVIDO para domínios fechados; domínios com saída seguem em aberto, com causa identificada
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -1089,6 +1089,91 @@ Krylov (quarta tentativa: o Krylov funciona perfeitamente para o problema que
 recebeu). É o acoplamento pressão-velocidade desta projeção **e** uma
 inconsistência de definição de fluxo dentro dele, ambas ainda sem correção.
 
+
+**Quinta tentativa: mirar a definição de fluxo certa — resolve para domínio
+fechado, expõe uma nova causa em domínio com saída.**
+
+A quarta tentativa mostrou exatamente o que faltava: o GMRES precisa mirar
+`faceMassFluxes(·, ·, dt real)` — a mesma definição que `maxFaceDivergence()`
+usa — não `faceMassFluxes(·, ·, 0)`, que o primeiro corretor já zera por
+construção. `projectionDivergenceRhs()` virou `divergenceOfFlux(velocity,
+pressure, fluxDt, outerDt)`, com `fluxDt` e `outerDt` independentes:
+`fluxDt=0` reproduz o RHS original do primeiro corretor (inalterado,
+bit-idêntico); `fluxDt=dt` reproduz exatamente `lastDt_`, o que
+`max_face_divergence()` mede. O `correctionOperator` agora varia **os dois**
+argumentos de `faceMassFluxes` (velocidade *e* pressão) — a quarta tentativa
+variava só a velocidade e deixava a pressão em `pressure_`, descartando
+silenciosamente a própria contribuição do termo dependente de `fluxDt` à
+linearização.
+
+**Medido — raio espectral em torno do repouso, malha fechada:**
+
+| malha | antes (quarta tentativa / linha de base) | depois (quinta tentativa) |
+|---|---|---|
+| jitter 0,25 | 0,981 | **0,127** |
+| jitter 0,45 | 0,974 | **0,748** |
+| jitter 0,55 | 5,19 | **0,476** |
+| jitter 0,65 | 44,05 | **0,580** |
+| jitter 0,75 | 12,39 | **0,270** |
+
+Toda malha testada, incluindo as duas que mais divergiam, cai bem abaixo de
+1. Cavidade n=4 (415 células): divergência por faces caiu de dentro da
+margem que já passava para **6,19e-05**. `cavidade fechada` nos bindings
+Python: **4,35e-13** — precisão de máquina, quando antes desta rodada era
+3,49e-01 na mesma malha.
+
+**Dois bugs de implementação apareceram e foram corrigidos no caminho**: o
+mesmo erro de sinal da quarta tentativa (`correctionOperator(δp) = -resíduo`,
+não `= +resíduo`) e o mesmo gradiente clampeado sem linearidade
+(`computeCellGradients(x, false)` para o operador, incremento aplicado do
+mesmo jeito na velocidade). Ambos já eram conhecidos da tentativa anterior;
+registrar que reapareceram é o motivo de tê-los corrigido rápido desta vez.
+
+**O que não fecha: domínio com saída.** No canal, o GMRES estagna cedo — 63
+de até 182 iterações possíveis num único ciclo de reinício, **não** por
+esgotar o orçamento (aumentar o reinício de 30 para 200 e o teto de 200 para
+2000 iterações não mudou o resultado em nada perceptível). É quebra
+(`breakdown`) ou pivô numericamente nulo, não estagnação por falta de
+direções de Krylov. Rastreado a uma causa específica:
+`computeCellGradients(x, false)` — usado tanto para construir o operador
+quanto para aplicar a correção — busca o valor de contorno de uma face de
+saída no estêncil de mínimos quadrados a partir de `boundaryValueCache_`,
+que foi fixado em `outletPressure_` na construção do solver. Para o campo
+físico de pressão isso é exatamente certo; para `x`, um campo de *correção*
+que deveria responder a si mesmo (idealmente contorno zero, não
+`outletPressure_`), o estêncil usa um valor constante e alheio ao próprio
+`x`, o que deixa o operador mal-condicionado exatamente onde o posto de um
+domínio com saída normalmente vem. Medido, não só suposto: o desbalanço de
+massa do canal, que fechava a 6e-14 antes desta rodada, ficou em torno de
+0,01–0,1% e não melhorou com mais iterações — consistente com o operador
+convergindo para o resíduo mínimo que essa quase-singularidade permite, não
+com falta de orçamento.
+
+**Decisão tomada por medição, não por suposição**: a correção de acoplamento
+agora só roda quando `pinnedCell != kNoPinnedCell` (domínio fechado, sem
+saída — exatamente onde a quinta tentativa foi provada). Num domínio com
+saída o passo volta a ser bit-idêntico ao comportamento anterior a todo este
+item — verificado: canal fecha a 6,475e-14 nos testes C++ e a ~4e-13 nos
+testes Python em 2, 4 e 16 correctores (era 6e-14/1e-13 antes de qualquer
+tentativa deste item), e a malha muito distorcida (jitter 0,65, com saída)
+continua recusando em vez de propagar NaN no passo 25, exatamente como antes.
+Suíte: 12/12.
+
+**O que fica para a próxima tentativa**: uma variante de
+`computeCellGradients` cujo estêncil, numa face de saída, use o valor de
+contorno consistente com o campo que está sendo diferenciado -- zero para um
+campo de correção, `outletPressure_` só para a pressão física -- em vez de
+sempre `boundaryValueCache_`. Com isso o `correctionOperator` recupera posto
+pleno numa saída do mesmo jeito que o Laplaciano original recupera via
+`boundaryEntersOperator`, e a quinta tentativa deveria se generalizar sem
+precisar de uma sexta reformulação.
+
+**Custo**: a suíte C++ foi de ~26s para ~55-60s -- o GMRES roda a cada passo
+em toda malha fechada, mesmo as que já convergiam bem, porque medir o
+resíduo real primeiro (e pular quando desprezível) ainda não foi ligado a
+essa decisão; hoje só a malha ter ou não saída decide se ele roda. Aceitável
+para a suíte atual; vale revisitar se um caso maior tornar isso o gargalo.
+
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a
@@ -1426,8 +1511,9 @@ Por dependência, não por tamanho:
 3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
 4. ~~**5.2** (bindings)~~ — FEITO, e já pagou: encontrou 5.4 na primeira execução
 5. ~~**2.3** (pressão da saída no estêncil)~~ — FEITO, e dissolveu o 5.4
-6. ~~**4.3** (NaN em malha distorcida)~~ — DIAGNOSTICADO e contido; a causa
-   segue aberta e precisa de uma API de carregar estado para ser medida
+6. ~~**4.3** (NaN em malha distorcida)~~ — RESOLVIDO para domínio fechado
+   (raio espectral 44,05 → 0,58 em jitter 0,65); domínio com saída contido
+   (recusa em vez de NaN, comportamento inalterado) mas não corrigido
 7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
 8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
 9. ~~**4.1** (margem nos estruturados)~~ — FEITO; abriu o 4.4

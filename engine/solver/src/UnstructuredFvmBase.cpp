@@ -190,13 +190,20 @@ UnstructuredFvmBase::SymmetricInverse UnstructuredFvmBase::invertSymmetric3x3(do
     return inverse;
 }
 
-std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector<double>& field) const {
+std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector<double>& field,
+                                                                bool clampFallback) const {
     // The Green-Gauss fallback is only built when this mesh actually has a
     // cell that needs it -- it costs two full passes over the faces.
     std::vector<Vector3> fallback;
     std::vector<double> steepestSlope;
     if (deficientStencilCount_ > 0) {
         fallback = greenGaussGradients(field);
+        if (!clampFallback) {
+            // See computeCellGradients' declaration: an unclamped caller
+            // gets an unconditionally-passing bound instead of a duplicated
+            // fallback loop below.
+            steepestSlope.assign(field.size(), std::numeric_limits<double>::infinity());
+        } else {
         // **The bound the fallback is held to, and why it has to exist.**
         // Green-Gauss on a cell with one or two interior neighbours is not a
         // gradient estimate so much as a guess: its magnitude scales with
@@ -227,6 +234,7 @@ std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector
             const double slope =
                 std::fabs(boundaryValueCache_[face.meshFace] - field[face.cell]) / face.distance;
             steepestSlope[face.cell] = std::max(steepestSlope[face.cell], slope);
+        }
         }
     }
 

@@ -173,53 +173,68 @@ std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(
     return x;
 }
 
-void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& velocityStar, double dt) {
-    const std::size_t n = velocityStar.size();
-
-    // Right-hand side: the face-flux divergence of the predicted velocity.
-    // Plain interpolation here (dt = 0 in the Rhie-Chow term) because the
-    // predictor carries no pressure correction to be consistent with.
-    const std::vector<double> starFluxes = faceMassFluxes(velocityStar, pressure_, 0.0);
+std::vector<double> UnstructuredCavitySolver3D::divergenceOfFlux(const std::vector<Vector3>& velocity,
+                                                                   const std::vector<double>& pressure,
+                                                                   double fluxDt, double outerDt) const {
+    const std::size_t n = velocity.size();
+    const std::vector<double> fluxes = faceMassFluxes(velocity, pressure, fluxDt);
     std::vector<double> rhs(n, 0.0);
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
-        rhs[interiorFaces_[i].owner] -= starFluxes[i] / dt;
-        rhs[interiorFaces_[i].neighbour] += starFluxes[i] / dt;
+        rhs[interiorFaces_[i].owner] -= fluxes[i] / outerDt;
+        rhs[interiorFaces_[i].neighbour] += fluxes[i] / outerDt;
     }
     // Boundary contributions: a prescribed-velocity face (wall or inlet)
     // injects its known flux, and an outlet both carries flux and pins the
-    // pressure level through its Dirichlet coefficient.
+    // pressure level through its Dirichlet coefficient. Neither carries a
+    // Rhie-Chow term at all -- fluxDt only ever affects interior faces --
+    // so this half is exactly the same whatever fluxDt is.
     for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
         const BoundaryFace& face = boundaryFaces_[i];
         const BoundaryCondition& condition = boundaryConditions_[i];
-        const double flux = condition.isOutlet ? velocityStar[face.cell].dot(face.areaVector)
+        const double flux = condition.isOutlet ? velocity[face.cell].dot(face.areaVector)
                                                 : condition.wallVelocity.dot(face.areaVector);
-        rhs[face.cell] -= flux / dt;
+        rhs[face.cell] -= flux / outerDt;
         if (condition.isOutlet) {
             rhs[face.cell] += face.coefficient * outletPressure_;
         }
     }
-    // **The same Laplacian the diffusion solver uses, correction included.**
-    // This operator used to be a second copy that assembled only the implicit
-    // part -- the version Fase 2.2 measured stagnating at observed order 0.10
-    // on exactly these meshes, in the most important equation this solver
-    // has (DIVIDA_TECNICA.md 1.2). Cell 0 is pinned ONLY when every boundary
-    // is a wall: with an outlet the prescribed pressure already fixes the
-    // level, and pinning as well would over-constrain the system with two
-    // incompatible references. Started from the previous step's pressure,
-    // which is why it converges in a handful of iterations.
+    return rhs;
+}
+
+void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& velocityStar, double dt) {
+    const std::size_t n = velocityStar.size();
+    // Cell 0 is pinned ONLY when every boundary is a wall: with an outlet the
+    // prescribed pressure already fixes the level, and pinning as well would
+    // over-constrain the system with two incompatible references.
     const std::size_t pinnedCell = hasOutlet_ ? kNoPinnedCell : 0;
+
+    // **First corrector: unchanged from before this item, bit-identical.**
+    // The same Laplacian the diffusion solver uses, correction included --
+    // this operator used to be a second copy that assembled only the
+    // implicit part, the version Fase 2.2 measured stagnating at observed
+    // order 0.10 on exactly these meshes, in the most important equation
+    // this solver has (DIVIDA_TECNICA.md 1.2). fluxDt=0 here is deliberate:
+    // the predictor carries no pressure correction yet, so there is no
+    // Rhie-Chow term to be consistent with. Started from the previous step's
+    // pressure, which is why it converges in a handful of iterations.
+    std::vector<double> rhs = divergenceOfFlux(velocityStar, pressure_, 0.0, dt);
     solveDeferredCorrection(pressure_, rhs, pinnedCell, n, 1e-10, pressureCorrectors_,
                             lastPressureChange_, pressureRelaxation_);
 
-    const std::vector<Vector3> pressureGradients = computeCellGradients(pressure_);
+    std::vector<Vector3> pressureGradients = computeCellGradients(pressure_);
     for (std::size_t cell = 0; cell < n; ++cell) {
         velocity_[cell] = velocityStar[cell] - pressureGradients[cell] * dt;
     }
 
-    // Record the boundary flux **the projection enforced**, term for term.
-    // Recomputing it later from the corrected cell velocity and the
-    // least-squares gradient gives a different -- and systematically wrong --
-    // number, which is what produced the original 13.2% imbalance.
+    // Record the boundary flux **the first corrector enforced**, term for
+    // term, *before* the coupling correction below touches pressure_ --
+    // this exact formula's mass-conservation guarantee (measured to close
+    // the channel to 6e-14) is an algebraic identity of *this* Laplacian
+    // system specifically (its RHS's own boundary terms telescope against
+    // this face flux), and does not carry over to whatever pressure_ becomes
+    // after a second, different operator perturbs it. See the coupling
+    // correction below for how its own contribution is added back in a way
+    // that *is* consistent with the operator that produced it.
     //
     // Both terms of the operator have to appear here, and that was measured:
     // when the non-orthogonal correction was added to the Poisson equation
@@ -246,6 +261,161 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
             cellGradient + face.unitD * (compactNormalDerivative - cellGradient.dot(face.unitD));
         boundaryFlux_[i] = velocityStar[face.cell].dot(face.areaVector) -
                             dt * faceGradient.dot(face.areaVector);
+    }
+
+    // **Coupling correction: DIVIDA_TECNICA.md 4.3, fifth attempt --
+    // restricted to closed domains (no outlet).** On an outlet mesh
+    // `correctionOperator` below was measured stalling well short of
+    // convergence (GMRES breaking down after ~35% residual reduction,
+    // unaffected by a far larger restart/iteration budget), traced to a
+    // near-null direction: `computeCellGradients(x, false)`'s stencil feeds
+    // outlet-adjacent cells the *fixed* `outletPressure_` as the boundary
+    // neighbour's value, not something that responds to the correction field
+    // `x` itself, which makes the operator ill-conditioned right where an
+    // outlet's rank normally comes from. On a closed domain this does not
+    // arise -- `pinnedCell` already supplies the operator's rank -- and the
+    // fifth attempt is unambiguous there: cavity divergence went from
+    // ~0.44 to 4.3e-13. Fixing the outlet case needs a gradient variant with
+    // a correction-consistent (zero, not outletPressure_) boundary value,
+    // which is follow-up work, not attempted here.
+    if (pinnedCell != kNoPinnedCell) {
+    // first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
+    // is its own convergence criterion -- but maxFaceDivergence(), the
+    // metric that actually decides whether this mesh is stable, uses
+    // faceMassFluxes(velocity_, pressure_, lastDt_): the **real** step dt in
+    // the Rhie-Chow term. The fourth attempt built a GMRES correction
+    // against the fluxDt=0 residual, the wrong target -- it solved that
+    // residual beautifully (measured: ~0.08 to ~1e-9 per step) while the
+    // real divergence barely moved, because the first corrector had already
+    // solved that exact residual to begin with. This attempt targets the
+    // real one directly: fluxDt=dt below, matching lastDt_ exactly (see
+    // step(), which sets lastDt_ = dt right after this function returns).
+    //
+    // `correctionOperator` is the *linear* part of
+    // divergenceOfFlux(·, ·, dt, dt) as a function of a pressure correction
+    // x applied as an additional velocity correction -dt*grad(x): both the
+    // interpolated-velocity term and the Rhie-Chow correction term inside
+    // faceMassFluxes are linear in their own argument (velocity, pressure
+    // respectively) at fixed fluxDt, so passing (-dt*grad(x), x) together
+    // captures the *whole* linear response, not just the velocity half --
+    // the fourth attempt's operator only ever varied the velocity argument
+    // and left the pressure argument at pressure_, which silently dropped
+    // the fluxDt-dependent term's own contribution to the linearization.
+    // Boundary terms are affine, not linear (a wall's prescribed flux and an
+    // outlet's `coefficient * outletPressure_` do not depend on the
+    // argument at all), so that constant is subtracted off by evaluating the
+    // same function at (zero velocity, zero pressure), which is exactly
+    // divergenceOfFlux()'s own documented affine part.
+    //
+    // computeCellGradients(x, false): the *unclamped* gradient, for the same
+    // reason the fourth attempt's second bug required it -- the clamped
+    // version is not linear on deficient-stencil cells, and a Krylov method
+    // handed an operator that lies about linearity converges confidently to
+    // the wrong answer. The velocity update after solving uses the same
+    // unclamped operator for this delta, incrementally on top of the first
+    // corrector's velocity_, rather than a fresh clamped gradient of the new
+    // total pressure -- keeping the applied correction identical to what
+    // this operator promised GMRES.
+    const std::vector<Vector3> zeroVelocity(n, Vector3{});
+    const std::vector<double> zeroPressure(n, 0.0);
+    const std::vector<double> wallOnlyDivergence = divergenceOfFlux(zeroVelocity, zeroPressure, dt, dt);
+    const auto correctionOperator = [&](const std::vector<double>& x) {
+        const std::vector<Vector3> gradient = computeCellGradients(x, false);
+        std::vector<Vector3> correctionVelocity(n);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            correctionVelocity[cell] = gradient[cell] * (-dt);
+        }
+        std::vector<double> divergence = divergenceOfFlux(correctionVelocity, x, dt, dt);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            divergence[cell] -= wallOnlyDivergence[cell];
+        }
+        if (pinnedCell != kNoPinnedCell) {
+            divergence[pinnedCell] = x[pinnedCell]; // identity row, matching the CG operator's pinning
+        }
+        return divergence;
+    };
+
+    std::vector<double> residual = divergenceOfFlux(velocity_, pressure_, dt, dt);
+    if (pinnedCell != kNoPinnedCell) {
+        residual[pinnedCell] = 0.0;
+    }
+    double residualNorm = 0.0;
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        residualNorm = std::max(residualNorm, std::fabs(residual[cell]));
+    }
+    lastCouplingResidualBefore_ = residualNorm;
+
+    // Relative tolerance, learned from DIVIDA_TECNICA.md 5.4: an absolute one
+    // is either too loose to matter or too tight to ever fire, depending on
+    // the field's own scale. Skipped entirely below the floor rather than
+    // running a GMRES cycle whose own first residual check would immediately
+    // exit anyway -- cheap on the meshes that do not need it.
+    const double couplingTolerance = 1e-8;
+    if (residualNorm > 1e-12) {
+        // Solved for -residual, not residual: correctionOperator(x) is the
+        // divergence *added* by the correction, so cancelling the existing
+        // residual means correctionOperator(dp) must equal its negative.
+        std::vector<double> negatedResidual(n);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            negatedResidual[cell] = -residual[cell];
+        }
+        std::vector<double> deltaPressure(n, 0.0);
+        // A restart this small was measured not converging within budget on
+        // meshes of a few hundred cells -- GMRES(30) throws away the Krylov
+        // subspace every 30 iterations, so a system that needs more than 30
+        // directions to resolve well restarts from scratch repeatedly and
+        // stalls well short of the requested tolerance. Unrestarted GMRES
+        // converges in at most n iterations in exact arithmetic, so the
+        // restart is capped at n rather than a small fixed constant.
+        const std::size_t restart = std::min<std::size_t>(200, n);
+        const std::size_t maxIterations = std::min<std::size_t>(2000, 4 * n);
+        lastCouplingIterations_ = gmres(correctionOperator, negatedResidual, deltaPressure, restart,
+                                        maxIterations, couplingTolerance);
+
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            pressure_[cell] += deltaPressure[cell];
+        }
+        // deltaVelocity is exactly the correction correctionOperator's own
+        // outlet term is linear in (see divergenceOfFlux's outlet handling:
+        // plain velocity.dot(area), no gradient blend) -- adding its outlet
+        // contribution to boundaryFlux_ here, on top of the first
+        // corrector's already-recorded flux above, is what keeps the
+        // recorded flux consistent with *whichever* operator actually moved
+        // the pressure at that face, instead of re-deriving a single
+        // snapshot formula that only one of the two operators satisfies.
+        const std::vector<Vector3> deltaGradient = computeCellGradients(deltaPressure, false);
+        std::vector<Vector3> deltaVelocity(n);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            deltaVelocity[cell] = deltaGradient[cell] * (-dt);
+            velocity_[cell] += deltaVelocity[cell];
+        }
+        for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+            if (!boundaryConditions_[i].isOutlet) {
+                continue;
+            }
+            boundaryFlux_[i] += deltaVelocity[boundaryFaces_[i].cell].dot(boundaryFaces_[i].areaVector);
+        }
+
+        std::vector<double> finalResidual = divergenceOfFlux(velocity_, pressure_, dt, dt);
+        if (pinnedCell != kNoPinnedCell) {
+            finalResidual[pinnedCell] = 0.0;
+        }
+        double finalNorm = 0.0;
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            finalNorm = std::max(finalNorm, std::fabs(finalResidual[cell]));
+        }
+        lastCouplingResidualAfter_ = finalNorm;
+    } else {
+        lastCouplingIterations_ = 0;
+        lastCouplingResidualAfter_ = residualNorm;
+    }
+    } else {
+        // Outlet mesh: not attempted, see the comment above. Zero rather
+        // than stale values from a previous step, so a caller cannot mistake
+        // an old number for this step's.
+        lastCouplingIterations_ = 0;
+        lastCouplingResidualBefore_ = 0.0;
+        lastCouplingResidualAfter_ = 0.0;
     }
 }
 

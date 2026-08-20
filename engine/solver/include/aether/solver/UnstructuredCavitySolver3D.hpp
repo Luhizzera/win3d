@@ -233,6 +233,16 @@ public:
     // chosen from evidence instead of guessed.
     double lastPressureChange() const { return lastPressureChange_; }
 
+    // How many GMRES matrix-vector products the last step's coupling
+    // correction used, and the residual it started from -- 0 means the mesh
+    // did not need one this step (the common case on a good mesh). See
+    // projectToDivergenceFree() for what this corrects and DIVIDA_TECNICA.md
+    // 4.3 for why a Krylov solve against the *real* face-flux divergence,
+    // not the dt=0 one the Poisson right-hand side is built from.
+    std::size_t lastCouplingIterations() const { return lastCouplingIterations_; }
+    double lastCouplingResidualBefore() const { return lastCouplingResidualBefore_; }
+    double lastCouplingResidualAfter() const { return lastCouplingResidualAfter_; }
+
     // 1.0 when the non-orthogonal correction converged on its own; smaller
     // when this mesh forced the iteration to be damped to converge at all.
     double pressureRelaxation() const { return pressureRelaxation_; }
@@ -256,6 +266,32 @@ private:
     void buildBoundaryConditions();
     std::vector<double> faceMassFluxes(const std::vector<core::Vector3>& velocity,
                                         const std::vector<double>& pressure, double dt) const;
+
+    // The cell-wise divergence of faceMassFluxes(velocity, pressure, fluxDt),
+    // scaled by 1/outerDt to match the units solveDeferredCorrection() (and
+    // the Poisson equation it solves) expects, plus the boundary terms every
+    // projection right-hand side needs.
+    //
+    // `fluxDt` and `outerDt` are independent on purpose, and conflating them
+    // is exactly the bug DIVIDA_TECNICA.md 4.3's fourth attempt found:
+    // `outerDt` only rescales units and is always the step's real dt.
+    // `fluxDt` selects which flux this measures -- 0 reproduces the Poisson
+    // right-hand side's own definition (plain interpolation, no Rhie-Chow
+    // term, because a predictor with no pressure correction has nothing for
+    // that term to be consistent with); the step's real dt reproduces
+    // exactly what maxFaceDivergence() measures, which is the quantity a
+    // coupling correction actually needs to drive to zero.
+    //
+    // Affine, not linear, in (`velocity`, `pressure`): a wall face always
+    // contributes its *prescribed* flux regardless of what is passed in, and
+    // an outlet's `coefficient * outletPressure_` term is a fixed offset
+    // too. Both are exactly what evaluating this at (zero velocity, zero
+    // pressure) reproduces, since every other term is homogeneous of degree
+    // 1 -- which is how projectToDivergenceFree()'s correctionOperator
+    // cancels them to get a genuinely linear operator for gmres().
+    std::vector<double> divergenceOfFlux(const std::vector<core::Vector3>& velocity,
+                                          const std::vector<double>& pressure, double fluxDt,
+                                          double outerDt) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
 
 
@@ -281,6 +317,9 @@ private:
     // solved, exactly the error ROADMAP Fase 1 diagnosed for the structured
     // cavity's divergence.
     std::vector<double> boundaryFlux_;
+    mutable std::size_t lastCouplingIterations_ = 0;
+    mutable double lastCouplingResidualBefore_ = 0.0;
+    mutable double lastCouplingResidualAfter_ = 0.0;
 
     double viscosity_;
     std::function<core::Vector3(const core::Vector3&)> wallVelocity_;
