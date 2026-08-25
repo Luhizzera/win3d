@@ -1362,14 +1362,41 @@ operador. É a mesma armadilha de "medir a coisa errada" que este item
 armou três vezes; desta vez a contradição entre as duas medidas a expôs
 em minutos.
 
-**O que continua aberto, e é outra coisa**: jitter 0,95 ainda morre no
-passo 41 numa marcha *dirigida*, apesar de ρ = 0,58 em repouso. Não é a
-instabilidade linear deste item, e não é não-ortogonalidade (0,85 roda 400
-passos com não-ortogonalidade 10,04 enquanto 0,95 morre com 7,40). É um
-fenômeno distinto, ainda não isolado — registrado como tal, não como
-resquício deste. O guarda de finitude continua sendo o piso que o
-transforma em recusa em vez de campo de NaN, e o teste dele subiu de
-jitter 0,65 para 0,95 pela terceira vez, sempre porque o solver melhorou.
+**O que continua aberto, e é outra coisa** — agora caracterizado.
+
+Jitter 0,95 ainda morre no passo 41 numa marcha *dirigida*, apesar de
+ρ = 0,58 em repouso. Não é não-ortogonalidade (0,85 roda 400 passos com
+não-ortogonalidade 10,04 enquanto 0,95 morre com 7,40). Decomposto em
+`python/research/jitter095_failure.py`:
+
+| teste | resultado |
+|---|---|
+| passo de tempo × 0,25 e × 0,05 | **não salva** (64 e 50 passos contra 41) |
+| viscosidade × 3, × 10, × 30 | **não salva** (59 e 53 passos) |
+| sem convecção (`stepWith`) | sobrevive 237 passos, ~6× mais |
+| sem projeção (`stepWith`) | sobrevive os 400 |
+| entrada 1e-6 e 1e-3 | **sobrevive os 400** |
+| entrada 0,01 / 0,05 | **sobrevive** / morre em 50 |
+
+**É não-linear, e isso o separa definitivamente deste item.** A
+instabilidade que abriu o 4.3 foi *provada linear* pela própria medição de
+amplitude: crescia com o mesmo fator por passo com a tampa a 1,0 e a
+10⁻⁶. Esta faz o oposto — tem um limiar nítido entre entrada 0,01 e 0,05.
+Um crescimento que só aparece acima de uma amplitude crítica é a assinatura
+de uma instabilidade **subcrítica não-linear**, não de um operador linear
+com raio espectral acima de 1.
+
+Que não seja passo de tempo nem viscosidade descarta as duas explicações
+mais baratas: não é CFL e não é balanço convecção-difusão (Re de célula).
+Convecção participa (removê-la estende a sobrevida 6×) mas não é
+suficiente sozinha, já que sem ela ainda morre no passo 237.
+
+**Não está explicado, e é deliberadamente registrado como item separado**
+e não como resquício deste — a lição do próprio 4.3, três vezes, é que
+juntar dois fenômenos sob um rótulo atrasa os dois. O guarda de finitude
+continua sendo o piso que transforma isso em recusa em vez de campo de
+NaN, e o teste dele subiu de jitter 0,65 para 0,95 pela terceira vez,
+sempre porque o solver melhorou.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
