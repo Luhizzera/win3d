@@ -424,46 +424,36 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
                             dt * faceGradient.dot(face.areaVector);
     }
 
-    // **Coupling correction: DIVIDA_TECNICA.md 4.3 -- still gated to closed
-    // domains (no outlet), now for a narrower and better-understood
-    // reason.** The sixth attempt fixed a genuine defect in this operator:
-    // `computeCellGradients` was feeding outlet-adjacent cells the
-    // *prescribed* `outletPressure_` as the boundary neighbour's value even
-    // when the field being differentiated is a pressure *correction*, whose
-    // value at a Dirichlet boundary is necessarily zero. That made the
-    // operator affine rather than linear there, which is the one thing a
-    // Krylov method cannot tolerate. The fix (`homogeneousBoundaryValues`)
-    // is kept because it is correct independently of what it repairs, and
-    // it is a no-op on a closed domain, where no boundary face carries a
-    // prescribed pressure at all.
+    // **Coupling correction: DIVIDA_TECNICA.md 4.3, which this closes.**
+    // It runs on every domain -- closed or with an outlet -- and the route
+    // to that took seven attempts, so the two that finally mattered are
+    // worth stating here rather than only in the debt document.
     //
-    // **It improved the outlet case and did not close it**, measured on the
-    // channel: the per-step residual after correction fell from 0.047 to
-    // 0.033 (~30%). Enabling the correction on an outlet domain in that
-    // state is still a regression rather than a partial win -- the
-    // channel's mass imbalance goes from 6.5e-14 (correction skipped) to
-    // 1.2e-4 (correction applied) -- so the gate stays.
+    // Two of this comment's own earlier claims were wrong and were
+    // disproved by measurement, which is why they are named: (1) that GMRES
+    // suffered a numerical breakdown on an outlet mesh -- instrumenting
+    // both breakdown paths showed neither ever fires, the method converges
+    // to its 1e-8 relative tolerance in 64 iterations; (2) that the
+    // residual floor came from the clamp on deficient-stencil cells -- two
+    // closed domains with *zero* deficient stencils held the same floor.
     //
-    // **Why it does not close is now known, and it is not what an earlier
-    // version of this comment said.** That version claimed GMRES suffered
-    // a numerical breakdown. Instrumenting the two breakdown paths directly
-    // showed neither ever fires: GMRES *converges*, to its own 1e-8
-    // relative tolerance, in 64 iterations. So the operator it solves is
-    // simply not the exact linearization of the quantity that is measured
-    // afterwards -- and on a boundary face those two provably disagree:
+    // With "GMRES converges but the measured residual does not fall", only
+    // one explanation survives: the operator solved and the quantity
+    // measured were not the same operator. And on an outlet face they
+    // provably were not -- `divergenceOfFlux` used the plain extrapolation
+    // `velocity . A` while the projection *enforces* the gradient-blended
+    // flux recorded in boundaryFlux_ further down this function. The fix
+    // lives in divergenceOfFlux, and it is not a new operator: it is the
+    // very Rhie-Chow correction the interior-face loop already applied,
+    // finally applied to the outlet face too.
     //
-    //   divergenceOfFlux (what GMRES drives to zero) uses, at an outlet,
-    //     velocity[cell] . areaVector
-    //   maxFaceDivergence (what actually reports mass conservation) uses
-    //     boundaryFlux_[i], which is the gradient-blended formula recorded
-    //     further down this function.
+    // Measured on the channel: face divergence 3.0e-02 -> 1.1e-11, net
+    // boundary flux 1.2e-04 -> 1.2e-13, and the closing balance stopped
+    // depending on the corrector count (1.24e-13 at 2, 4 and 16 alike),
+    // which is the signal that the correction is no longer compensating
+    // for an error. Rest-state spectral radius on a jitter-0.65 outlet
+    // mesh: 44.05 -> 0.286.
     //
-    // That is the same class of error the fourth attempt found between
-    // fluxDt=0 and fluxDt=dt, one level out: **measure the operator you
-    // actually solve**, now for the third time in this item, on boundary
-    // faces instead of interior ones. Reconciling the two outlet flux
-    // definitions is the next concrete step, and it is a narrower question
-    // than any previous framing of this gap.
     // The first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
     // is its own convergence criterion -- but maxFaceDivergence(), the
     // metric that actually decides whether this mesh is stable, uses
