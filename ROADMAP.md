@@ -556,6 +556,38 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-25 (mesma sessão): Fase E — atrito de instalação removido; wheel segue em aberto
+
+Dois atritos, e o maior deles não era o build.
+
+**O pacote acha os próprios módulos compilados.** Até aqui, todo ponto de
+entrada — script, teste, sessão interativa — precisava apontar `PYTHONPATH`
+para o diretório de saída do build à mão, e esse diretório *muda com o
+gerador*: multi-config (Visual Studio) acrescenta um nível `Release/` ou
+`Debug/` que single-config não tem. `aether._ensure_extensions_importable()`
+procura nos três lugares que este repositório de fato usa. Um módulo já
+importável é deixado em paz e a função retorna na hora: `PYTHONPATH`
+explícito, instalação em venv ou um wheel futuro significam que o chamador
+já disse onde as extensões estão, e sobrepor isso seria pior que o atrito
+removido.
+
+**`build.py` — um comando do clone ao engine funcionando**: configura,
+compila em Release e roda as 13 suítes. Existe em vez de virar uma linha do
+README por causa de uma armadilha específica: `--config Release` vai no
+comando de *build*, não no de configuração, porque gerador multi-config
+escolhe a configuração na hora de compilar e ignora `CMAKE_BUILD_TYPE`
+silenciosamente. Errar isso produz um erro que não nomeia a própria causa.
+Roda `ctest` com `--no-tests=error`, não o padrão: uma suíte que parasse de
+registrar seus testes reportaria sucesso, que é o único modo de falha que
+uma execução de testes não pode ter.
+
+**O que a Fase E deliberadamente NÃO fecha**: não há wheel nem
+`pip install aether`. Isso exige as extensões C++ compiladas por plataforma
+e por versão de Python — scikit-build-core na cadeia de build, ou CI
+produzindo wheels por alvo. É trabalho real e separado; um script de build
+não o cobre, e dizer que cobre seria o tipo de exagero que o resto desta
+documentação evita. Registrado como lacuna, não como concluído.
+
 ### Estado em 2026-08-25: **Fase B concluída** — o resultado não-estruturado saiu do terminal
 
 O item era "visualização do resultado da malha não-estruturada", e a

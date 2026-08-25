@@ -16,6 +16,44 @@ so a missing extension here is expected, not an error -- check the
 GPU_AVAILABLE flag below rather than assuming PoissonOperatorCuda works.
 """
 
+
+
+def _ensure_extensions_importable() -> None:
+    """Puts the compiled extensions on sys.path when they are not already
+    there, by looking where this repository's own build actually writes
+    them.
+
+    **Why this exists.** Until this was added, every entry point into the
+    package -- a script, a test, an interactive session -- had to set
+    PYTHONPATH to the build output directory by hand, and that directory
+    differs by generator: a multi-config generator (Visual Studio) adds a
+    Release/ or Debug/ level that a single-config one does not. It is the
+    first thing anyone hits and the least interesting, so the package
+    resolves it rather than documenting it.
+
+    An extension that is *already* importable is left alone and this
+    returns immediately: an explicit PYTHONPATH, a virtualenv install or a
+    future wheel all mean the caller has already said where the extensions
+    are, and overriding that would be worse than the friction it removes.
+    """
+    import importlib.util
+    import pathlib
+    import sys
+
+    if importlib.util.find_spec("aether_core_py") is not None:
+        return
+
+    # python/aether/__init__.py -> python/aether -> python -> repository root
+    repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
+    build = repo_root / "build" / "bindings" / "python"
+    for candidate in (build / "Release", build / "Debug", build):
+        if candidate.is_dir() and any(candidate.glob("aether_core_py*")):
+            sys.path.insert(0, str(candidate))
+            return
+
+
+_ensure_extensions_importable()
+
 try:
     from aether_core_py import Mesh, ScalarField, Tensor3x3, Vector3, VectorField
     from aether_geometry_py import TriangleMesh, load_obj, load_stl, save_obj, save_stl_binary
@@ -84,9 +122,10 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "aether_*_py extensions not found. Build the C++ core first:\n"
-        "  cmake -S . -B build\n"
-        "  cmake --build build\n"
-        "then make sure the build output directory is on PYTHONPATH."
+        "  python build.py\n"
+        "(or by hand: cmake -S . -B build && cmake --build build --config Release).\n"
+        "The build output is found automatically when it sits in this repository's\n"
+        "own build/ directory; set PYTHONPATH to it explicitly if you built elsewhere."
     ) from exc
 
 # Separate, non-fatal try/except: unlike every extension above, not

@@ -2401,27 +2401,51 @@ implementada e validada.**
 ## Build (C++ core + bindings)
 
 Requer CMake >= 3.20, um compilador C++20 (MSVC, GCC ou Clang) e, para os
-bindings Python, `pip install pybind11` no ambiente Python usado para configurar.
+bindings Python, `pip install pybind11` no ambiente Python usado para
+configurar.
+
+```
+python build.py
+```
+
+Isso configura, compila em Release e roda as 13 suítes. `--no-test` pula os
+testes, `--clean` apaga `build/` antes, `--config Debug` troca a
+configuração. Por baixo são os três comandos de sempre, e eles continuam
+funcionando à mão:
 
 ```
 cmake -S . -B build
-cmake --build build
-ctest --test-dir build
+cmake --build build --config Release
+ctest --test-dir build -C Release
 ```
+
+O `--config Release` vai no comando de *build*, não no de configuração:
+geradores multi-config (Visual Studio) escolhem a configuração na hora de
+compilar e ignoram `CMAKE_BUILD_TYPE` silenciosamente — o motivo de o
+script existir em vez de virar uma linha nesta seção.
 
 Se o pybind11 não for encontrado, o CMake pula os bindings automaticamente
 (o core e os testes C++ continuam buildando normalmente). Se o pybind11
 estiver instalado num venv não-padrão, aponte o CMake pra ele com
 `-Dpybind11_DIR=<venv>/Lib/site-packages/pybind11/share/cmake/pybind11`.
 
-Para usar o pacote `aether` a partir do Python, coloque a pasta com o
-`.pyd`/`.so` compilado no `PYTHONPATH` (ex.:
-`build/bindings/python/Release` no Windows com MSVC):
+Para usar o pacote `aether` a partir do Python, basta ter `python/` no
+`PYTHONPATH` — o pacote **encontra sozinho** os módulos compilados dentro
+do `build/` deste repositório, incluindo o nível `Release/`/`Debug/` que
+gerador multi-config acrescenta:
 
 ```
-$env:PYTHONPATH = "build/bindings/python/Release"
 python -c "import aether; print(aether.Vector3(1,1,1).norm())"
 ```
+
+Definir `PYTHONPATH` apontando para o diretório do `.pyd`/`.so` continua
+funcionando e tem precedência: se os módulos já forem importáveis, o pacote
+não mexe no `sys.path`.
+
+**Não há wheel nem `pip install aether`**, e isso é uma lacuna registrada,
+não um esquecimento: exige as extensões C++ compiladas por plataforma e por
+versão de Python, o que precisa de scikit-build-core na cadeia de build ou
+de CI produzindo wheels por alvo.
 
 ## Visualizador
 
