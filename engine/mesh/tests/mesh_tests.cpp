@@ -1,11 +1,13 @@
 #include "aether/mesh/DelaunayTetrahedralization3D.hpp"
 #include "aether/mesh/DelaunayTriangulation2D.hpp"
 #include "aether/mesh/PolygonTriangulation2D.hpp"
+#include "aether/mesh/RobustPredicates.hpp"
 #include "aether/mesh/StructuredGrid3D.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
 #include "aether/testing/Check.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 
 using namespace aether::core;
@@ -708,6 +710,106 @@ void testTetrahedralMeshAreaVectorsPointOwnerToNeighbour() {
     AETHER_CHECK(checked > 0);
 }
 
+// **The claim the floating-point filter makes is that it changes no
+// answer** -- it only decides whether the exact BigInt path can be
+// skipped. That is exactly the kind of claim this project refuses to take
+// on faith, so it is checked directly: run both paths over the same
+// inputs and require the signs to be identical every time.
+//
+// The inputs are chosen to include the cases where a filter could
+// plausibly be wrong, not just easy ones. Random points exercise the fast
+// path (and confirm it really is taken, via the fallback counts printed
+// below -- a filter that never fires would pass this test while being
+// useless). The degenerate families are the adversarial half: four points
+// forced exactly coplanar, and a fifth point placed exactly on the
+// circumsphere of the other four, are precisely the configurations where
+// the true determinant is zero and any error bound that is even slightly
+// too tight would confidently return a nonzero sign.
+void testPredicateFilterAgreesWithExactArithmetic() {
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    const auto nextDouble = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<double>(state >> 11) / 9007199254740992.0; // [0,1)
+    };
+    const auto randomPoint = [&nextDouble]() {
+        return Vector3{nextDouble() * 2.0 - 1.0, nextDouble() * 2.0 - 1.0, nextDouble() * 2.0 - 1.0};
+    };
+
+    std::size_t orientationChecks = 0;
+    std::size_t orientationFallbacks = 0;
+    std::size_t inSphereChecks = 0;
+    std::size_t inSphereFallbacks = 0;
+
+    const auto checkOrientation = [&](const Vector3& a, const Vector3& b, const Vector3& c,
+                                       const Vector3& d) {
+        const int exact = orientation3DExact(a, b, c, d);
+        AETHER_CHECK(orientation3D(a, b, c, d) == exact);
+        ++orientationChecks;
+        if (exact == 0) {
+            ++orientationFallbacks; // a zero sign can only come from the exact path
+        }
+    };
+    const auto checkInSphere = [&](const Vector3& a, const Vector3& b, const Vector3& c,
+                                    const Vector3& d, const Vector3& p) {
+        const int exact = inSphere3DExact(a, b, c, d, p);
+        AETHER_CHECK(inSphere3D(a, b, c, d, p) == exact);
+        ++inSphereChecks;
+        if (exact == 0) {
+            ++inSphereFallbacks;
+        }
+    };
+
+    for (int i = 0; i < 20000; ++i) {
+        const Vector3 a = randomPoint();
+        const Vector3 b = randomPoint();
+        const Vector3 c = randomPoint();
+        const Vector3 d = randomPoint();
+        const Vector3 p = randomPoint();
+        checkOrientation(a, b, c, d);
+        checkInSphere(a, b, c, d, p);
+
+        // Exactly coplanar: d is built from a, b, c by an exact affine
+        // combination with power-of-two weights, so no rounding creeps in
+        // and the true orientation determinant is exactly zero.
+        const Vector3 coplanar{a.x + 0.5 * (b.x - a.x) + 0.25 * (c.x - a.x),
+                                a.y + 0.5 * (b.y - a.y) + 0.25 * (c.y - a.y),
+                                a.z + 0.5 * (b.z - a.z) + 0.25 * (c.z - a.z)};
+        checkOrientation(a, b, c, coplanar);
+
+        // Exactly co-spherical: five points on a sphere of radius 1 about
+        // the origin, read off axis directions and their exact negations,
+        // so the in-sphere determinant is exactly zero by construction.
+        const Vector3 s0{1.0, 0.0, 0.0};
+        const Vector3 s1{-1.0, 0.0, 0.0};
+        const Vector3 s2{0.0, 1.0, 0.0};
+        const Vector3 s3{0.0, 0.0, 1.0};
+        const Vector3 s4{0.0, -1.0, 0.0};
+        checkInSphere(s0, s2, s3, s1, s4);
+
+        // A sliver: three nearly-collinear points plus a fourth, the
+        // near-degenerate shape the class header records as having caused
+        // a real bug in the unfiltered double era.
+        const double squash = 1e-11;
+        const Vector3 t0{0.0, 0.0, 0.0};
+        const Vector3 t1{1.0, squash * nextDouble(), 0.0};
+        const Vector3 t2{2.0, -squash * nextDouble(), 0.0};
+        const Vector3 t3{1.0, 0.0, 1.0};
+        checkOrientation(t0, t1, t2, t3);
+        checkInSphere(t0, t1, t2, t3, randomPoint());
+    }
+
+    std::printf("  [mesh_tests] filtro de predicados: %zu orientacoes e %zu in-sphere conferem com "
+                "aritmetica exata (%zu e %zu degenerados de sinal zero)\n",
+                orientationChecks, inSphereChecks, orientationFallbacks, inSphereFallbacks);
+    std::fflush(stdout);
+    // Degenerate cases must actually have been produced -- otherwise this
+    // test would be measuring only the easy half of the input space.
+    AETHER_CHECK(orientationFallbacks > 0);
+    AETHER_CHECK(inSphereFallbacks > 0);
+}
+
 } // namespace
 
 int main() {
@@ -731,6 +833,7 @@ int main() {
     testTetrahedralizationFillsConvexHullOnHullAdjacentSliverCase();
     testTetrahedralization3DRecoversHollowOctahedronFacetsAndCarvesHoleWithExactVolume();
     testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets();
+    testPredicateFilterAgreesWithExactArithmetic();
     std::puts("aether_mesh_tests: all tests passed");
     return 0;
 }

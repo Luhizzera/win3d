@@ -466,6 +466,96 @@ só para casar com o fundo. Nenhuma das duas tentada ainda.
 Suíte C++ inalterada nesta rodada (só `pipeline.py`, Python puro) — não
 re-executada por não haver mudança de binding.
 
+### Estado em 2026-08-20 (terceira rodada): **item 2 do portão da Fase 3 CUMPRIDO**; e uma correção a esta própria seção
+
+**Primeiro, a correção — o achado 2 da entrada anterior estava errado.**
+Aquela entrada afirmou que `recover_facets()` não escalava, com base em um
+caso que não retornava em 60s. Perfilando as fases separadamente, em vez de
+atribuir o tempo à última chamada feita: `missing_facets` = **0,00s**,
+`recover_facets` = **0,00s**, `tetrahedralize` = **131s**. A recuperação de
+facetas nunca foi o gargalo. O muro é `tetrahedralize()`, e ele é
+**O(N²)** — medido, não estimado: dobrar N multiplica o tempo por 4,29 →
+4,21 → 4,03 (convergindo a 4,0) e t/N² fica constante em 17,6 → 20,0.
+Mesma família de erro que o item 4.3 já registrou duas vezes (atribuir
+causa antes de isolar), agora numa terceira forma: atribuir custo à etapa
+mais próxima do sintoma.
+
+**Filtro de ponto flutuante nos predicados exatos: 29x mais rápido, sem
+mudar nenhuma resposta.** A causa do O(N²) é `findCavity()` testar a
+circumsfera de *todo* tetraedro por ponto inserido, e cada teste ia direto
+para aritmética BigInt exata sem filtro. `RobustPredicates` ganhou o
+filtro padrão da literatura (Shewchuk; é o que CGAL/TetGen/Qhull fazem, e
+o que o próprio comentário do header já citava): avalia o determinante em
+`double` junto com um limite rigoroso do próprio erro de arredondamento, e
+só cai no caminho exato quando |det| não excede esse limite. Constantes
+deliberadamente várias vezes mais conservadoras que o mínimo teórico —
+superestimar só manda casos a mais para o caminho exato (mais lento,
+nunca errado), subestimar devolveria sinal errado.
+
+Medido: N=1600 caiu de **51,3s para 1,75s**. Continua O(N²) (o filtro
+mexe na constante, não na complexidade), mas a constante caiu 29x — o caso
+de 4874 pontos que nunca terminava agora roda. Suíte C++ inteira também
+ficou mais rápida (58s → 44s).
+
+A afirmação "não muda nenhuma resposta" é verificada, não assumida:
+`orientation3DExact`/`inSphere3DExact` expõem o caminho não-filtrado e
+`mesh_tests` compara os dois em **120 mil** avaliações — aleatórias mais
+famílias deliberadamente degeneradas (quatro pontos exatamente coplanares,
+cinco exatamente co-esféricos, slivers) — exigindo sinais idênticos. 35 mil
+delas deram sinal exatamente zero, então a metade adversarial do espaço de
+entrada foi de fato exercitada, não só a fácil.
+
+**Gradação da rede de fundo: testada, medida, e mantida desligada por
+padrão.** A hipótese era que a costura de densidade objeto↔fundo explicava
+a instabilidade. A/B direto na mesma geometria e espaçamento: graduada
+(3 níveis) dá 886 células de 168 pontos, razão de volume 965 e
+não-ortogonalidade 2,52; uniforme dá 3493 células de 722 pontos, razão
+**88** e não-ortogonalidade **2,06**. Graduada é mais barata e
+mensuravelmente **pior** nas duas métricas de qualidade, porque cada
+limiar de decimação cria seu próprio salto abrupto de densidade — trocou
+uma costura por três. `max_level` default passou a 0 (sem gradação); o
+código fica, documentado, porque engrossar o campo distante é a ideia
+certa — só precisa de variação suave de tamanho (refino de Delaunay
+contra uma função de tamanho), não decimação de rede.
+
+**E o bloqueio de verdade não era nada disso: era o arnês de teste.** O
+teste de repouso e o raio espectral — os dois diagnósticos que este
+projeto aplica a todo solver — deram, nas duas malhas: repouso
+**exatamente 0,000e+00** e raio espectral **0,245 / 0,279**, ambos bem
+abaixo de 1. As malhas eram estáveis o tempo todo. O que estava errado era
+o meu script: eu prescrevia velocidade em **x** na face `x_min`, cuja
+normal é x — ou seja, soprando massa para dentro de uma caixa **selada**,
+que não é um caso difícil e sim um caso insolúvel. O solver reportou isso
+desde a primeira execução via `net_boundary_flux()` = −26 (deveria ser 0),
+e eu não estava lendo o diagnóstico que já existia.
+
+Com a tampa tangencial (função nova `driving_wall_velocity()`, que
+**recusa** uma direção não-tangencial em vez de corrigi-la em silêncio),
+no icosaedro, 3493 células, 400 passos:
+
+| quantidade | medido |
+|---|---|
+| erro relativo de volume da malha | **1,5e-15** |
+| fluxo líquido de contorno (caixa selada) | **0,000e+00** |
+| divergência por faces | **6,1e-09** |
+| velocidade máxima (tampa a 1,0) | 0,463 |
+| u médio no topo | **+0,02992** (segue a tampa) |
+| u médio no fundo | **−0,00312** (retorno, conservação de massa) |
+
+Isto é **o item 2 do portão da Fase 3**: um caso genuinamente
+não-cartesiano, com geometria importada e um objeto esculpido dentro do
+domínio, rodando estável, conservando massa exatamente e reproduzindo a
+topologia de vórtice primário que todo solver de cavidade deste projeto
+valida. Suíte: 12/12.
+
+**O que fica em aberto**, agora com prioridade medida em vez de suposta:
+`tetrahedralize()` continua O(N²) mesmo 29x mais rápido, o que limita
+malhas reais (4874 pontos ≈ 131s antes do filtro, ~4,5s depois; 10⁵ pontos
+segue impraticável). A correção conhecida é localização de ponto +
+propagação por adjacência a partir do tetraedro que contém o ponto, em vez
+de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
+é a próxima alavanca real, e agora é a maior.
+
 ## Fase 4 — GPU para valer
 
 **Objetivo**: (4.1) solve de CG inteiramente residente na GPU; (4.2)

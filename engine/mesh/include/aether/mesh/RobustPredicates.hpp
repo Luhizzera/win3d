@@ -42,6 +42,27 @@ namespace aether::mesh {
 // -- same cofactor expansions, same sign conventions -- just routed
 // through exact arithmetic instead of double arithmetic throughout.
 
+// **A floating-point filter runs first, and it does not change any
+// answer.** Exact BigInt arithmetic is correct but expensive, and
+// DelaunayTetrahedralization3D calls inSphere3D once per tetrahedron per
+// inserted point -- measured as the dominant cost of tetrahedralize()
+// (see below). The filter computes the same determinant in plain doubles
+// *together with a rigorous bound on its own accumulated roundoff*; when
+// |determinant| exceeds that bound the double sign is provably correct
+// and is returned directly, and only the remaining near-degenerate cases
+// pay for exact arithmetic. This is the standard technique (Shewchuk's
+// adaptive predicates; CGAL/TetGen/Qhull all do it) and is what the
+// "exact or adaptive-precision" note above was always pointing at.
+//
+// The bound constants are deliberately several times more conservative
+// than the tightest published ones: over-estimating the error only sends
+// more cases down the exact path (slower, never wrong), while
+// under-estimating it would silently return a wrong sign -- an asymmetry
+// worth paying for. `orientation3DExact`/`inSphere3DExact` below expose
+// the unfiltered path so the two can be compared directly, which is how
+// the filter is validated (mesh_tests runs both over randomized and
+// deliberately degenerate configurations and requires identical signs).
+
 // Sign of (b-a) . ((c-a) x (d-a)): positive means (a,b,c,d) is a
 // positively-oriented tetrahedron (matches every other orientation check
 // in this project). +1 / 0 / -1.
@@ -55,6 +76,17 @@ int orientation3D(const core::Vector3& a, const core::Vector3& b, const core::Ve
 // requirement carried over here). +1 / 0 / -1.
 int inSphere3D(const core::Vector3& a, const core::Vector3& b, const core::Vector3& c,
                 const core::Vector3& d, const core::Vector3& p);
+
+// The unfiltered, always-exact paths the two functions above fall back
+// to. Identical results by construction -- the filter only ever decides
+// whether the exact computation can be *skipped*, never what the answer
+// is -- so these exist for validating that claim rather than for callers
+// to choose between. Prefer the filtered versions everywhere else: they
+// are the same answer for less work.
+int orientation3DExact(const core::Vector3& a, const core::Vector3& b, const core::Vector3& c,
+                        const core::Vector3& d);
+int inSphere3DExact(const core::Vector3& a, const core::Vector3& b, const core::Vector3& c,
+                     const core::Vector3& d, const core::Vector3& p);
 
 // The 2D counterparts, for DelaunayTriangulation2D and
 // PolygonTriangulation2D -- same exact-arithmetic approach, one dimension
