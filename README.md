@@ -3,6 +3,15 @@
 Motor de simulação de fluidos em camadas, com núcleo numérico em C++ e
 camada de orquestração/API/IA em Python.
 
+> **Quer usar, não desenvolver?** Comece por
+> **[docs/getting-started.md](docs/getting-started.md)** — do clone ao
+> resultado aberto no ParaView, com o que o motor faz e o que ainda não
+> faz. Este README é um diário de desenvolvimento em ordem cronológica:
+> registra o que foi medido, o que falhou e por quê. Útil para continuar o
+> trabalho, ruim para começar a usá-lo.
+>
+> Exemplo executável completo: `python examples/flow_around_object.py`
+
 ## Layout do repositório
 
 ```
