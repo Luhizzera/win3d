@@ -1711,6 +1711,42 @@ com o erro **idêntico em todos os dígitos** (2,338802e-02 / 1,033868e-02 /
 5,775569e-03). O ganho é modesto ali porque a escala do campo é ~2,7; ele
 cresce com a magnitude do campo, que é exatamente o caso da pressão.
 
+### 5.5 ~~GMRES duplicado entre o solver 1D e a base não-estruturada~~ — RESOLVIDO em 2026-08-25
+
+Registrado quando a segunda cópia foi escrita, e não escondido: o item 4.3
+precisou de GMRES para o acoplamento pressão-velocidade e o extraiu de
+`ImplicitConvectionDiffusionSolver1D::solveGmresOnce()`, deixando duas
+implementações completas do mesmo método na árvore.
+
+**A correção não foi fazer uma chamar a outra**, porque nenhuma das duas
+era a dona certa: um Krylov matrix-free não sabe nada sobre malha
+tetraédrica nem sobre convecção-difusão 1D — é álgebra linear. Deixá-lo
+numa base de FVM não-estruturado obrigaria qualquer chamador futuro a
+herdar de algo sem relação só para alcançá-lo. Mesma lição do item 2.1, um
+nível acima: **o lugar de uma coisa compartilhada se decide pelo que ela
+é**, não por qual chamador precisou dela primeiro.
+
+Vive agora em `engine/solver/include/aether/solver/KrylovSolvers.hpp`.
+
+Duas políticas que a rotina compartilhada deliberadamente não assume
+viraram parâmetros opcionais em vez de ficarem embutidas:
+
+- `onResidual` — chamado a cada iteração com o resíduo relativo. É a
+  observabilidade que o solver 1D precisa para seu `residualHistory()`
+  (usado pelos testes de monotonicidade do GMRES reiniciado), sem que a
+  rotina tome posição sobre o que fazer com o número.
+- `brokeDown` — reportado em vez de dobrado no valor de retorno.
+  "Convergiu", "esgotou as iterações" e "quebrou" são três desfechos
+  diferentes, e chamadores diferentes se importam com desfechos
+  diferentes. O solver 1D converte para o `-1` que sua API sempre
+  devolveu; o não-estruturado ignora e checa o resíduo, como faria para CG.
+
+**Saldo: 305 linhas removidas contra 28 adicionadas**, com a suíte em 13/13
+— incluindo os testes que comparam a contagem de iterações do GMRES 1D com
+valores literais, que passariam a falhar ao menor desvio numérico.
+
+---
+
 ## 6. Continua sendo pesquisa, não dívida
 
 Estes **não** são remendo — são trabalho genuinamente difícil, registrados
