@@ -2,6 +2,7 @@
 
 #include "aether/core/Vector3.hpp"
 #include "aether/mesh/TetrahedralMesh.hpp"
+#include "aether/solver/KrylovSolvers.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -416,177 +417,15 @@ protected:
         }
     }
 
-    // **Restarted GMRES(m), matrix-free, for operators conjugateGradient()
-    // cannot solve.** Extracted from ImplicitConvectionDiffusionSolver1D's
-    // own (independently tested) implementation rather than rewritten --
-    // this project's own lesson from item 2.1 is that porting a correction N
-    // times is the expensive version of the problem, and re-deriving a
-    // Krylov method's numerics from scratch is exactly the kind of thing
-    // worth not doing twice. The 1D solver keeps its own copy for now rather
-    // than being refactored onto this one in the same change that adds it;
-    // that duplication is real and is recorded, not silently left
-    // (DIVIDA_TECNICA.md 4.3's follow-up note).
-    //
-    // **Why this exists at all**, when the base already has
-    // conjugateGradient(): CG requires `A` symmetric positive definite.
-    // UnstructuredCavitySolver3D's pressure-velocity coupling on a distorted
-    // mesh is not -- DIVIDA_TECNICA.md 4.3 measured a scalar-relaxed defect
-    // correction failing on exactly this operator, including on meshes where
-    // the baseline algorithm already worked, because the operator's
-    // contraction varies by *direction* in residual space and a single
-    // relaxation number cannot describe direction-dependent behaviour.
-    // Modified Gram-Schmidt Arnoldi plus incremental Givens rotations search
-    // the whole Krylov subspace at each step instead of scaling one guessed
-    // direction, which is what a genuinely non-symmetric operator needs.
-    //
-    // `x` is both the initial guess and the result. Returns the number of
-    // matrix-vector products used. Like conjugateGradient(), this does not
-    // itself signal whether the result actually converged -- a caller that
-    // needs to know checks the residual, the same way it would for CG; both
-    // stay simple matrix-free primitives rather than carrying a policy for
-    // what "not converged" should mean to every different caller.
-    template <typename ApplyOperator>
-    static std::size_t gmres(ApplyOperator&& apply, const std::vector<double>& rhs,
-                              std::vector<double>& x, std::size_t restart, std::size_t maxIterations,
-                              double tolerance) {
-        const std::size_t n = rhs.size();
-        const double bNorm = std::max(std::sqrt(dot(rhs, rhs)), 1e-300);
-        const std::size_t m = std::max<std::size_t>(restart, 1);
-        const double epsilon = std::numeric_limits<double>::epsilon();
-        std::size_t totalIterations = 0;
-
-        while (totalIterations < maxIterations) {
-            // --- Each restart cycle begins afresh from the current iterate,
-            // which is why restarted GMRES stays monotone globally: the zero
-            // correction is always available inside the new Krylov
-            // subspace, so a cycle can never make the residual worse than it
-            // started.
-            std::vector<double> r(n);
-            {
-                const std::vector<double> ax = apply(x);
-                for (std::size_t i = 0; i < n; ++i) {
-                    r[i] = rhs[i] - ax[i];
-                }
-            }
-            const double beta = std::sqrt(dot(r, r));
-            if (beta / bNorm < tolerance) {
-                return totalIterations;
-            }
-
-            std::vector<std::vector<double>> basis; // Arnoldi basis vectors v_0..v_k
-            basis.reserve(m + 1);
-            basis.push_back(r);
-            for (double& value : basis[0]) {
-                value /= beta;
-            }
-
-            // hessenberg[j] is column j of the (rotated) Hessenberg matrix,
-            // holding its j+2 potentially-nonzero entries.
-            std::vector<std::vector<double>> hessenberg;
-            std::vector<double> cosines(m, 0.0);
-            std::vector<double> sines(m, 0.0);
-            std::vector<double> g(m + 1, 0.0); // rotated RHS of the least-squares problem
-            g[0] = beta;
-
-            std::size_t completed = 0;
-            bool converged = false;
-            bool breakdown = false;
-
-            for (std::size_t j = 0; j < m && totalIterations < maxIterations; ++j) {
-                std::vector<double> w = apply(basis[j]);
-
-                // Modified Gram-Schmidt: each projection is subtracted from
-                // the *already-updated* w rather than the original --
-                // mathematically identical to classical Gram-Schmidt,
-                // numerically far better, the standard choice inside Arnoldi
-                // for exactly this reason.
-                std::vector<double> column(j + 2, 0.0);
-                for (std::size_t i = 0; i <= j; ++i) {
-                    column[i] = dot(w, basis[i]);
-                    for (std::size_t k = 0; k < n; ++k) {
-                        w[k] -= column[i] * basis[i][k];
-                    }
-                }
-                const double arnoldiNorm = std::sqrt(dot(w, w));
-                column[j + 1] = arnoldiNorm;
-
-                // Replay every previous rotation onto the new column, then
-                // build the one that annihilates its subdiagonal entry --
-                // keeps an up-to-date QR factorization of the Hessenberg
-                // matrix incrementally, so |g[j+1]| below *is* the exact
-                // residual norm of the least-squares solution, available
-                // without solving it.
-                for (std::size_t i = 0; i < j; ++i) {
-                    const double rotated = cosines[i] * column[i] + sines[i] * column[i + 1];
-                    column[i + 1] = -sines[i] * column[i] + cosines[i] * column[i + 1];
-                    column[i] = rotated;
-                }
-                const double denominator = std::hypot(column[j], column[j + 1]);
-                if (denominator <= epsilon * beta) {
-                    breakdown = true;
-                    break;
-                }
-                cosines[j] = column[j] / denominator;
-                sines[j] = column[j + 1] / denominator;
-                column[j] = denominator;
-                column[j + 1] = 0.0;
-                g[j + 1] = -sines[j] * g[j];
-                g[j] = cosines[j] * g[j];
-
-                hessenberg.push_back(std::move(column));
-                ++completed;
-                ++totalIterations;
-
-                const double relativeResidual = std::fabs(g[j + 1]) / bNorm;
-                // A zero Arnoldi norm is a "happy breakdown": the Krylov
-                // subspace is already invariant, so the least-squares
-                // solution over it is the exact solution -- success, not
-                // failure.
-                if (relativeResidual < tolerance || arnoldiNorm <= epsilon * beta) {
-                    converged = true;
-                    break;
-                }
-                for (double& value : w) {
-                    value /= arnoldiNorm;
-                }
-                basis.push_back(std::move(w));
-            }
-
-            // Back-substitute the (upper-triangular, post-rotation) system
-            // H*y = g, then apply the correction x += V*y. Done at the end
-            // of every cycle, converged or not, so a restart resumes from
-            // the best iterate this cycle found rather than discarding its
-            // work.
-            if (completed > 0) {
-                std::vector<double> y(completed, 0.0);
-                bool solvable = true;
-                for (std::size_t row = completed; row-- > 0;) {
-                    double sum = g[row];
-                    for (std::size_t col = row + 1; col < completed; ++col) {
-                        sum -= hessenberg[col][row] * y[col];
-                    }
-                    if (std::fabs(hessenberg[row][row]) <= epsilon * beta) {
-                        solvable = false;
-                        break;
-                    }
-                    y[row] = sum / hessenberg[row][row];
-                }
-                if (!solvable) {
-                    return totalIterations; // keep the best x found so far
-                }
-                for (std::size_t col = 0; col < completed; ++col) {
-                    for (std::size_t k = 0; k < n; ++k) {
-                        x[k] += y[col] * basis[col][k];
-                    }
-                }
-            }
-
-            if (breakdown || converged) {
-                return totalIterations;
-            }
-        }
-        return totalIterations;
-    }
+    // GMRES lives in KrylovSolvers.hpp, not here. It was briefly a member
+    // of this class -- added for the pressure-velocity coupling of
+    // DIVIDA_TECNICA.md 4.3 -- while a second copy already sat inside
+    // ImplicitConvectionDiffusionSolver1D. Neither class is the right
+    // owner: a matrix-free Krylov method knows nothing about tetrahedral
+    // meshes or about one-dimensional convection-diffusion, so making
+    // every caller inherit from an unstructured-FVM base just to reach it
+    // was the wrong shape. `aether::solver::gmres` is found by ordinary
+    // name lookup from anywhere in this namespace.
 
     const mesh::TetrahedralMesh* mesh_;
     std::vector<InteriorFace> interiorFaces_;

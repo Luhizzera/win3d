@@ -1,5 +1,7 @@
 #include "aether/solver/ImplicitConvectionDiffusionSolver1D.hpp"
 
+#include "aether/solver/KrylovSolvers.hpp"
+
 #include "aether/solver/ConvectionLimiter.hpp"
 
 #include <algorithm>
@@ -510,142 +512,24 @@ long long ImplicitConvectionDiffusionSolver1D::solveGmresOnce(std::size_t restar
         return applyPreconditioner(applyOperator(x));
     };
     const std::vector<double> b = applyPreconditioner(rightHandSide());
-    const double bNorm = std::max(std::sqrt(dot(b, b)), 1e-300);
-    const std::size_t m = std::max<std::size_t>(restart, 1);
 
-    // Same relative-threshold reasoning as solveBiCGStab() above: these are
-    // norms of Krylov vectors, so the meaningful comparison is against
-    // machine epsilon times the scale they actually live at (the current
-    // cycle's initial residual norm), not an absolute constant.
-    const double epsilon = std::numeric_limits<double>::epsilon();
-    std::size_t totalIterations = 0;
-
-    while (totalIterations < maxIterations) {
-        // --- Each restart cycle begins afresh from the current iterate,
-        // which is why restarted GMRES stays monotone globally: the zero
-        // correction is always available inside the new Krylov subspace,
-        // so a cycle can never make the residual worse than it started.
-        std::vector<double> r(nx_);
-        {
-            const std::vector<double> ax = operatorApply(phi_);
-            for (std::size_t i = 0; i < nx_; ++i) {
-                r[i] = b[i] - ax[i];
-            }
-        }
-        const double beta = std::sqrt(dot(r, r));
-        if (beta / bNorm < tolerance) {
-            return static_cast<long long>(totalIterations);
-        }
-
-        std::vector<std::vector<double>> basis; // Arnoldi basis vectors v_0..v_k
-        basis.reserve(m + 1);
-        basis.push_back(r);
-        for (double& value : basis[0]) {
-            value /= beta;
-        }
-
-        // hessenberg[j] is column j of the (rotated) Hessenberg matrix,
-        // holding its j+2 potentially-nonzero entries.
-        std::vector<std::vector<double>> hessenberg;
-        std::vector<double> cosines(m, 0.0);
-        std::vector<double> sines(m, 0.0);
-        std::vector<double> g(m + 1, 0.0); // rotated RHS of the least-squares problem
-        g[0] = beta;
-
-        std::size_t completed = 0;
-        bool converged = false;
-        bool breakdown = false;
-
-        for (std::size_t j = 0; j < m && totalIterations < maxIterations; ++j) {
-            std::vector<double> w = operatorApply(basis[j]);
-
-            // Modified Gram-Schmidt: each projection is subtracted from the
-            // *already-updated* w rather than the original. Mathematically
-            // identical to classical Gram-Schmidt, numerically far better --
-            // the standard choice inside Arnoldi for exactly this reason.
-            std::vector<double> column(j + 2, 0.0);
-            for (std::size_t i = 0; i <= j; ++i) {
-                column[i] = dot(w, basis[i]);
-                for (std::size_t n = 0; n < nx_; ++n) {
-                    w[n] -= column[i] * basis[i][n];
-                }
-            }
-            const double arnoldiNorm = std::sqrt(dot(w, w));
-            column[j + 1] = arnoldiNorm;
-
-            // Replay every previous rotation onto the new column, then
-            // build the one that annihilates its subdiagonal entry -- this
-            // keeps an up-to-date QR factorization of the Hessenberg matrix
-            // incrementally, so |g[j+1]| below *is* the exact residual norm
-            // of the least-squares solution, available without solving it.
-            for (std::size_t i = 0; i < j; ++i) {
-                const double rotated = cosines[i] * column[i] + sines[i] * column[i + 1];
-                column[i + 1] = -sines[i] * column[i] + cosines[i] * column[i + 1];
-                column[i] = rotated;
-            }
-            const double denominator = std::hypot(column[j], column[j + 1]);
-            if (denominator <= epsilon * beta) {
-                breakdown = true;
-                break;
-            }
-            cosines[j] = column[j] / denominator;
-            sines[j] = column[j + 1] / denominator;
-            column[j] = denominator;
-            column[j + 1] = 0.0;
-            g[j + 1] = -sines[j] * g[j];
-            g[j] = cosines[j] * g[j];
-
-            hessenberg.push_back(std::move(column));
-            ++completed;
-            ++totalIterations;
-
-            const double relativeResidual = std::fabs(g[j + 1]) / bNorm;
-            residualHistory_.push_back(relativeResidual);
-
-            // A zero Arnoldi norm is a "happy breakdown": the Krylov
-            // subspace is already invariant, so the least-squares solution
-            // over it is the exact solution -- success, not failure.
-            if (relativeResidual < tolerance || arnoldiNorm <= epsilon * beta) {
-                converged = true;
-                break;
-            }
-            for (double& value : w) {
-                value /= arnoldiNorm;
-            }
-            basis.push_back(std::move(w));
-        }
-
-        // Back-substitute the (upper-triangular, post-rotation) system
-        // H*y = g, then apply the correction x += V*y. Done at the end of
-        // every cycle, converged or not, so a restart resumes from the best
-        // iterate this cycle found rather than discarding its work.
-        if (completed > 0) {
-            std::vector<double> y(completed, 0.0);
-            for (std::size_t row = completed; row-- > 0;) {
-                double sum = g[row];
-                for (std::size_t col = row + 1; col < completed; ++col) {
-                    sum -= hessenberg[col][row] * y[col];
-                }
-                if (std::fabs(hessenberg[row][row]) <= epsilon * beta) {
-                    return -1;
-                }
-                y[row] = sum / hessenberg[row][row];
-            }
-            for (std::size_t col = 0; col < completed; ++col) {
-                for (std::size_t n = 0; n < nx_; ++n) {
-                    phi_[n] += y[col] * basis[col][n];
-                }
-            }
-        }
-
-        if (breakdown) {
-            return -1;
-        }
-        if (converged) {
-            return static_cast<long long>(totalIterations);
-        }
+    // **The numerics now live in KrylovSolvers.hpp**, shared with
+    // UnstructuredCavitySolver3D's pressure-velocity coupling. This
+    // function used to carry its own full copy of restarted GMRES -- the
+    // duplication DIVIDA_TECNICA.md recorded rather than hid when the
+    // second copy was written. What stays here is only what is specific to
+    // *this* solver: the preconditioned operator, and the two policies the
+    // shared routine deliberately does not take a position on -- recording
+    // the residual history, and reporting breakdown as -1.
+    bool brokeDown = false;
+    const std::size_t iterations = gmres(
+        operatorApply, b, phi_, restart, maxIterations, tolerance,
+        [this](double relativeResidual) { residualHistory_.push_back(relativeResidual); },
+        &brokeDown);
+    if (brokeDown) {
+        return -1;
     }
-    return static_cast<long long>(totalIterations);
+    return static_cast<long long>(iterations);
 }
 
 } // namespace aether::solver
