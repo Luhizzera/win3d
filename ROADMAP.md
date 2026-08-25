@@ -556,6 +556,59 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-25 (rodada autônoma): sete itens fechados além das cinco fases
+
+Trabalho feito sem supervisão, com a instrução de pular o que exigisse
+decisão. Resumo do que entrou e por quê — cada um tem seu próprio commit
+com a medição que o sustenta.
+
+**Capacidades novas**
+
+- **Persistência de malha tetraédrica.** Era a lacuna que tornava um
+  checkpoint não-estruturado inutilizável sozinho: os campos podiam ser
+  salvos, a malha contra a qual eles são indexados não. Guardado como
+  conectividade e não como nuvem de pontos, porque o resultado de Delaunay
+  com empates co-esféricos não é único — re-tetraedralizar no load poderia
+  produzir células diferentes e descasar os campos. Exigiu
+  `TetrahedralMesh::fromCells()`, que era lacuna e não escolha: até então o
+  único caminho para uma malha era o gerador Delaunay.
+- **Transporte de temperatura** (Fase 6.1), passivo e Boussinesq, como dois
+  ajustes separáveis. Passivo vem primeiro porque é exatamente checável
+  (princípio do máximo); empuxo não tem checagem igualmente gratuita.
+- **Escoamento passante no pipeline** (`freestream_boundary`) — entrada e
+  saída, desbloqueado pela Fase C. É o caso de engenharia mais comum, e a
+  malha não mudou: só as condições de contorno.
+
+**Investigações que fecharam perguntas em aberto**
+
+- **Item 3.3, metade da atribuição.** Cisalhamento afim isola o que a
+  gradação não isolava: com skewness segurada em ~1,0, a não-ortogonalidade
+  sobe de 1,54 a 9,43 e a ordem não sai de ~2,1. **Não-ortogonalidade não é
+  a causa** da perda de ordem. Não conclui que seja skewness — isso seria
+  eliminação por sobra.
+- **Jitter 0,95 caracterizado.** É **não-linear** (limiar nítido entre
+  entrada 0,01 e 0,05), logo categoricamente distinto da instabilidade
+  linear que o item 4.3 fechou. Não é passo de tempo (÷20 não salva) nem
+  viscosidade (×30 não salva).
+
+**Dívida e usabilidade**
+
+- **Item 5.5 fechado**: GMRES desduplicado para `KrylovSolvers.hpp`, 305
+  linhas a menos. A correção não foi uma classe chamar a outra — nenhuma
+  das duas era a dona certa de um Krylov matrix-free.
+- **`docs/getting-started.md` e `examples/flow_around_object.py`**: a
+  primeira documentação voltada a usar em vez de a continuar
+  desenvolvendo, incluindo uma seção do que o motor **não** faz.
+
+**O que ficou deliberadamente de fora**
+
+- **STEP/IGES** — depende da decisão sobre OpenCASCADE, que é sua.
+- **Tetraedralização O(N²)** — é a maior alavanca técnica restante
+  (localização de ponto + propagação por adjacência), mas é refatoração
+  profunda na classe com o histórico de bugs mais sutil do projeto, e um
+  resultado parcial precisaria de avaliação. Documentada, não tentada.
+- **Wheel/`pip install`**, **AMR**, **GPU residente** — escopo próprio.
+
 ### Estado em 2026-08-25: Fase C concluída — o item 4.3 fecha na sétima tentativa
 
 **A correção é pequena e o diagnóstico é que era caro.** Faltava aplicar,

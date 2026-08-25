@@ -99,10 +99,9 @@ o ponto-semente não caiu dentro do sólido, ou se o volume esculpido não bate
 com caixa-menos-objeto dentro de 1%. Prefere falhar a devolver uma malha
 que não passa na própria checagem.
 
-**Escopo**: escoamento externo (em torno de um objeto), domínio fechado.
-Escoamento interno em duto e domínios com entrada/saída pelo pipeline ainda
-não estão cobertos — o solver suporta saída, mas o gerador de malha aqui não
-a monta.
+**Escopo**: escoamento externo, em torno de um objeto. Escoamento interno
+em duto (o interior de uma superfície fechada) não está coberto — é uma
+capacidade diferente, não um ajuste desta.
 
 ### Condições de contorno
 
@@ -111,7 +110,11 @@ lid = aether.driving_wall_velocity(domain, face="z_max",
                                    direction=(1.0, 0.0, 0.0), speed=1.0)
 ```
 
-Uma face da caixa desliza no próprio plano; todo o resto — as outras cinco
+Há **duas formas** de dirigir a mesma malha, e a escolha é o que separa os
+dois tipos de caso.
+
+**Caixa fechada, agitada por uma tampa** (`driving_wall_velocity`): uma
+face da caixa desliza no próprio plano; todo o resto — as outras cinco
 faces e o objeto — é parede sem escorregamento.
 
 **A direção precisa ser tangencial à face**, e a função recusa se não for.
@@ -125,6 +128,22 @@ assert report.is_conservative
 ```
 
 Geometria pura, sem marchar um passo.
+
+**Escoamento passante** (`freestream_boundary`): entra por uma face e sai
+pela oposta, passando pelo objeto — aerodinâmica externa comum.
+
+```python
+wall_velocity, is_outlet = aether.freestream_boundary(
+    domain, inlet_face="x_min", outlet_face="x_max", velocity=(1.0, 0.0, 0.0))
+solver = aether.UnstructuredCavitySolver3D(domain.mesh, 0.5, wall_velocity, is_outlet, 0.0)
+```
+
+Aqui a velocidade **precisa** ter componente ao longo da normal da entrada —
+o oposto do que a caixa selada exige, e bem-posto justamente porque existe
+uma saída para a mesma massa sair. A checagem a observar não é
+`check_closed_domain_conservation` e sim o `net_boundary_flux()` do solver
+depois de rodar: a afirmação aqui é "o que entra sai", não "o que entra é
+zero".
 
 ### Vai rodar?
 
@@ -244,8 +263,9 @@ Registrado aqui para não ser descoberto no meio de um projeto:
 - **Multi-região / multi-material** — um domínio de fluido por vez.
 - **STEP/IGES** — só STL e OBJ; CAD de verdade precisa de um kernel
   (OpenCASCADE), decisão de dependência ainda em aberto.
-- **Malha com entrada/saída pelo pipeline** — o solver suporta, o gerador
-  de malha deste pipeline monta apenas domínio fechado.
+- **Escoamento interno em duto** — o mesher esculpe o objeto de dentro de
+  uma caixa (escoamento externo); o caso oposto, tetraedralizar o interior
+  de uma superfície, é outra capacidade.
 - **AMR** (refinamento adaptativo) — não existe.
 - **GPU** — há um kernel CUDA validado, mas não um solver residente na GPU;
   não acelera nada de verdade ainda.
