@@ -415,6 +415,57 @@ código já validado. Nenhum dos dois foi tentado ainda.
 Suíte completa (12 suítes, incluindo o novo binding
 `TriangleMesh::triangle()` que este trabalho precisou adicionar): 12/12.
 
+### Estado em 2026-08-20 (continuação, mesmo dia): opção (a) implementada — melhora sete ordens de grandeza, não fecha ainda; dois achados novos, mais estreitos
+
+`mesh_flow_around_object()` ganhou uma rede de fundo jitterada (mesma
+convenção "camada de contorno exatamente no plano, interior com jitter" já
+usada em `build_jittered_lattice()` — reaproveitada, não inventada) gerada
+**antes** de `tetrahedralize()`, com espaçamento derivado automaticamente do
+tamanho médio de triângulo da própria superfície importada, e uma zona de
+exclusão esférica ao redor do objeto para não amontoar pontos de fundo perto
+da geometria fina. Isto evita por construção o problema do refino por
+Steiner (achado 2 da entrada acima): a rede de fundo nunca toca uma faceta
+já recuperada, porque é adicionada antes de qualquer faceta existir.
+
+**Medido no mesmo icosaedro de teste**: 50 → **2197 células**, razão de
+volume ainda em 97x (quase igual a antes — ver por quê abaixo), mas
+**velocidade máxima caiu de ~3,3e12 para ~44** e divergência por faces de
+3,9e6 para 56,6 — sete ordens de grandeza de melhora, e a malha em si segue
+exata (volume esculpido bate, 0 facetas perdidas). **Ainda instável**, não
+fechado.
+
+**Dois achados novos, mais estreitos que os da entrada anterior**:
+
+1. **A razão de volume de 97x não está espalhada pela malha — está
+   concentrada numa cauda pequena de células na interface objeto↔fundo.**
+   Percentis medidos: 1%→0,059, 5%→0,17, mediana→0,46, 95%→0,88, 99%→1,11,
+   mas o mínimo absoluto é 0,014 — bem abaixo do percentil 1%. A maior parte
+   da malha está bem dimensionada; um punhado de células na costura entre a
+   densidade esparsa do icosaedro (só 12 vértices) e a rede de fundo mais
+   fina é que puxa a razão. **Não-ortogonalidade máxima subiu para 2,76**
+   (contra 0,80 na malha sem refino, e acima de tudo que a quinta tentativa
+   do item 4.3 validou — jitter até 0,75) — o sintoma agora parece
+   genuinamente aparentado ao item 4.3, só que disparado pela transição de
+   densidade superfície↔fundo, não por distorção de rede regular.
+2. **`recover_facets()` não escala para uma superfície mais fina.** Testado
+   com um icosaedro subdividido uma vez (42 vértices, 80 triângulos, ainda
+   um objeto simples e convexo): a chamada não retornou em 60s, contra bem
+   menos de 1s com 12 vértices. Consistente com a complexidade documentada
+   na própria classe (`missing_facets`: O(facetas × contagem_de_tetraedros))
+   — cara o bastante para travar antes mesmo de medir se a superfície mais
+   fina resolveria o achado 1.
+
+**O que isto muda para o próximo passo**: aumentar a resolução do objeto
+(que resolveria a transição de densidade do achado 1) esbarra imediatamente
+no achado 2. As duas lacunas precisam ser atacadas juntas, não em sequência
+— ou a densidade de fundo perto da zona de exclusão precisa se aproximar
+suavemente da densidade da própria superfície (grade graduada de verdade,
+não a exclusão binária atual) para que o objeto não precise ficar mais fino
+só para casar com o fundo. Nenhuma das duas tentada ainda.
+
+Suíte C++ inalterada nesta rodada (só `pipeline.py`, Python puro) — não
+re-executada por não haver mudança de binding.
+
 ## Fase 4 — GPU para valer
 
 **Objetivo**: (4.1) solve de CG inteiramente residente na GPU; (4.2)

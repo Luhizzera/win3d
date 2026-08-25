@@ -34,6 +34,8 @@ on anything in this module.
 
 from __future__ import annotations
 
+import math
+import random
 from dataclasses import dataclass
 
 from aether_core_py import Vector3
@@ -67,6 +69,7 @@ class FlowDomain:
     unrecovered_facet_count: int
     carved_volume: float
     expected_volume: float
+    background_point_count: int
 
 
 def _bounding_box(triangle_mesh: TriangleMesh) -> tuple[Vector3, Vector3]:
@@ -81,7 +84,75 @@ def _bounding_box(triangle_mesh: TriangleMesh) -> tuple[Vector3, Vector3]:
     return lo, hi
 
 
-def mesh_flow_around_object(triangle_mesh: TriangleMesh, margin: float = 3.0) -> FlowDomain:
+def _average_surface_edge_length(triangle_mesh: TriangleMesh) -> float:
+    """A cheap proxy for the object surface's own resolution: sqrt(area /
+    triangle_count) is the edge length an equilateral triangle of the mesh's
+    average triangle area would have. Exact edge lengths would need walking
+    every triangle's three edges; this is the same order of magnitude for
+    any reasonably-shaped mesh and costs one call each of two quantities
+    already computed by TriangleMesh itself.
+    """
+    n = triangle_mesh.triangle_count()
+    if n == 0:
+        return 1.0
+    return math.sqrt(triangle_mesh.surface_area() / n)
+
+
+def _background_lattice_points(box_min: Vector3, box_max: Vector3, spacing: float,
+                                exclude_center: Vector3, exclude_radius: float,
+                                seed: int = 17, jitter_fraction: float = 0.25) -> list[Vector3]:
+    """A lattice of background points spanning the box, at roughly `spacing`
+    apart, with the object's own neighbourhood carved out (see
+    `exclude_radius`'s caller).
+
+    **Reuses, rather than invents, the box-lattice convention this project
+    already validated everywhere else**: the six boundary layers (i, j or k
+    at 0 or n) sit *exactly* on the box's planes -- unperturbed, because
+    `classify_boundary_face`'s plane-membership test depends on that -- while
+    every interior point is jittered by up to `jitter_fraction` of its local
+    cell spacing, the same jitter `build_jittered_lattice()`
+    (python/tests/test_unstructured_bindings.py, used by every unstructured
+    solver test since DIVIDA_TECNICA.md's whole 4.x investigation) applies
+    for the same reason: an unperturbed regular lattice tetrahedralizes into
+    exact co-planar/co-spherical ties, which is Delaunay's known degenerate
+    case, not a representative test of a real mesh.
+
+    `exclude_radius` is a sphere around `exclude_center`, not a distance to
+    the object's actual surface -- cheap, and correct for a roughly round or
+    star-shaped object, but conservative-to-wasteful for a very elongated
+    one (a long thin object's "waist" sits far from its own bounding
+    sphere's edge, so background points get excluded there too, coarser
+    than necessary). Fixing that needs distance-to-surface, not
+    distance-to-bounding-sphere -- a real next step, not attempted here.
+    """
+    rng = random.Random(seed)
+    nx = max(2, round((box_max.x - box_min.x) / spacing))
+    ny = max(2, round((box_max.y - box_min.y) / spacing))
+    nz = max(2, round((box_max.z - box_min.z) / spacing))
+    points: list[Vector3] = []
+    for i in range(nx + 1):
+        x = box_min.x + (box_max.x - box_min.x) * i / nx
+        if 0 < i < nx:
+            x += rng.uniform(-jitter_fraction, jitter_fraction) * (box_max.x - box_min.x) / nx
+        for j in range(ny + 1):
+            y = box_min.y + (box_max.y - box_min.y) * j / ny
+            if 0 < j < ny:
+                y += rng.uniform(-jitter_fraction, jitter_fraction) * (box_max.y - box_min.y) / ny
+            for k in range(nz + 1):
+                z = box_min.z + (box_max.z - box_min.z) * k / nz
+                if 0 < k < nz:
+                    z += rng.uniform(-jitter_fraction, jitter_fraction) * (box_max.z - box_min.z) / nz
+                dx, dy, dz = x - exclude_center.x, y - exclude_center.y, z - exclude_center.z
+                if math.sqrt(dx * dx + dy * dy + dz * dz) < exclude_radius:
+                    continue
+                points.append(Vector3(x, y, z))
+    return points
+
+
+def mesh_flow_around_object(triangle_mesh: TriangleMesh, margin: float = 3.0,
+                             background_spacing: float | None = None,
+                             background_coarsening: float = 2.0,
+                             exclude_margin: float = 1.15) -> FlowDomain:
     """Builds a fluid-domain `TetrahedralMesh` for flow around `triangle_mesh`
     inside an axis-aligned bounding box expanded by `margin` times the
     object's own bounding-box size on every side.
@@ -92,6 +163,26 @@ def mesh_flow_around_object(triangle_mesh: TriangleMesh, margin: float = 3.0) ->
     `remove_region`. The object's own vertex indices are reused unchanged as
     tetrahedralization point indices (points 0..N-1), so its triangles can be
     handed to `recover_facets`/`remove_region` without any index remapping.
+
+    **Background points, not just box corners.** The first version of this
+    function only added the box's 8 corners besides the object's own
+    surface -- correct topologically, but it meant almost the entire empty
+    bulk of the box became a handful of enormous tetrahedra: measured on a
+    real test case, an 80x ratio between the smallest and largest cell,
+    which was enough on its own to blow the solver up (divergence 3.9e6 in
+    50 steps) with mesh-quality diagnostics (non-orthogonality, deficient
+    stencils) that looked completely healthy -- this was never the
+    DIVIDA_TECNICA.md 4.3 instability, just an under-resolved bulk. A first
+    fix attempt (refining after the fact via `insert_steiner_point` on the
+    largest cells) corrupted 5 of 20 already-recovered object facets, because
+    Steiner insertion has no notion of a protected wall. `background_spacing`
+    (default: `background_coarsening` times the object surface's own average
+    triangle edge length) now seeds a jittered background lattice *before*
+    `tetrahedralize()` runs at all, via `_background_lattice_points` --
+    avoiding the problem instead of repairing it after the fact. Points
+    within `exclude_margin` times the object's bounding-sphere radius of its
+    centroid are dropped, so the background lattice never crowds the
+    object's own (finer) surface resolution.
 
     Raises `MeshGenerationError` if any facet could not be recovered, if the
     interior seed point (the object's own vertex centroid -- correct for a
@@ -126,10 +217,18 @@ def mesh_flow_around_object(triangle_mesh: TriangleMesh, margin: float = 3.0) ->
                         centroid.y / triangle_mesh.vertex_count(),
                         centroid.z / triangle_mesh.vertex_count())
 
-    for x in (box_min.x, box_max.x):
-        for y in (box_min.y, box_max.y):
-            for z in (box_min.z, box_max.z):
-                tetra.add_point(x, y, z)
+    bbox_center = Vector3((box_lo.x + box_hi.x) / 2.0, (box_lo.y + box_hi.y) / 2.0,
+                           (box_lo.z + box_hi.z) / 2.0)
+    bbox_half_diagonal = 0.5 * math.sqrt(size.x ** 2 + size.y ** 2 + size.z ** 2)
+    exclude_radius = exclude_margin * bbox_half_diagonal
+
+    if background_spacing is None:
+        background_spacing = background_coarsening * _average_surface_edge_length(triangle_mesh)
+
+    background_points = _background_lattice_points(box_min, box_max, background_spacing,
+                                                     bbox_center, exclude_radius)
+    for p in background_points:
+        tetra.add_point(p.x, p.y, p.z)
 
     tetra.tetrahedralize()
 
@@ -174,6 +273,7 @@ def mesh_flow_around_object(triangle_mesh: TriangleMesh, margin: float = 3.0) ->
         unrecovered_facet_count=len(recovery.unrecovered),
         carved_volume=carved_volume,
         expected_volume=expected_volume,
+        background_point_count=len(background_points),
     )
 
 
