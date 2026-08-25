@@ -60,6 +60,7 @@ try:
         Triangle3D,
         marching_cubes_3d,
         marching_squares_2d,
+        write_tetrahedral_mesh_vtk,
     )
     from aether_persistence_py import FieldArchive, HistoryEntry, ProjectHistory, load_grid, save_grid
     from aether_optimization_py import NelderMead, OptimizationResult
@@ -75,6 +76,7 @@ try:
         check_closed_domain_conservation,
         classify_boundary_face,
         driving_wall_velocity,
+        export_result_vtk,
         measure_mesh_stability,
         mesh_flow_around_object,
         run_to_steady_state,
@@ -175,4 +177,6 @@ __all__ = [
     "StabilityReport",
     "run_to_steady_state",
     "RunReport",
+    "export_result_vtk",
+    "write_tetrahedral_mesh_vtk",
 ]

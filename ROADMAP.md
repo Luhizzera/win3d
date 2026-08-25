@@ -556,6 +556,52 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-25: **Fase B concluída** — o resultado não-estruturado saiu do terminal
+
+O item era "visualização do resultado da malha não-estruturada", e a
+primeira decisão foi *não* construir mais um modo de viewer.
+
+**Por que exportar em vez de renderizar, e a assimetria que decide.** Todo
+solver estruturado deste projeto tem seu modo no `unified_viewer`, e
+estavam certos: um campo estruturado é um array denso, então um mapa de
+calor ou uma malha de setas o mostra. Um resultado tetraédrico
+não-estruturado precisa de corte, limiar, semeadura de linhas de corrente
+e iso-superfície sobre malha irregular — que é exatamente o conjunto de
+operações que um pós-processador geral existe para oferecer, e que ParaView
+e VisIt já fazem melhor do que este repositório faria dentro de um app
+Win32/GL. Havia também um obstáculo de arquitetura real: o pipeline é
+Python (por decisão registrada — orquestração fora do núcleo numérico) e o
+viewer é C++, então um modo de viewer duplicaria a geração de malha, que é
+precisamente o custo que o item 2.1 já mediu.
+
+**`engine/postprocessing/VtkWriter`** (Módulo 7, onde saída de campo
+pertence) escreve `TetrahedralMesh` mais campos por célula em VTK legado
+ASCII. Formato legado e não XML `.vtu` de propósito: layout de texto
+estável e completamente especificado, sem escritor XML, sem base64, sem
+biblioteca de compressão e sem negociação de versão de esquema — e todo
+programa que lê VTK lê esse. Campos são **por célula**, que é onde as
+incógnitas de volumes finitos deste engine de fato vivem; escrevê-los por
+vértice exigiria inventar uma interpolação e depois apresentá-la como se
+fosse a solução.
+
+Validado sem depender de biblioteca externa: o teste **relê o próprio
+arquivo** e confere cada contagem do cabeçalho, cada coordenada, cada
+índice de conectividade e cada valor de campo contra a malha que o
+escritor recebeu — igualdade **exata**, não tolerância, já que 17 dígitos
+significativos round-trip um double bit a bit. Também checa que entrada
+inconsistente é recusada (campo de tamanho errado, nome com espaço — este
+último produziria um arquivo que outra ferramenta *misparseia* em vez de
+rejeitar, já que o formato separa tokens por espaço).
+
+`export_result_vtk()` fecha o caminho no pipeline: velocidade, pressão e
+`speed` derivado num arquivo que abre direto no ParaView. O teste do
+pipeline confere as **911 pressões** contra o solver uma a uma, e exige que
+o campo não seja trivialmente nulo — a primeira versão dessa asserção
+olhava só a célula 0, que é a célula *fixada* e vale exatamente 0, logo
+comparava 0 com 0 e não podia falhar.
+
+Suíte: **13/13 em 55s**.
+
 ### Estado em 2026-08-20 (quarta rodada): checagens de pré-voo e relato de convergência — **Fase A do roadmap de usabilidade concluída**
 
 Os dois itens que faltavam da Fase A existiam no plano antes do erro da

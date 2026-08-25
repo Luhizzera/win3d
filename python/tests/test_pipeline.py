@@ -193,6 +193,49 @@ def test_probe_predicts_the_run_and_the_run_shows_a_vortex(aether, domain):
     print(f"       u medio topo={top_mean:+.5f} fundo={bottom_mean:+.5f}")
     check(top_mean > 0.0, f"o fluido junto a tampa a segue ({top_mean:+.5f})")
     check(bottom_mean < 0.0, f"o retorno junto ao fundo e contrario ({bottom_mean:+.5f})")
+    return solver
+
+
+def test_vtk_export_carries_the_result(aether, domain, solver):
+    """The VTK round-trip itself is checked in C++ (postprocessing_tests);
+    what is checked here is the layer above it -- that
+    `export_result_vtk` hands the *solver's own* fields over, with the
+    cell counts and the field names a post-processor will look for, rather
+    than writing a well-formed file about the wrong data.
+    """
+    print("exportacao VTK: leva o resultado do solver")
+    import os
+    import tempfile
+
+    path = os.path.join(tempfile.gettempdir(), "aether_pipeline_result.vtk")
+    aether.export_result_vtk(path, solver, domain.mesh)
+    check(os.path.exists(path), "o arquivo VTK foi escrito")
+
+    with open(path, "r", encoding="ascii") as handle:
+        text = handle.read()
+    os.remove(path)
+
+    check(text.startswith("# vtk DataFile Version"), "cabecalho VTK reconhecivel")
+    check(f"CELLS {domain.mesh.cell_count()}" in text,
+          f"declara as {domain.mesh.cell_count()} celulas da malha")
+    for field in ("pressure", "speed", "velocity"):
+        check(field in text, f"o campo '{field}' esta no arquivo")
+
+    # The written values must be the ones the solver actually holds -- a
+    # file with the right shape and someone else's numbers would pass every
+    # check above. Comparing the whole pressure block rather than its first
+    # entry, because cell 0 is the *pinned* reference cell in a closed
+    # domain and therefore holds exactly 0: an assertion that only looked
+    # at it would be comparing 0 against 0 and could not fail.
+    marker = "LOOKUP_TABLE default\n"
+    start = text.index(marker) + len(marker)
+    lines = text[start:].split("\n")
+    written = [float(lines[c]) for c in range(domain.mesh.cell_count())]
+    expected = [solver.pressure(c) for c in range(domain.mesh.cell_count())]
+    check(written == expected,
+          f"as {len(written)} pressoes escritas sao exatamente as do solver")
+    check(any(value != 0.0 for value in written),
+          f"e o campo escrito nao e trivialmente nulo (max |p| = {max(abs(v) for v in written):.3e})")
 
 
 def main():
@@ -208,7 +251,8 @@ def main():
 
     domain = test_mesh_generation_is_geometrically_exact(aether, solid)
     test_conservation_check_catches_non_tangential_lid(aether, domain)
-    test_probe_predicts_the_run_and_the_run_shows_a_vortex(aether, domain)
+    solver = test_probe_predicts_the_run_and_the_run_shows_a_vortex(aether, domain)
+    test_vtk_export_carries_the_result(aether, domain, solver)
 
     if failures:
         print(f"\nFALHOU: {len(failures)} verificacao(oes)")

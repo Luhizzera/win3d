@@ -1,12 +1,18 @@
 #include "aether/postprocessing/MarchingCubes3D.hpp"
 #include "aether/postprocessing/MarchingSquares2D.hpp"
 #include "aether/postprocessing/Streamline2D.hpp"
+#include "aether/postprocessing/VtkWriter.hpp"
 #include "aether/testing/Check.hpp"
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 using namespace aether::core;
+using namespace aether::mesh;
 using namespace aether::postprocessing;
 
 namespace {
@@ -171,12 +177,171 @@ void testMarchingCubesExtractsSphere() {
     AETHER_CHECK(nearlyEqual(totalArea, 4.0 * kPi * radius * radius, 0.05));
 }
 
+// **A file format is only exported correctly if it can be read back and
+// still say the same thing**, so this parses its own output rather than
+// checking that the writer ran without throwing. There is no external VTK
+// library here to validate against, and pulling one in to test a few
+// hundred lines of text output would be a much larger dependency decision
+// than the feature warrants -- but the round-trip is self-contained and
+// decisive on its own: every count in the header, every coordinate, every
+// connectivity index and every field value has to match the mesh the
+// writer was given.
+void testVtkWriterRoundTripsMeshAndFields() {
+    // Two tetrahedra sharing a face, built by hand rather than generated:
+    // the assertions below compare against literal expected values, which
+    // only means something if the input is known exactly.
+    DelaunayTetrahedralization3D tets;
+    tets.addPoint(0.0, 0.0, 0.0);
+    tets.addPoint(1.0, 0.0, 0.0);
+    tets.addPoint(0.0, 1.0, 0.0);
+    tets.addPoint(0.0, 0.0, 1.0);
+    tets.addPoint(0.75, 0.75, 0.75);
+    tets.tetrahedralize();
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+    AETHER_CHECK(mesh.cellCount() > 0);
+
+    // Values chosen so a transposed or off-by-one write shows up: each
+    // cell's scalar is its own index, and each component of its vector is
+    // a different function of that index, so no permutation of them
+    // reproduces the original.
+    CellScalarField pressure{"pressure", {}};
+    CellVectorField velocity{"velocity", {}};
+    for (std::size_t c = 0; c < mesh.cellCount(); ++c) {
+        pressure.values.push_back(static_cast<double>(c) * 0.125);
+        velocity.values.push_back(Vector3(static_cast<double>(c), -static_cast<double>(c) * 2.0,
+                                           static_cast<double>(c) * 0.5 + 1.0));
+    }
+
+    const std::string path = "aether_vtk_roundtrip.vtk";
+    writeTetrahedralMeshVtk(path, mesh, {pressure}, {velocity});
+
+    std::ifstream in(path);
+    AETHER_CHECK(in.good());
+    std::string token;
+
+    // Header: skip the four fixed lines, then read the POINTS block.
+    std::string line;
+    for (int i = 0; i < 4; ++i) {
+        std::getline(in, line);
+    }
+    std::size_t pointCount = 0;
+    in >> token >> pointCount >> token; // "POINTS" <n> "double"
+    AETHER_CHECK(token == "double");
+    AETHER_CHECK(pointCount == mesh.vertexCount());
+    for (std::size_t v = 0; v < pointCount; ++v) {
+        double x = 0.0, y = 0.0, z = 0.0;
+        in >> x >> y >> z;
+        const Vector3& expected = mesh.vertex(v);
+        // Exact equality, not a tolerance: 17 significant digits round-trip
+        // a double bit for bit, so anything else is a writer bug.
+        AETHER_CHECK(x == expected.x && y == expected.y && z == expected.z);
+    }
+
+    std::size_t cellCount = 0;
+    std::size_t totalInts = 0;
+    in >> token >> cellCount >> totalInts; // "CELLS" <n> <n*5>
+    AETHER_CHECK(cellCount == mesh.cellCount());
+    AETHER_CHECK(totalInts == cellCount * 5);
+    for (std::size_t c = 0; c < cellCount; ++c) {
+        std::size_t perCell = 0;
+        in >> perCell;
+        AETHER_CHECK(perCell == 4);
+        const std::vector<std::size_t>& expected = mesh.cellVertices(c);
+        for (std::size_t i = 0; i < 4; ++i) {
+            std::size_t index = 0;
+            in >> index;
+            AETHER_CHECK(index == expected[i]);
+            AETHER_CHECK(index < pointCount);
+        }
+    }
+
+    std::size_t typeCount = 0;
+    in >> token >> typeCount; // "CELL_TYPES" <n>
+    AETHER_CHECK(typeCount == cellCount);
+    for (std::size_t c = 0; c < typeCount; ++c) {
+        int type = 0;
+        in >> type;
+        AETHER_CHECK(type == 10); // VTK_TETRA
+    }
+
+    std::size_t dataCount = 0;
+    in >> token >> dataCount; // "CELL_DATA" <n>
+    AETHER_CHECK(dataCount == cellCount);
+
+    std::string name, kind;
+    int components = 0;
+    in >> token >> name >> kind >> components; // "SCALARS" <name> "double" 1
+    AETHER_CHECK(token == "SCALARS" && name == "pressure" && components == 1);
+    std::getline(in, line);
+    std::getline(in, line); // "LOOKUP_TABLE default"
+    for (std::size_t c = 0; c < cellCount; ++c) {
+        double value = 0.0;
+        in >> value;
+        AETHER_CHECK(value == pressure.values[c]);
+    }
+
+    in >> token >> name >> kind; // "VECTORS" <name> "double"
+    AETHER_CHECK(token == "VECTORS" && name == "velocity");
+    for (std::size_t c = 0; c < cellCount; ++c) {
+        double x = 0.0, y = 0.0, z = 0.0;
+        in >> x >> y >> z;
+        AETHER_CHECK(x == velocity.values[c].x && y == velocity.values[c].y &&
+                      z == velocity.values[c].z);
+    }
+
+    in.close();
+    std::remove(path.c_str());
+
+    std::printf("  [postprocessing_tests] VTK: %zu pontos e %zu celulas com 2 campos "
+                "conferem apos releitura\n",
+                pointCount, cellCount);
+    std::fflush(stdout);
+}
+
+// A mismatched field length or a name with a space in it produces a file
+// that another tool misparses rather than rejects, so both are refused at
+// the call instead. Checked because a validation nobody exercises is a
+// validation that quietly stops working.
+void testVtkWriterRefusesInconsistentInput() {
+    DelaunayTetrahedralization3D tets;
+    tets.addPoint(0.0, 0.0, 0.0);
+    tets.addPoint(1.0, 0.0, 0.0);
+    tets.addPoint(0.0, 1.0, 0.0);
+    tets.addPoint(0.0, 0.0, 1.0);
+    tets.tetrahedralize();
+    const TetrahedralMesh mesh = TetrahedralMesh::fromTetrahedralization(tets);
+
+    bool refusedShortField = false;
+    try {
+        writeTetrahedralMeshVtk("aether_vtk_should_not_exist.vtk", mesh,
+                                 {CellScalarField{"p", std::vector<double>(mesh.cellCount() + 1, 0.0)}});
+    } catch (const std::invalid_argument&) {
+        refusedShortField = true;
+    }
+    AETHER_CHECK(refusedShortField);
+
+    bool refusedBadName = false;
+    try {
+        writeTetrahedralMeshVtk("aether_vtk_should_not_exist.vtk", mesh,
+                                 {CellScalarField{"bad name",
+                                                   std::vector<double>(mesh.cellCount(), 0.0)}});
+    } catch (const std::invalid_argument&) {
+        refusedBadName = true;
+    }
+    AETHER_CHECK(refusedBadName);
+
+    std::printf("  [postprocessing_tests] VTK: campo de tamanho errado e nome com espaco recusados\n");
+    std::fflush(stdout);
+}
+
 } // namespace
 
 int main() {
     testStreamlineConservesTaylorGreenStreamFunction();
     testMarchingSquaresExtractsCircle();
     testMarchingCubesExtractsSphere();
+    testVtkWriterRoundTripsMeshAndFields();
+    testVtkWriterRefusesInconsistentInput();
     std::puts("aether_postprocessing_tests: all tests passed");
     return 0;
 }

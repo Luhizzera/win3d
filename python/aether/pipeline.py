@@ -728,3 +728,41 @@ def run_to_steady_state(solver, mesh: TetrahedralMesh, max_steps: int = 5000,
         net_boundary_flux=solver.net_boundary_flux(),
         max_velocity=magnitude(field),
     )
+
+
+def export_result_vtk(path: str, solver, mesh: TetrahedralMesh) -> str:
+    """Writes the solver's current velocity and pressure fields, over `mesh`,
+    to a VTK legacy file at `path` -- readable directly by ParaView or
+    VisIt.
+
+    **This is the answer to "how do I look at an unstructured result", and
+    exporting is deliberately the answer rather than a built-in viewer.**
+    Every structured solver here has a viewer mode and those were right: a
+    structured field is a dense array, so a heatmap or an arrow lattice
+    shows it. An unstructured tetrahedral result needs slicing,
+    thresholding, streamline seeding and iso-surfacing over an irregular
+    mesh -- which is precisely the set of operations a general
+    post-processor exists to provide, and which would cost far more to
+    rebuild inside a Win32/GL demo app than the export costs.
+
+    Also emits a per-cell `speed` scalar alongside the raw fields, since
+    colouring by velocity magnitude is the first thing anyone does with a
+    flow result and deriving it in the viewer means every viewer deriving
+    it separately.
+
+    Returns `path`, so a caller can log or chain it.
+    """
+    from aether_postprocessing_py import write_tetrahedral_mesh_vtk
+
+    n = mesh.cell_count()
+    velocity = [solver.velocity(c) for c in range(n)]
+    write_tetrahedral_mesh_vtk(
+        path,
+        mesh,
+        {
+            "pressure": [solver.pressure(c) for c in range(n)],
+            "speed": [math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) for v in velocity],
+        },
+        {"velocity": velocity},
+    )
+    return path
