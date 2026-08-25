@@ -523,7 +523,6 @@ protected:
                 }
                 const double denominator = std::hypot(column[j], column[j + 1]);
                 if (denominator <= epsilon * beta) {
-                    std::fprintf(stderr, "[DIAG] givens breakdown j=%zu den=%.3e beta=%.3e\n", j, denominator, beta);
                     breakdown = true;
                     break;
                 }
@@ -544,10 +543,6 @@ protected:
                 // solution over it is the exact solution -- success, not
                 // failure.
                 if (relativeResidual < tolerance || arnoldiNorm <= epsilon * beta) {
-                    if (relativeResidual >= tolerance) {
-                        std::fprintf(stderr, "[DIAG] happy breakdown j=%zu rel=%.3e arnoldi=%.3e beta=%.3e\n",
-                                     j, relativeResidual, arnoldiNorm, beta);
-                    }
                     converged = true;
                     break;
                 }

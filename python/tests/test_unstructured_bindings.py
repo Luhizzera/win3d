@@ -315,35 +315,43 @@ def test_mesh_outlives_python_reference():
 
 
 def test_distorted_mesh_refuses_instead_of_returning_nan():
-    """On a sufficiently distorted mesh this scheme is linearly unstable and
-    the field runs away to inf and then NaN (DIVIDA_TECNICA.md 4.3). The
-    instability itself is open; what is closed is that it can no longer be
-    silent.
+    """On a distorted enough mesh the field still runs away to inf and then
+    NaN, and the guard turns that into a refusal instead of a silent field
+    of NaNs (DIVIDA_TECNICA.md 4.3).
 
-    That distinction is the whole point of this check. Before the guard, every
-    number the solver returned afterwards was NaN -- including the
-    diagnostics a caller would consult to notice something was wrong -- so a
-    run produced a field that was not a field, with nothing to indicate where
-    it stopped being one.
+    That distinction is the whole point of this check. Before the guard,
+    every number the solver returned afterwards was NaN -- including the
+    diagnostics a caller would consult to notice something was wrong -- so
+    a run produced a field that was not a field, with nothing to indicate
+    where it stopped being one.
 
-    The mesh is jittered at +-0.65/n against the +-0.25/n used everywhere
-    else, and it took two goes to land on that number. At +-0.45/n this used
-    to fail at step 20; making convection semi-implicit (DIVIDA_TECNICA.md
-    4.2) pushed the same mesh out to step 292, past this loop -- so the test
-    started failing not because the guard broke but because the solver got
-    better. That is worth leaving in the record: the guard is a floor, and
-    what it catches should shrink over time.
+    **The jitter has now been raised three times, always for the same
+    reason: the solver got better, not the guard worse.** At +-0.45/n this
+    failed at step 20 until semi-implicit convection (4.2) pushed it past
+    step 292. At +-0.65/n it failed until the coupling correction was
+    extended to outlet domains (4.3's seventh attempt), which took that
+    mesh's rest-state spectral radius from **44.05 to 0.286**. It now takes
+    +-0.95/n to blow up inside this loop.
 
-    There is still no a-priori criterion that separates a mesh that runs from
-    one that does not. The spectral radius of one step measures it after the
-    fact -- 0.98 at +-0.45/n, 44.05 at +-0.65/n -- which is how this
-    resolution was chosen rather than guessed.
+    **And what the guard catches at +-0.95/n is no longer the instability
+    the earlier versions of this docstring described**, which is worth
+    stating rather than quietly reusing the old explanation. That one was
+    linear and measurable around the rest state; at every jitter tried up
+    to 0.95 the rest-state spectral radius is now comfortably below 1
+    (0.712 / 0.286 / 0.208 / 0.495 / 0.580 at 0.45 / 0.65 / 0.75 / 0.85 /
+    0.95), so whatever still fails at 0.95 in a *driven* run is a different
+    phenomenon, not yet isolated. Non-orthogonality does not explain it
+    either -- 0.85 runs 400 steps at non-orthogonality 10.04 while 0.95
+    dies at 7.40.
+
+    There is still no a-priori criterion that separates a mesh that runs
+    from one that does not.
     """
     import aether_core_py as core_module
     import aether_solver_py as solver_module
 
     print("malha muito distorcida: recusa em vez de propagar NaN")
-    mesh = build_jittered_lattice(3, seed=17, jitter=0.65)
+    mesh = build_jittered_lattice(3, seed=17, jitter=0.95)
     solver = solver_module.UnstructuredCavitySolver3D(
         mesh, 0.1,
         lambda p: core_module.Vector3(1.0, 0.0, 0.0) if p.x < 1e-9

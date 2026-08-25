@@ -301,11 +301,59 @@ std::vector<double> UnstructuredCavitySolver3D::divergenceOfFlux(const std::vect
     // pressure level through its Dirichlet coefficient. Neither carries a
     // Rhie-Chow term at all -- fluxDt only ever affects interior faces --
     // so this half is exactly the same whatever fluxDt is.
+    // **An outlet face carries the same Rhie-Chow correction an interior
+    // face does**, and leaving it out was the third instance in this item
+    // of measuring a different operator than the one being solved
+    // (DIVIDA_TECNICA.md 4.3).
+    //
+    // The projection *enforces* an outlet flux built from the blended face
+    // gradient -- see boundaryFlux_ further down projectToDivergenceFree(),
+    // and the class comment there for the 13.2% imbalance that recomputing
+    // it any other way once produced. But this function was reporting the
+    // plain zero-gradient extrapolation `velocity . A` instead, so the
+    // coupling correction was driving one quantity to zero while
+    // maxFaceDivergence() measured another. Writing the enforced flux in
+    // terms of the *corrected* velocity this function receives:
+    //
+    //   enforced = velocityStar.A - dt (grad p)_f . A
+    //            = velocity.A + dt (grad p)_P . A - dt (grad p)_f . A
+    //            = velocity.A + dt * unitD ((grad p)_P . unitD - dPdn) . A
+    //
+    // which is exactly the correction term the interior loop above already
+    // applies, with the boundary's prescribed pressure standing in for the
+    // neighbour's. It is proportional to fluxDt, so the fluxDt = 0 path --
+    // the Poisson right-hand side, whose channel result of 6.5e-14 is not
+    // to be disturbed -- is unchanged by construction rather than by a
+    // guard that has to be remembered.
+    const bool outletCorrection = hasOutlet_ && fluxDt != 0.0;
+    const std::vector<Vector3> boundaryGradients =
+        outletCorrection ? (correctionField
+                                ? computeCellGradients(pressure, /*clampFallback=*/false,
+                                                        /*homogeneousBoundaryValues=*/true)
+                                : computeCellGradients(pressure))
+                          : std::vector<Vector3>{};
+
     for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
         const BoundaryFace& face = boundaryFaces_[i];
         const BoundaryCondition& condition = boundaryConditions_[i];
-        const double flux = condition.isOutlet ? velocity[face.cell].dot(face.areaVector)
-                                                : condition.wallVelocity.dot(face.areaVector);
+        double flux = condition.wallVelocity.dot(face.areaVector);
+        if (condition.isOutlet) {
+            Vector3 outletVelocity = velocity[face.cell];
+            if (outletCorrection) {
+                // Zero for a correction field, for the same reason
+                // homogeneousBoundaryValues exists: the base pressure
+                // already satisfies the prescribed value exactly.
+                const double prescribed = correctionField ? 0.0 : outletPressure_;
+                const double compactNormalDerivative =
+                    (prescribed - pressure[face.cell]) / face.distance;
+                const Vector3& cellGradient = boundaryGradients[face.cell];
+                outletVelocity = outletVelocity +
+                                  face.unitD *
+                                      ((cellGradient.dot(face.unitD) - compactNormalDerivative) *
+                                       fluxDt);
+            }
+            flux = outletVelocity.dot(face.areaVector);
+        }
         rhs[face.cell] -= flux / outerDt;
         if (condition.isOutlet) {
             rhs[face.cell] += face.coefficient * outletPressure_;
@@ -416,7 +464,6 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     // faces instead of interior ones. Reconciling the two outlet flux
     // definitions is the next concrete step, and it is a narrower question
     // than any previous framing of this gap.
-    if (pinnedCell != kNoPinnedCell) {
     // The first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
     // is its own convergence criterion -- but maxFaceDivergence(), the
     // metric that actually decides whether this mesh is stable, uses
@@ -550,14 +597,6 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     } else {
         lastCouplingIterations_ = 0;
         lastCouplingResidualAfter_ = residualNorm;
-    }
-    } else {
-        // Outlet mesh: correction skipped, see above. Zeroed rather than
-        // left stale, so a caller cannot mistake a previous step's numbers
-        // for this one's.
-        lastCouplingIterations_ = 0;
-        lastCouplingResidualBefore_ = 0.0;
-        lastCouplingResidualAfter_ = 0.0;
     }
 }
 

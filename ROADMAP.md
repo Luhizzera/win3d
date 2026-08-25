@@ -556,6 +556,58 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-25: Fase C concluída — o item 4.3 fecha na sétima tentativa
+
+**A correção é pequena e o diagnóstico é que era caro.** Faltava aplicar,
+numa face de saída, exatamente o termo de correção de Rhie-Chow que o laço
+de faces internas já aplicava — a projeção *impõe* um fluxo de saída
+construído com o gradiente de face misturado, mas o resíduo que o GMRES
+mirava usava a extrapolação simples `velocity·A`. O GMRES zerava uma
+quantidade enquanto `maxFaceDivergence()` media outra.
+
+Duas medições chegaram lá, ambas derrubando uma hipótese minha:
+
+1. Instrumentei os dois caminhos de quebra do GMRES: **nenhum dispara**. O
+   método converge. Isso derrubou a afirmação (que eu próprio havia escrito
+   no código) de que sobrava uma direção quase-nula.
+2. A hipótese seguinte — clamp em células de estêncil deficiente — caiu
+   igualmente: dois domínios com **zero** estêncils deficientes mantinham o
+   mesmo piso de resíduo.
+
+Restando "o GMRES converge mas o resíduo medido não cai", só sobra uma
+explicação possível: o operador resolvido e a quantidade medida não são o
+mesmo operador.
+
+**Medido, no canal com saída**: divergência por faces de 3,0e-02 para
+**1,1e-11**; fluxo líquido de contorno de 1,2e-04 para **1,2e-13**. Nos
+testes Python o canal fecha em 1,24e-13 com 2, 4 e 16 correctores — deixou
+de depender da contagem de correctores, que é o sinal de que a correção
+parou de compensar um erro.
+
+**Raio espectral em torno do repouso, malha com saída**: em jitter 0,65 foi
+de **44,05 para 0,286**; toda malha testada até jitter 0,95 fica abaixo de
+1. A instabilidade linear que abriu o item 4.3 acabou.
+
+O termo é proporcional a `fluxDt`, então o caminho do lado direito do
+Poisson (`fluxDt = 0`) fica inalterado **por construção** — verificado:
+6,475e-14, o mesmo de antes.
+
+**Um erro de protocolo meu, corrigido no caminho**: a primeira varredura
+mediu o raio espectral com a entrada ligada a 1,0 e deu valores absurdos
+(5.000 a 42.000) enquanto a marcha real rodava 400 passos com divergência
+1e-06. Com entrada não-nula o repouso não é ponto fixo, então a razão de
+normas mede o forçamento, não o operador. Foi a contradição entre as duas
+medidas que expôs isso.
+
+**O que fica aberto, e é outro fenômeno**: jitter 0,95 ainda morre no passo
+41 numa marcha dirigida, apesar de ρ = 0,58 em repouso — e não é
+não-ortogonalidade (0,85 roda 400 passos com 10,04 enquanto 0,95 morre com
+7,40). Registrado como distinto, não como resquício. O teste do guarda de
+finitude subiu de jitter 0,65 para 0,95, terceira vez que sobe porque o
+solver melhorou.
+
+Suíte: **13/13**.
+
 ### Estado em 2026-08-25: Fase D — turbulência no solver não-estruturado (comprimento de mistura)
 
 Primeiro fechamento de turbulência deste projeto a rodar sobre algo que

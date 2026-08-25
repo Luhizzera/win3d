@@ -614,7 +614,7 @@ registrar como aconteceu: o teste quebrou porque o solver melhorou, não porque
 o guarda quebrou.
 
 
-### 4.3 NaN em malha muito distorcida — RESOLVIDO para domínios fechados; domínios com saída seguem em aberto, com causa identificada
+### 4.3 ~~NaN em malha muito distorcida~~ — RESOLVIDO em 2026-08-25, para domínio fechado e com saída, na sétima tentativa
 
 Reproduz em segundos pelos bindings: rede cúbica n=3 com jitter de ±0,45/n
 (contra os ±0,25/n dos testes), canal com entrada e saída. O campo vai a
@@ -1243,6 +1243,91 @@ contorno em vez de faces internas. Reconciliar as duas definições de fluxo
 de saída é o próximo passo concreto, e é uma pergunta mais estreita que
 qualquer formulação anterior desta lacuna.
 
+**Sétima tentativa: RESOLVIDO. A causa era a face de saída não receber a
+correção de Rhie-Chow que toda face interna já recebia.**
+
+A sexta tentativa terminou com o diagnóstico correto e a correção errada.
+Duas medições fecharam a questão:
+
+1. **Instrumentei os dois caminhos de quebra do GMRES e nenhum dispara.**
+   O método *converge*, à sua tolerância relativa de 1e-8, em 64 iterações.
+   Isso derrubou a afirmação anterior deste documento de que havia uma
+   direção quase-nula sobrevivente: não há singularidade nenhuma.
+2. **A hipótese seguinte — de que o piso vinha do clamp em células de
+   estêncil deficiente — também caiu por medição**: dois domínios fechados
+   com **zero** estêncils deficientes mantinham o mesmo piso.
+
+Se o GMRES converge e ainda assim o resíduo medido não cai, então o
+operador resolvido e a quantidade medida **não são o mesmo operador**. E
+numa face de saída eles provavelmente divergiam:
+
+| quem | fluxo numa saída |
+|---|---|
+| `divergenceOfFlux` (o que o GMRES zerava) | `velocity[cell] · A` |
+| `maxFaceDivergence` (o que reporta massa) | `boundaryFlux_[i]`, com mistura de gradiente |
+
+**A correção, e por que ela é pequena.** Escrevendo o fluxo *que a projeção
+de fato impõe* em termos da velocidade já corrigida:
+
+```
+imposto = velocityStar·A − dt (grad p)_f·A
+        = velocity·A + dt (grad p)_P·A − dt (grad p)_f·A
+        = velocity·A + dt · unitD ((grad p)_P·unitD − dPdn) · A
+```
+
+que é **exatamente o termo de correção que o laço de faces internas já
+aplicava**, com a pressão prescrita do contorno no lugar do vizinho. Ou
+seja: não faltava um operador novo, faltava aplicar o operador existente
+numa face onde ele havia sido esquecido. E como o termo é proporcional a
+`fluxDt`, o caminho do lado direito do Poisson (`fluxDt = 0`) fica
+inalterado **por construção**, não por um guarda que alguém precise
+lembrar — verificado: canal continua em 6,475e-14 nesse caminho.
+
+**Medido no canal com saída (177 células):**
+
+| | antes | depois |
+|---|---|---|
+| divergência por faces | 3,0e-02 | **1,1e-11** |
+| fluxo líquido de contorno | 1,2e-04 | **1,2e-13** |
+| resíduo de acoplamento por passo | 0,033 | 2,7e-11 |
+
+E nos testes Python o canal fecha em **1,24e-13 com 2, 4 e 16
+correctores** — o número deixou de depender da contagem de correctores,
+que é o sinal de que a correção não está mais compensando um erro.
+
+**Varredura de jitter em malha com saída, raio espectral em torno do
+repouso pelo protocolo do próprio item:**
+
+| jitter | não-ortog. | ρ antes | ρ depois | 400 passos |
+|---|---|---|---|---|
+| 0,45 | 2,07 | 0,974 | 0,712 | ok |
+| 0,65 | 3,53 | **44,05** | **0,286** | ok |
+| 0,75 | 3,01 | 12,39 | 0,208 | ok |
+| 0,85 | 10,04 | — | 0,495 | ok |
+| 0,95 | 7,40 | — | 0,580 | **morre no passo 41** |
+
+**A instabilidade linear que abriu este item acabou.** Era o que a medição
+original descreveu — fator ≈2,05 por passo em torno do repouso, propriedade
+da malha e do operador — e hoje ρ < 1 em toda malha testada.
+
+**Um erro de protocolo corrigido no caminho, que vale registrar**: a
+primeira versão desta varredura mediu ρ com a *entrada ligada a 1,0* e
+obteve valores absurdos (5.000 a 42.000) enquanto a marcha real rodava
+400 passos com divergência 1e-06. Com entrada não-nula o repouso **não é
+ponto fixo**, então a razão de normas mede o termo forçante, não o
+operador. É a mesma armadilha de "medir a coisa errada" que este item
+armou três vezes; desta vez a contradição entre as duas medidas a expôs
+em minutos.
+
+**O que continua aberto, e é outra coisa**: jitter 0,95 ainda morre no
+passo 41 numa marcha *dirigida*, apesar de ρ = 0,58 em repouso. Não é a
+instabilidade linear deste item, e não é não-ortogonalidade (0,85 roda 400
+passos com não-ortogonalidade 10,04 enquanto 0,95 morre com 7,40). É um
+fenômeno distinto, ainda não isolado — registrado como tal, não como
+resquício deste. O guarda de finitude continua sendo o piso que o
+transforma em recusa em vez de campo de NaN, e o teste dele subiu de
+jitter 0,65 para 0,95 pela terceira vez, sempre porque o solver melhorou.
+
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a
@@ -1580,9 +1665,11 @@ Por dependência, não por tamanho:
 3. ~~**1.2, 1.3 e 1.4**~~ — FEITO, cada um com sua medição isolada
 4. ~~**5.2** (bindings)~~ — FEITO, e já pagou: encontrou 5.4 na primeira execução
 5. ~~**2.3** (pressão da saída no estêncil)~~ — FEITO, e dissolveu o 5.4
-6. ~~**4.3** (NaN em malha distorcida)~~ — RESOLVIDO para domínio fechado
-   (raio espectral 44,05 → 0,58 em jitter 0,65); domínio com saída contido
-   (recusa em vez de NaN, comportamento inalterado) mas não corrigido
+6. ~~**4.3** (NaN em malha distorcida)~~ — RESOLVIDO (2026-08-25) para
+   domínio fechado **e** com saída: raio espectral em jitter 0,65 foi de
+   44,05 para 0,286, canal fecha em 1,2e-13. Sétima tentativa; a causa
+   final foi a face de saída não receber a correção de Rhie-Chow que toda
+   face interna já recebia
 7. ~~**3.2** (solução manufaturada)~~ — FEITO: é ordem 2, a inferência estava certa
 8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
 9. ~~**4.1** (margem nos estruturados)~~ — FEITO; abriu o 4.4
