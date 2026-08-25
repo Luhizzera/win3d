@@ -264,8 +264,16 @@ private:
     };
 
     void buildBoundaryConditions();
+    // `correctionField` says that `pressure` is a *correction* rather than
+    // a physical pressure, which changes how its gradient must be built:
+    // unclamped (the steepest-slope bound is not linear) and with
+    // homogeneous boundary values (an outlet's prescribed pressure is
+    // already satisfied by the base field, so the correction is zero
+    // there). Both are linearity requirements, not accuracy preferences --
+    // see computeCellGradients' own declaration.
     std::vector<double> faceMassFluxes(const std::vector<core::Vector3>& velocity,
-                                        const std::vector<double>& pressure, double dt) const;
+                                        const std::vector<double>& pressure, double dt,
+                                        bool correctionField = false) const;
 
     // The cell-wise divergence of faceMassFluxes(velocity, pressure, fluxDt),
     // scaled by 1/outerDt to match the units solveDeferredCorrection() (and
@@ -291,7 +299,7 @@ private:
     // cancels them to get a genuinely linear operator for gmres().
     std::vector<double> divergenceOfFlux(const std::vector<core::Vector3>& velocity,
                                           const std::vector<double>& pressure, double fluxDt,
-                                          double outerDt) const;
+                                          double outerDt, bool correctionField = false) const;
     void projectToDivergenceFree(std::vector<core::Vector3>& velocityStar, double dt);
 
 

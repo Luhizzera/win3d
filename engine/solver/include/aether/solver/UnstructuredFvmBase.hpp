@@ -242,13 +242,28 @@ protected:
     // with it left on this function is not linear, not even homogeneous of
     // degree 1, and a Krylov method silently converges to the wrong answer
     // if handed an operator that lies about being linear.
+    // `homogeneousBoundaryValues` substitutes 0 for the prescribed value
+    // on any boundary face that carries one. Default false, which is what
+    // a *physical* field wants: an outlet's pressure really is
+    // outletPressure_, and a gradient built as if it were 0 would be
+    // wrong. A **correction** field is the opposite case and must pass
+    // true: the base field already satisfies the prescribed value exactly,
+    // so any further correction is necessarily zero there. Getting this
+    // wrong does not merely bias the gradient -- it makes the function
+    // affine rather than linear in `field` (the prescribed value enters as
+    // a constant), which silently breaks any Krylov method built on it,
+    // the same way the clamp above does. See
+    // UnstructuredCavitySolver3D::projectToDivergenceFree, the only caller
+    // that passes true, and DIVIDA_TECNICA.md 4.3 for what that cost.
     std::vector<core::Vector3> computeCellGradients(const std::vector<double>& field,
-                                                     bool clampFallback = true) const;
+                                                     bool clampFallback = true,
+                                                     bool homogeneousBoundaryValues = false) const;
 
     // Green-Gauss: grad(phi)_P = (1/V_P) sum_f phi_f A_f. Cheap, but only
     // first-order on a skewed mesh, which is why it is the fallback and not
     // the default.
-    std::vector<core::Vector3> greenGaussGradients(const std::vector<double>& field) const;
+    std::vector<core::Vector3> greenGaussGradients(const std::vector<double>& field,
+                                                    bool homogeneousBoundaryValues = false) const;
 
     // Distance-weighted interpolation of cell gradients to a face. Both the
     // non-orthogonal correction and the Rhie-Chow face flux start from this

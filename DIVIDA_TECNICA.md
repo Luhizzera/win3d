@@ -1174,6 +1174,54 @@ resíduo real primeiro (e pular quando desprezível) ainda não foi ligado a
 essa decisão; hoje só a malha ter ou não saída decide se ele roda. Aceitável
 para a suíte atual; vale revisitar se um caso maior tornar isso o gargalo.
 
+**Sexta tentativa: um defeito real do operador, corrigido — e ainda assim
+o caso com saída não fecha.**
+
+A quinta tentativa deixou registrado que o GMRES estagnava em domínio com
+saída por uma direção quase-nula, e apontou a suspeita:
+`computeCellGradients` alimenta células adjacentes à saída com o valor
+*prescrito* `outletPressure_` como valor do vizinho de contorno — mesmo
+quando o campo sendo diferenciado é uma **correção** de pressão, cujo valor
+num contorno de Dirichlet é necessariamente zero (o campo base já satisfaz
+a pressão prescrita exatamente; qualquer correção adicional ali violaria
+essa condição).
+
+**A suspeita estava certa, e o defeito é real**: usar o valor prescrito
+para um campo de correção torna o gradiente **afim, não linear** — o
+`outletPressure_` entra como termo constante. É exatamente a mesma classe
+de erro que o clamp de recuo Green-Gauss (quarta tentativa), pela mesma
+razão: um método de Krylov recebe um operador que mente sobre ser linear e
+converge com confiança para a resposta errada.
+
+Corrigido com `homogeneousBoundaryValues`, um parâmetro que substitui 0
+pelo valor prescrito em toda face de contorno que carregue um, propagado
+por `computeCellGradients`, `greenGaussGradients`, `faceMassFluxes` e
+`divergenceOfFlux`. **A correção fica, independentemente do que ela
+conserta**, porque é correta por si só — e é comprovadamente inócua em
+domínio fechado, onde nenhuma face de contorno carrega pressão prescrita
+(só saídas carregam, ver `setBoundaryFaceValue` no construtor). Verificado:
+cavidade 6,484e-05 e canal 6,475e-14, idênticos aos valores anteriores à
+mudança.
+
+**Mediu-se a melhora, e ela não basta.** No canal, o resíduo por passo
+depois da correção caiu de **0,047 para 0,033** (~30%). Mas o GMRES ainda
+para em **64 iterações contra um teto de 728** — quebra numérica, não
+orçamento esgotado, então sobra pelo menos mais uma direção quase-nula.
+
+**E aplicar a correção nesse estado é regressão, não vitória parcial**: o
+desbalanço de massa do canal vai de **6,5e-14** (correção pulada) para
+**1,2e-4** (correção aplicada mas estagnada). Por isso o portão para
+domínio fechado **permanece**, agora por um motivo mais estreito e melhor
+entendido do que "o caso com saída não funciona".
+
+**O que isto deixa para a próxima tentativa**: a pergunta deixou de ser
+"por que o operador falha numa saída" e passou a ser "qual direção
+quase-nula sobrevive depois de corrigido o termo afim". O caminho de
+diagnóstico é o mesmo que resolveu o caso fechado: extrair a base de
+Krylov onde a quebra ocorre e olhar em que células a direção final se
+concentra — o análogo do que localizou 88,8% da energia do modo instável
+em células de recuo, lá atrás neste mesmo item.
+
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a

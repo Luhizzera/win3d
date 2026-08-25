@@ -191,13 +191,14 @@ UnstructuredFvmBase::SymmetricInverse UnstructuredFvmBase::invertSymmetric3x3(do
 }
 
 std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector<double>& field,
-                                                                bool clampFallback) const {
+                                                                bool clampFallback,
+                                                                bool homogeneousBoundaryValues) const {
     // The Green-Gauss fallback is only built when this mesh actually has a
     // cell that needs it -- it costs two full passes over the faces.
     std::vector<Vector3> fallback;
     std::vector<double> steepestSlope;
     if (deficientStencilCount_ > 0) {
-        fallback = greenGaussGradients(field);
+        fallback = greenGaussGradients(field, homogeneousBoundaryValues);
         if (!clampFallback) {
             // See computeCellGradients' declaration: an unclamped caller
             // gets an unconditionally-passing bound instead of a duplicated
@@ -231,8 +232,9 @@ std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector
             if (boundaryHasValue_[face.meshFace] == 0) {
                 continue; // a zero-gradient face supports no slope at all
             }
-            const double slope =
-                std::fabs(boundaryValueCache_[face.meshFace] - field[face.cell]) / face.distance;
+            const double prescribed =
+                homogeneousBoundaryValues ? 0.0 : boundaryValueCache_[face.meshFace];
+            const double slope = std::fabs(prescribed - field[face.cell]) / face.distance;
             steepestSlope[face.cell] = std::max(steepestSlope[face.cell], slope);
         }
         }
@@ -251,7 +253,9 @@ std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector
         Vector3 rhs;
         for (const GradientStencilEntry& entry : gradientStencil_[cell]) {
             const double neighbourValue =
-                entry.neighbour == kBoundaryStencil ? entry.boundaryValue : field[entry.neighbour];
+                entry.neighbour == kBoundaryStencil
+                    ? (homogeneousBoundaryValues ? 0.0 : entry.boundaryValue)
+                    : field[entry.neighbour];
             rhs += entry.weightedDelta * (neighbourValue - field[cell]);
         }
         gradients[cell] = gradientMatrixInverse_[cell].apply(rhs);
@@ -259,7 +263,8 @@ std::vector<Vector3> UnstructuredFvmBase::computeCellGradients(const std::vector
     return gradients;
 }
 
-std::vector<Vector3> UnstructuredFvmBase::greenGaussGradients(const std::vector<double>& field) const {
+std::vector<Vector3> UnstructuredFvmBase::greenGaussGradients(const std::vector<double>& field,
+                                                                bool homogeneousBoundaryValues) const {
     // grad(phi)_P = (1/V_P) * sum_f phi_f A_f_out. The face value is a plain
     // average for interior faces, the prescribed value where there is one,
     // and phi_P itself on a zero-gradient face (which is what zero gradient
@@ -269,7 +274,9 @@ std::vector<Vector3> UnstructuredFvmBase::greenGaussGradients(const std::vector<
         const auto& face = mesh_->face(f);
         if (mesh_->isBoundaryFace(f)) {
             const double faceValue =
-                boundaryHasValue_[f] != 0 ? boundaryValueCache_[f] : field[face.owner];
+                boundaryHasValue_[f] != 0
+                    ? (homogeneousBoundaryValues ? 0.0 : boundaryValueCache_[f])
+                    : field[face.owner];
             gradients[face.owner] += face.areaVector * faceValue;
             continue;
         }

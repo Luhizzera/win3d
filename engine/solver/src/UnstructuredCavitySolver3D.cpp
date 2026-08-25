@@ -109,13 +109,16 @@ double UnstructuredCavitySolver3D::stableTimeStep() const {
 
 std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector<Vector3>& velocity,
                                                                  const std::vector<double>& pressure,
-                                                                 double dt) const {
+                                                                 double dt, bool correctionField) const {
     // Rhie-Chow style: interpolate the velocity to the face, then replace the
     // pressure-gradient part of that interpolation with the compact face
     // difference. Without this the face flux is blind to a cell-to-cell
     // pressure oscillation, which is the collocated-grid failure mode this
     // arrangement is otherwise exposed to.
-    const std::vector<Vector3> pressureGradients = computeCellGradients(pressure);
+    const std::vector<Vector3> pressureGradients =
+        correctionField ? computeCellGradients(pressure, /*clampFallback=*/false,
+                                                /*homogeneousBoundaryValues=*/true)
+                        : computeCellGradients(pressure);
     std::vector<double> fluxes(interiorFaces_.size());
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         const InteriorFace& face = interiorFaces_[i];
@@ -175,9 +178,10 @@ std::vector<double> UnstructuredCavitySolver3D::solveHelmholtz(
 
 std::vector<double> UnstructuredCavitySolver3D::divergenceOfFlux(const std::vector<Vector3>& velocity,
                                                                    const std::vector<double>& pressure,
-                                                                   double fluxDt, double outerDt) const {
+                                                                   double fluxDt, double outerDt,
+                                                                   bool correctionField) const {
     const std::size_t n = velocity.size();
-    const std::vector<double> fluxes = faceMassFluxes(velocity, pressure, fluxDt);
+    const std::vector<double> fluxes = faceMassFluxes(velocity, pressure, fluxDt, correctionField);
     std::vector<double> rhs(n, 0.0);
     for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
         rhs[interiorFaces_[i].owner] -= fluxes[i] / outerDt;
@@ -263,23 +267,31 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
                             dt * faceGradient.dot(face.areaVector);
     }
 
-    // **Coupling correction: DIVIDA_TECNICA.md 4.3, fifth attempt --
-    // restricted to closed domains (no outlet).** On an outlet mesh
-    // `correctionOperator` below was measured stalling well short of
-    // convergence (GMRES breaking down after ~35% residual reduction,
-    // unaffected by a far larger restart/iteration budget), traced to a
-    // near-null direction: `computeCellGradients(x, false)`'s stencil feeds
-    // outlet-adjacent cells the *fixed* `outletPressure_` as the boundary
-    // neighbour's value, not something that responds to the correction field
-    // `x` itself, which makes the operator ill-conditioned right where an
-    // outlet's rank normally comes from. On a closed domain this does not
-    // arise -- `pinnedCell` already supplies the operator's rank -- and the
-    // fifth attempt is unambiguous there: cavity divergence went from
-    // ~0.44 to 4.3e-13. Fixing the outlet case needs a gradient variant with
-    // a correction-consistent (zero, not outletPressure_) boundary value,
-    // which is follow-up work, not attempted here.
+    // **Coupling correction: DIVIDA_TECNICA.md 4.3 -- still gated to closed
+    // domains (no outlet), now for a narrower and better-understood
+    // reason.** The sixth attempt fixed a genuine defect in this operator:
+    // `computeCellGradients` was feeding outlet-adjacent cells the
+    // *prescribed* `outletPressure_` as the boundary neighbour's value even
+    // when the field being differentiated is a pressure *correction*, whose
+    // value at a Dirichlet boundary is necessarily zero. That made the
+    // operator affine rather than linear there, which is the one thing a
+    // Krylov method cannot tolerate. The fix (`homogeneousBoundaryValues`)
+    // is kept because it is correct independently of what it repairs, and
+    // it is a no-op on a closed domain, where no boundary face carries a
+    // prescribed pressure at all.
+    //
+    // **It improved the outlet case and did not close it**, measured on the
+    // channel: the per-step residual after correction fell from 0.047 to
+    // 0.033 (~30%), but GMRES still stops at 64 iterations against a budget
+    // of 728 -- a numerical breakdown, not an exhausted allowance, so some
+    // further near-null direction remains. Enabling the correction on an
+    // outlet domain in that state is a regression, not a partial win: the
+    // channel's mass imbalance goes from 6.5e-14 (correction skipped) to
+    // 1.2e-4 (correction applied but stalled). So the gate stays, and the
+    // remaining direction is the open question -- now genuinely narrower
+    // than "the outlet case doesn't work".
     if (pinnedCell != kNoPinnedCell) {
-    // first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
+    // The first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
     // is its own convergence criterion -- but maxFaceDivergence(), the
     // metric that actually decides whether this mesh is stable, uses
     // faceMassFluxes(velocity_, pressure_, lastDt_): the **real** step dt in
@@ -318,14 +330,17 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     // this operator promised GMRES.
     const std::vector<Vector3> zeroVelocity(n, Vector3{});
     const std::vector<double> zeroPressure(n, 0.0);
-    const std::vector<double> wallOnlyDivergence = divergenceOfFlux(zeroVelocity, zeroPressure, dt, dt);
+    const std::vector<double> wallOnlyDivergence =
+        divergenceOfFlux(zeroVelocity, zeroPressure, dt, dt, /*correctionField=*/true);
     const auto correctionOperator = [&](const std::vector<double>& x) {
-        const std::vector<Vector3> gradient = computeCellGradients(x, false);
+        const std::vector<Vector3> gradient =
+            computeCellGradients(x, /*clampFallback=*/false, /*homogeneousBoundaryValues=*/true);
         std::vector<Vector3> correctionVelocity(n);
         for (std::size_t cell = 0; cell < n; ++cell) {
             correctionVelocity[cell] = gradient[cell] * (-dt);
         }
-        std::vector<double> divergence = divergenceOfFlux(correctionVelocity, x, dt, dt);
+        std::vector<double> divergence =
+            divergenceOfFlux(correctionVelocity, x, dt, dt, /*correctionField=*/true);
         for (std::size_t cell = 0; cell < n; ++cell) {
             divergence[cell] -= wallOnlyDivergence[cell];
         }
@@ -383,7 +398,8 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
         // recorded flux consistent with *whichever* operator actually moved
         // the pressure at that face, instead of re-deriving a single
         // snapshot formula that only one of the two operators satisfies.
-        const std::vector<Vector3> deltaGradient = computeCellGradients(deltaPressure, false);
+        const std::vector<Vector3> deltaGradient = computeCellGradients(
+            deltaPressure, /*clampFallback=*/false, /*homogeneousBoundaryValues=*/true);
         std::vector<Vector3> deltaVelocity(n);
         for (std::size_t cell = 0; cell < n; ++cell) {
             deltaVelocity[cell] = deltaGradient[cell] * (-dt);
@@ -410,9 +426,9 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
         lastCouplingResidualAfter_ = residualNorm;
     }
     } else {
-        // Outlet mesh: not attempted, see the comment above. Zero rather
-        // than stale values from a previous step, so a caller cannot mistake
-        // an old number for this step's.
+        // Outlet mesh: correction skipped, see above. Zeroed rather than
+        // left stale, so a caller cannot mistake a previous step's numbers
+        // for this one's.
         lastCouplingIterations_ = 0;
         lastCouplingResidualBefore_ = 0.0;
         lastCouplingResidualAfter_ = 0.0;
