@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -14,10 +15,10 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     const TetrahedralMesh& mesh, double viscosity,
     std::function<Vector3(const Vector3&)> wallVelocity,
     std::function<bool(const Vector3&)> isOutlet, double outletPressure,
-    std::size_t pressureCorrectors, ConvectionScheme convection)
+    std::size_t pressureCorrectors, ConvectionScheme convection, TurbulenceModel turbulence)
     : UnstructuredFvmBase(mesh), viscosity_(viscosity), wallVelocity_(std::move(wallVelocity)),
       isOutlet_(std::move(isOutlet)), outletPressure_(outletPressure), convection_(convection),
-      pressureCorrectors_(std::max<std::size_t>(pressureCorrectors, 2)) {
+      pressureCorrectors_(std::max<std::size_t>(pressureCorrectors, 2)), turbulence_(turbulence) {
     velocity_.assign(mesh.cellCount(), Vector3{});
     pressure_.assign(mesh.cellCount(), 0.0);
 
@@ -54,6 +55,107 @@ UnstructuredCavitySolver3D::UnstructuredCavitySolver3D(
     // "does this face have a value", and only an outlet says yes.
     buildGradientStencils(/*useBoundaryValues=*/true);
     boundaryFlux_.assign(boundaryFaces_.size(), 0.0);
+
+    eddyViscosity_.assign(mesh.cellCount(), 0.0);
+    if (turbulence_ != TurbulenceModel::None) {
+        buildWallDistances();
+    }
+    updateEffectiveViscosity();
+}
+
+void UnstructuredCavitySolver3D::buildWallDistances() {
+    wallDistance_.assign(mesh_->cellCount(), 0.0);
+    for (std::size_t cell = 0; cell < mesh_->cellCount(); ++cell) {
+        const Vector3& centroid = mesh_->cellCentroid(cell);
+        double best = std::numeric_limits<double>::max();
+        for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+            if (boundaryConditions_[i].isOutlet) {
+                continue; // an outlet is not a wall: nothing damps turbulence there
+            }
+            best = std::min(best, (centroid - boundaryFaces_[i].centroid).norm());
+        }
+        // A domain with no solid wall at all leaves `best` at its sentinel;
+        // the cap below is what bounds the mixing length in that case, and
+        // an unbounded wall distance would otherwise make l_m meaningless.
+        wallDistance_[cell] = best == std::numeric_limits<double>::max() ? 0.0 : best;
+    }
+
+    // The mixing length's far-field cap, from the domain's own smallest
+    // extent -- the same 0.09 * (half the smallest side) that every
+    // mixing-length closure in this project uses (the Escudier asymptotic
+    // factor). Computed from the mesh bounding box because an unstructured
+    // domain has no Lx/Ly/Lz to be told.
+    Vector3 lo = mesh_->vertex(0);
+    Vector3 hi = lo;
+    for (std::size_t v = 1; v < mesh_->vertexCount(); ++v) {
+        const Vector3& q = mesh_->vertex(v);
+        lo = Vector3(std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z));
+        hi = Vector3(std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z));
+    }
+    const double smallestExtent = std::min({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    mixingLengthCap_ = 0.09 * smallestExtent * 0.5;
+}
+
+void UnstructuredCavitySolver3D::updateEddyViscosity(
+    const std::vector<std::vector<Vector3>>& velocityGradient) {
+    if (turbulence_ == TurbulenceModel::None) {
+        return;
+    }
+    constexpr double kVonKarman = 0.41;
+    for (std::size_t cell = 0; cell < mesh_->cellCount(); ++cell) {
+        const Vector3& gu = velocityGradient[0][cell];
+        const Vector3& gv = velocityGradient[1][cell];
+        const Vector3& gw = velocityGradient[2][cell];
+        // S_ij = (du_i/dx_j + du_j/dx_i)/2, and |S| = sqrt(2 S_ij S_ij).
+        // Written out rather than looped because the six independent
+        // components each name a different pair of gradients, and an
+        // indexed form obscures which is which.
+        const double sxx = gu.x;
+        const double syy = gv.y;
+        const double szz = gw.z;
+        const double sxy = 0.5 * (gu.y + gv.x);
+        const double sxz = 0.5 * (gu.z + gw.x);
+        const double syz = 0.5 * (gv.z + gw.y);
+        const double strain = std::sqrt(2.0 * (sxx * sxx + syy * syy + szz * szz +
+                                                2.0 * (sxy * sxy + sxz * sxz + syz * syz)));
+        const double mixingLength = std::min(kVonKarman * wallDistance_[cell], mixingLengthCap_);
+        eddyViscosity_[cell] = mixingLength * mixingLength * strain;
+    }
+    updateEffectiveViscosity();
+}
+
+void UnstructuredCavitySolver3D::updateEffectiveViscosity() {
+    const std::size_t n = mesh_->cellCount();
+    viscousDiagonal_.assign(n, 0.0);
+
+    if (turbulence_ == TurbulenceModel::None) {
+        // Exactly the expression the laminar path always used, so its
+        // results stay bit-identical rather than merely close -- see this
+        // function's own declaration for why that is worth a branch.
+        interiorFaceViscosity_.assign(interiorFaces_.size(), viscosity_);
+        boundaryFaceViscosity_.assign(boundaryFaces_.size(), viscosity_);
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            viscousDiagonal_[cell] = viscosity_ * interiorDiagonal_[cell];
+        }
+        return;
+    }
+
+    interiorFaceViscosity_.resize(interiorFaces_.size());
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const double nu =
+            viscosity_ + 0.5 * (eddyViscosity_[face.owner] + eddyViscosity_[face.neighbour]);
+        interiorFaceViscosity_[i] = nu;
+        viscousDiagonal_[face.owner] += nu * face.coefficient;
+        viscousDiagonal_[face.neighbour] += nu * face.coefficient;
+    }
+    // **Molecular viscosity only on a solid wall face**, not the adjacent
+    // cell's turbulent value. The mixing length -- and therefore nu_t -- is
+    // exactly zero at a wall by definition, and this project already paid
+    // for getting that wrong once: MixingLengthChannelFlowSolver1D mirrored
+    // the neighbouring cell's nu_t across the wall and its friction
+    // velocity came out 38% off the exact momentum balance.
+    boundaryFaceViscosity_.assign(boundaryFaces_.size(), viscosity_);
 }
 
 void UnstructuredCavitySolver3D::loadState(std::vector<Vector3> velocity, std::vector<double> pressure,
@@ -137,12 +239,14 @@ std::vector<double> UnstructuredCavitySolver3D::faceMassFluxes(const std::vector
 std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(
     const std::vector<double>& x, double dt, const std::vector<double>& convectionOutflow,
     bool viscous) const {
-    const double viscosity = viscous ? viscosity_ : 0.0;
     std::vector<double> result(x.size());
     for (std::size_t cell = 0; cell < x.size(); ++cell) {
-        result[cell] = (mesh_->cellVolume(cell) / dt + viscosity * interiorDiagonal_[cell] +
-                        convectionOutflow[cell]) *
+        result[cell] = (mesh_->cellVolume(cell) / dt +
+                        (viscous ? viscousDiagonal_[cell] : 0.0) + convectionOutflow[cell]) *
                        x[cell];
+    }
+    if (!viscous) {
+        return result;
     }
     // A wall face stiffens its cell's equation even though the wall value
     // itself is known and belongs on the right-hand side.
@@ -151,11 +255,16 @@ std::vector<double> UnstructuredCavitySolver3D::applyHelmholtzOperator(
             continue; // zero-gradient: no viscous flux through an outlet
         }
         result[boundaryFaces_[i].cell] +=
-            viscosity * boundaryFaces_[i].coefficient * x[boundaryFaces_[i].cell];
+            boundaryFaceViscosity_[i] * boundaryFaces_[i].coefficient * x[boundaryFaces_[i].cell];
     }
-    for (const InteriorFace& face : interiorFaces_) {
-        result[face.owner] -= viscosity * face.coefficient * x[face.neighbour];
-        result[face.neighbour] -= viscosity * face.coefficient * x[face.owner];
+    // Still symmetric with a variable coefficient: both sides of a face use
+    // the *same* face viscosity, so the off-diagonal pair stays equal and
+    // the Conjugate Gradient above applies unchanged.
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const double nu = interiorFaceViscosity_[i];
+        result[face.owner] -= nu * face.coefficient * x[face.neighbour];
+        result[face.neighbour] -= nu * face.coefficient * x[face.owner];
     }
     return result;
 }
@@ -460,6 +569,10 @@ void UnstructuredCavitySolver3D::stepWith(double dt, StepParts parts) {
     for (int c = 0; c < 3; ++c) {
         velocityGradient[c] = computeCellGradients(velocityComponent[c]);
     }
+    // The turbulence closure rides along on the gradients the convection
+    // limiter already needed, so it adds no gradient pass of its own. A
+    // no-op when the closure is None, which is why it is unconditional.
+    updateEddyViscosity(velocityGradient);
     // **The outflow part of convection goes implicit**, which is what removes
     // the convective step limit (DIVIDA_TECNICA.md 4.2). Accumulated here as a
     // per-cell coefficient: the mass flux leaving through every face where

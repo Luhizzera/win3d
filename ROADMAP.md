@@ -556,6 +556,61 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-25: Fase D — turbulência no solver não-estruturado (comprimento de mistura)
+
+Primeiro fechamento de turbulência deste projeto a rodar sobre algo que
+não é uma grade estruturada.
+
+**Comprimento de mistura primeiro, pelo mesmo motivo de sempre.** Prandtl é
+algébrico — não carrega equações de transporte próprias — então exercita a
+única peça genuinamente nova (viscosidade efetiva variando no espaço dentro
+do operador de momento) sem trazer junto os campos k/epsilon acoplados e
+não-lineares, cuja numérica precisou de três correções de bug reais quando
+foi construída para o canal 1D. Fechamentos de duas equações nesta malha
+são o próximo passo natural, não uma lacuna esquecida.
+
+**Feito em duas etapas, e a primeira era a que podia quebrar tudo.** Antes
+de acoplar modelo nenhum, o termo viscoso passou a aceitar viscosidade *por
+face* — e o caminho laminar foi mantido **bit-idêntico**, não apenas
+próximo: `nu*(c1+c2+c3)` e `nu*c1+nu*c2+nu*c3` diferem em ponto flutuante,
+então o caso uniforme continua sendo calculado pela expressão antiga, atrás
+de um `if`. Verificado: cavidade 6,484e-05, canal 6,475e-14, erros da
+solução manufaturada idênticos aos anteriores.
+
+**O operador continua SPD**, o que importa porque é o que permite manter o
+mesmo Gradiente Conjugado: os dois lados de uma face usam a *mesma*
+viscosidade de face, então o par fora da diagonal permanece igual.
+
+**Viscosidade molecular pura na face de parede**, não o nu_t da célula
+vizinha — o comprimento de mistura é exatamente zero numa parede por
+definição, e este projeto já pagou por errar isso uma vez:
+`MixingLengthChannelFlowSolver1D` espelhava o nu_t da célula adjacente
+através da parede e sua velocidade de atrito saiu 38% fora do balanço de
+momento exato.
+
+**Validação, na disciplina de sempre — propriedades do modelo, nunca tabela
+de literatura.** O caso em repouso é uma afirmação incomumente forte aqui
+justamente por o fechamento ser algébrico: sem equação de transporte e sem
+memória, campo de velocidade exatamente zero dá taxa de deformação
+exatamente zero e portanto nu_t **exatamente zero** — não pequeno, zero.
+Um fechamento de duas equações não poderia ser checado assim, porque k e
+epsilon difundem em direção aos seus valores de parede mesmo em repouso.
+
+**E uma checagem que nenhuma das outras implica**: que o fechamento de fato
+*alcança* o operador de momento. Um nu_t calculado todo passo e nunca
+consultado passaria por nu_t máximo positivo, divergência limitada e
+repouso perfeito, mudando nada. A única forma de saber é rodar o mesmo caso
+laminar e ver os campos divergirem — medido, `|u_turb − u_lam|` máximo
+**4,7e-03** contra nu_t máximo 6,8e-03 sobre nu 0,1, ou seja, os ~7% que a
+viscosidade adicional prevê.
+
+Rodando o pipeline inteiro (geometria importada → malha → solver
+turbulento), 911 células: nu_t de **1,8e-06** junto às paredes a
+**2,8e-02** no campo distante, divergência 1,3e-10, fluxo líquido
+exatamente 0.
+
+Suíte: **13/13**.
+
 ### Estado em 2026-08-25 (mesma sessão): Fase E — atrito de instalação removido; wheel segue em aberto
 
 Dois atritos, e o maior deles não era o build.

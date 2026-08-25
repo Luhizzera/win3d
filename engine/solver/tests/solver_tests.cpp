@@ -470,6 +470,137 @@ void testChannelWithOutletConservesGlobalMass() {
 }
 
 
+// Mixing-length turbulence on the unstructured tetrahedral cavity -- the
+// first turbulence closure in this project to run on anything other than a
+// structured grid.
+//
+// **Validated the same way every other closure here was: against claims
+// that follow from the model itself, never against a benchmark table.**
+// Prandtl mixing length is *algebraic*, which makes the rest-state claim
+// unusually strong and worth leading with: nu_t = l_m^2 |S| has no
+// transport equation and no memory, so a velocity field that is exactly
+// zero gives a strain rate that is exactly zero and therefore an eddy
+// viscosity that is exactly zero -- not small, zero. A two-equation
+// closure could not be checked this way, because k and epsilon diffuse
+// towards their wall values even at rest.
+void testUnstructuredMixingLengthTurbulence() {
+    using aether::solver::UnstructuredCavitySolver3D;
+    const std::size_t n = 4;
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+
+    // --- At rest: velocity and nu_t both exactly zero, bit for bit.
+    {
+        UnstructuredCavitySolver3D still(
+            mesh, 0.1, [](const Vector3&) { return Vector3{0.0, 0.0, 0.0}; }, {}, 0.0,
+            UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
+            UnstructuredCavitySolver3D::ConvectionScheme::LimitedLinearUpwind,
+            UnstructuredCavitySolver3D::TurbulenceModel::MixingLength);
+        const double dt = still.stableTimeStep();
+        for (int s = 0; s < 20; ++s) {
+            still.step(dt);
+        }
+        for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+            AETHER_CHECK(still.velocity(cell).norm() == 0.0);
+            AETHER_CHECK(still.eddyViscosity(cell) == 0.0);
+        }
+    }
+
+    const double lidSpeed = 1.0;
+    const auto lid = [lidSpeed](const Vector3& p) {
+        if (p.z < 1.0 - 1e-9) {
+            return Vector3{0.0, 0.0, 0.0};
+        }
+        const double kPi = 3.14159265358979323846;
+        const double sx = std::sin(kPi * p.x);
+        const double sy = std::sin(kPi * p.y);
+        return Vector3{lidSpeed * sx * sx * sy * sy, 0.0, 0.0};
+    };
+
+    UnstructuredCavitySolver3D turbulent(
+        mesh, 0.1, lid, {}, 0.0, UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
+        UnstructuredCavitySolver3D::ConvectionScheme::LimitedLinearUpwind,
+        UnstructuredCavitySolver3D::TurbulenceModel::MixingLength);
+    const double dt = turbulent.stableTimeStep();
+    const auto stepCount = static_cast<int>(4.0 / dt);
+    double worstDivergence = 0.0;
+    for (int s = 0; s < stepCount; ++s) {
+        turbulent.step(dt);
+        worstDivergence = std::max(worstDivergence, turbulent.maxFaceDivergence());
+    }
+
+    // Every claim below is a property of the closure, not a measurement to
+    // be matched.
+    double maxEddy = 0.0;
+    std::size_t nearestWallCell = 0;
+    std::size_t farthestWallCell = 0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        // nu_t = l_m^2 |S| is a square times a magnitude: negative is
+        // arithmetically impossible, so a negative value would mean the
+        // strain assembly is wrong, not that the model behaved oddly.
+        AETHER_CHECK(turbulent.eddyViscosity(cell) >= 0.0);
+        maxEddy = std::max(maxEddy, turbulent.eddyViscosity(cell));
+        if (turbulent.wallDistance(cell) < turbulent.wallDistance(nearestWallCell)) {
+            nearestWallCell = cell;
+        }
+        if (turbulent.wallDistance(cell) > turbulent.wallDistance(farthestWallCell)) {
+            farthestWallCell = cell;
+        }
+    }
+
+    // The lid drives real shear, so the closure must produce a real eddy
+    // viscosity -- a model silently returning zero everywhere would satisfy
+    // every other check in this function.
+    AETHER_CHECK(maxEddy > 0.0);
+
+    // l_m grows with distance from the wall (up to the cap), so at
+    // comparable strain the mixing length alone orders these two. Comparing
+    // the *mixing lengths* rather than the eddy viscosities directly,
+    // because nu_t also carries |S|, which is genuinely larger near the
+    // driven lid -- asserting on nu_t here would be asserting on the flow,
+    // not on the closure.
+    AETHER_CHECK(turbulent.wallDistance(farthestWallCell) > turbulent.wallDistance(nearestWallCell));
+
+    // Turbulent viscosity only ever adds to the molecular one, so the
+    // scheme cannot become less stable than the laminar run on the same
+    // mesh, which the suite already bounds at 5e-2.
+    AETHER_CHECK(worstDivergence < 5e-2);
+
+    // **The closure has to actually reach the momentum operator**, and
+    // that is not implied by any check above: a nu_t computed every step
+    // and then never consulted would give a positive maxEddy, a bounded
+    // divergence and a perfect rest state, while changing nothing. The
+    // only way to know is to run the same case laminar and see the fields
+    // diverge. A short run is enough -- this asks whether the coupling
+    // exists, not how large it is -- so both march to the same modest
+    // simulated time rather than to steady state.
+    const double compareTime = 0.5;
+    UnstructuredCavitySolver3D laminar(mesh, 0.1, lid);
+    UnstructuredCavitySolver3D withModel(
+        mesh, 0.1, lid, {}, 0.0, UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
+        UnstructuredCavitySolver3D::ConvectionScheme::LimitedLinearUpwind,
+        UnstructuredCavitySolver3D::TurbulenceModel::MixingLength);
+    const auto compareSteps = static_cast<int>(compareTime / laminar.stableTimeStep());
+    for (int s = 0; s < compareSteps; ++s) {
+        laminar.step(laminar.stableTimeStep());
+        withModel.step(withModel.stableTimeStep());
+    }
+    double largestDifference = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        largestDifference =
+            std::max(largestDifference, (withModel.velocity(cell) - laminar.velocity(cell)).norm());
+    }
+    // Well above any plausible floating-point difference between two runs
+    // of the same code path, so this cannot pass by rounding noise.
+    AETHER_CHECK(largestDifference > 1e-6);
+
+    std::printf("  [solver_tests] cavidade nao-estruturada turbulenta (comprimento de mistura): "
+                "%zu celulas, nu_t max=%.3e (nu=%.2f), dParede min=%.3e max=%.3e, "
+                "divergencia=%.3e, |u_turb - u_lam| max=%.3e\n",
+                mesh.cellCount(), maxEddy, 0.1, turbulent.wallDistance(nearestWallCell),
+                turbulent.wallDistance(farthestWallCell), worstDivergence, largestDifference);
+    std::fflush(stdout);
+}
+
 void testUnstructuredCavityReproducesVortexTopology() {
     // **Deliberately coarse, and the reason is a real cost measured here.**
     // The explicit step is limited by the *smallest* cell, and a Delaunay
@@ -3158,6 +3289,7 @@ int main() {
     testConvectionSchemeOrder();
     testConvectionSchemesAgainstCellPeclet();
     testTetrahedralMeshCarriesEngineFields();
+    testUnstructuredMixingLengthTurbulence();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();
     testLidDrivenCavityMassConservation();

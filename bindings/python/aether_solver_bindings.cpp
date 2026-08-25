@@ -26,6 +26,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <memory>
+
 namespace py = pybind11;
 using namespace aether::solver;
 
@@ -439,7 +441,11 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("max_non_orthogonality", &UnstructuredScalarTransportSolver::maxNonOrthogonality)
         .def("deficient_stencil_count", &UnstructuredScalarTransportSolver::deficientStencilCount);
 
-    py::class_<UnstructuredCavitySolver3D>(m, "UnstructuredCavitySolver3D")
+    py::class_<UnstructuredCavitySolver3D> unstructuredCavity(m, "UnstructuredCavitySolver3D");
+    py::enum_<UnstructuredCavitySolver3D::TurbulenceModel>(unstructuredCavity, "TurbulenceModel")
+        .value("NONE", UnstructuredCavitySolver3D::TurbulenceModel::None)
+        .value("MIXING_LENGTH", UnstructuredCavitySolver3D::TurbulenceModel::MixingLength);
+    unstructuredCavity
         // `wall_velocity(position)` gives the prescribed velocity at a
         // boundary face centroid -- zero on a solid wall, the lid's speed on
         // a moving one, the inlet profile on an inlet (an inlet needs
@@ -450,12 +456,25 @@ PYBIND11_MODULE(aether_solver_py, m) {
         // needs is a property of the *mesh*: four leaves 1e-04 of the inflow
         // unaccounted on a jittered mesh that sixty-four closes to 1e-14.
         // Pair it with last_pressure_change() rather than guessing.
-        .def(py::init<const aether::mesh::TetrahedralMesh&, double,
-                      std::function<aether::core::Vector3(const aether::core::Vector3&)>,
-                      std::function<bool(const aether::core::Vector3&)>, double, std::size_t>(),
+        //
+        // `turbulence` selects the closure; the convection scheme is left at
+        // the class default rather than exposed alongside it, because the
+        // measurement that settled that choice (DIVIDA_TECNICA.md 3.1) is
+        // not one a caller should be invited to re-litigate per call.
+        .def(py::init([](const aether::mesh::TetrahedralMesh& mesh, double viscosity,
+                          std::function<aether::core::Vector3(const aether::core::Vector3&)> wallVelocity,
+                          std::function<bool(const aether::core::Vector3&)> isOutlet,
+                          double outletPressure, std::size_t pressureCorrectors,
+                          UnstructuredCavitySolver3D::TurbulenceModel turbulence) {
+                 return std::make_unique<UnstructuredCavitySolver3D>(
+                     mesh, viscosity, std::move(wallVelocity), std::move(isOutlet), outletPressure,
+                     pressureCorrectors,
+                     UnstructuredCavitySolver3D::ConvectionScheme::LimitedLinearUpwind, turbulence);
+             }),
              py::arg("mesh"), py::arg("viscosity"), py::arg("wall_velocity"),
              py::arg("is_outlet") = py::none(), py::arg("outlet_pressure") = 0.0,
              py::arg("pressure_correctors") = UnstructuredCavitySolver3D::kDefaultPressureCorrectors,
+             py::arg("turbulence") = UnstructuredCavitySolver3D::TurbulenceModel::None,
              py::keep_alive<1, 2>())
         .def("step", &UnstructuredCavitySolver3D::step, py::arg("dt"))
         // Measurement instrument: one step with pieces switched off, so the
@@ -504,5 +523,10 @@ PYBIND11_MODULE(aether_solver_py, m) {
         // least-squares stencil is rank-deficient. Not a curiosity: it was
         // 7% of the cavity and 12% of the channel, and those cells used to
         // receive a silent zero gradient instead.
-        .def("deficient_stencil_count", &UnstructuredCavitySolver3D::deficientStencilCount);
+        .def("deficient_stencil_count", &UnstructuredCavitySolver3D::deficientStencilCount)
+        // Turbulent viscosity per cell (identically zero without a closure,
+        // and zero at any solid wall even with one), and the wall distance
+        // the mixing length is built from.
+        .def("eddy_viscosity", &UnstructuredCavitySolver3D::eddyViscosity, py::arg("cell"))
+        .def("wall_distance", &UnstructuredCavitySolver3D::wallDistance, py::arg("cell"));
 }

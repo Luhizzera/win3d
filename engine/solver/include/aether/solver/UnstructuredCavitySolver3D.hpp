@@ -135,12 +135,41 @@ public:
     // because the only way to ask for 1 is to be guessing, and the failure
     // it produces is a NaN field several thousand steps later rather than an
     // error at the call.
+    // Turbulence closure, if any.
+    //
+    // **MixingLength is deliberately the first and only one here**, and it
+    // is the same stepping stone this project used for every structured
+    // solver before it: Prandtl's algebraic closure carries no transport
+    // equations of its own, so it exercises the one genuinely new piece --
+    // a spatially varying effective viscosity in the momentum operator --
+    // without also introducing the coupled nonlinear k/epsilon (or
+    // k/omega) fields whose numerics needed three separate real bug fixes
+    // when they were built for the channel. Two-equation closures on this
+    // mesh are the natural next step, not a gap that was overlooked.
+    enum class TurbulenceModel {
+        None,         // laminar; the effective viscosity is exactly viscosity_
+        MixingLength, // nu_t = l_m^2 |S|, see updateEddyViscosity()
+    };
+
     UnstructuredCavitySolver3D(
         const mesh::TetrahedralMesh& mesh, double viscosity,
         std::function<core::Vector3(const core::Vector3&)> wallVelocity,
         std::function<bool(const core::Vector3&)> isOutlet = {}, double outletPressure = 0.0,
         std::size_t pressureCorrectors = kDefaultPressureCorrectors,
-        ConvectionScheme convection = ConvectionScheme::LimitedLinearUpwind);
+        ConvectionScheme convection = ConvectionScheme::LimitedLinearUpwind,
+        TurbulenceModel turbulence = TurbulenceModel::None);
+
+    // Turbulent (eddy) viscosity at a cell -- identically zero when the
+    // closure is None, and zero at any solid wall even when it is not,
+    // because the mixing length vanishes there by definition.
+    double eddyViscosity(std::size_t cell) const { return eddyViscosity_.at(cell); }
+
+    // Distance from a cell's centroid to the nearest solid-wall boundary
+    // face centroid. The quantity the mixing length is built from, exposed
+    // because it is a property of the *mesh* a caller may want to inspect
+    // independently -- and because it is an approximation worth being able
+    // to check (see buildWallDistances()).
+    double wallDistance(std::size_t cell) const { return wallDistance_.at(cell); }
 
     void step(double dt);
 
@@ -264,6 +293,33 @@ private:
     };
 
     void buildBoundaryConditions();
+
+    // Distance from each cell centroid to the nearest solid-wall boundary
+    // *face centroid* -- an approximation to the true distance to the wall
+    // surface, exact only when the nearest point of that face happens to
+    // be its centroid. Refining it to a point-to-triangle distance is a
+    // contained change; it is not done here because the mixing length is
+    // already an algebraic model whose own error dominates, and pretending
+    // to more precision than the closure has would be misleading. O(cells
+    // * boundary faces), computed once at construction because the mesh
+    // does not move.
+    void buildWallDistances();
+
+    // Recomputes the per-face effective viscosity and the viscous diagonal
+    // the momentum operator uses.
+    //
+    // **The laminar path is computed exactly as it always was**, not as a
+    // special case of the variable-viscosity sum: `nu * (c1 + c2 + c3)`
+    // and `nu*c1 + nu*c2 + nu*c3` are not the same in floating point, so
+    // routing the laminar case through the general code would perturb
+    // every existing result in its last bits for no reason.
+    void updateEffectiveViscosity();
+
+    // nu_t = l_m^2 |S| with l_m = min(kappa * wallDistance, cap), from the
+    // full 3D strain-rate magnitude |S| = sqrt(2 S_ij S_ij) built out of
+    // the three velocity-component gradients step() already computes for
+    // the convection limiter -- so this costs no extra gradient passes.
+    void updateEddyViscosity(const std::vector<std::vector<core::Vector3>>& velocityGradient);
     // `correctionField` says that `pressure` is a *correction* rather than
     // a physical pressure, which changes how its gradient must be built:
     // unclamped (the steepest-slope bound is not linear) and with
@@ -325,6 +381,15 @@ private:
     // solved, exactly the error ROADMAP Fase 1 diagnosed for the structured
     // cavity's divergence.
     std::vector<double> boundaryFlux_;
+
+    TurbulenceModel turbulence_ = TurbulenceModel::None;
+    std::vector<double> eddyViscosity_;   // per cell; all zeros when laminar
+    std::vector<double> wallDistance_;    // per cell
+    double mixingLengthCap_ = 0.0;        // 0.09 * (smallest domain extent)/2
+    std::vector<double> interiorFaceViscosity_; // nu + nu_t averaged to the face
+    std::vector<double> boundaryFaceViscosity_;
+    std::vector<double> viscousDiagonal_;  // sum over interior faces of nu_f * a_f
+
     mutable std::size_t lastCouplingIterations_ = 0;
     mutable double lastCouplingResidualBefore_ = 0.0;
     mutable double lastCouplingResidualAfter_ = 0.0;
