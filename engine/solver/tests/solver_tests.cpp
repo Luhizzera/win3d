@@ -483,6 +483,120 @@ void testChannelWithOutletConservesGlobalMass() {
 // viscosity that is exactly zero -- not small, zero. A two-equation
 // closure could not be checked this way, because k and epsilon diffuse
 // towards their wall values even at rest.
+// Temperature transport on the unstructured cavity (ROADMAP Fase 6.1).
+//
+// **The passive case is checked against a theorem, not a reference.** A
+// passively transported scalar obeys a maximum principle: with no source
+// term it can never leave the range spanned by its own initial field and
+// its prescribed boundary values, on any mesh, at any resolution, under
+// any flow. That is what makes it the right first step ahead of buoyancy,
+// which has no comparably free check -- and it is a genuine test of the
+// scheme, because an unbounded convection reconstruction or a sign error
+// in the diffusive wall flux both break it immediately.
+void testUnstructuredEnergyTransport() {
+    using aether::solver::UnstructuredCavitySolver3D;
+    const std::size_t n = 4;
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+    const double lidSpeed = 1.0;
+    const auto lid = [lidSpeed](const Vector3& p) {
+        if (p.z < 1.0 - 1e-9) {
+            return Vector3{0.0, 0.0, 0.0};
+        }
+        const double kPi = 3.14159265358979323846;
+        const double sx = std::sin(kPi * p.x);
+        const double sy = std::sin(kPi * p.y);
+        return Vector3{lidSpeed * sx * sx * sy * sy, 0.0, 0.0};
+    };
+
+    // --- Passive: bounded by its own data, and the flow is untouched.
+    UnstructuredCavitySolver3D passive(mesh, 0.1, lid);
+    const double cold = 0.0;
+    const double hot = 100.0;
+    passive.enableEnergy(UnstructuredCavitySolver3D::EnergyModel::Passive, 0.01, cold);
+    passive.setWallTemperature([](const Vector3& p) { return p.z > 1.0 - 1e-9; }, hot);
+
+    UnstructuredCavitySolver3D reference(mesh, 0.1, lid); // no energy model at all
+    const double dt = passive.stableTimeStep();
+    const auto steps = static_cast<int>(2.0 / dt);
+    for (int s = 0; s < steps; ++s) {
+        passive.step(dt);
+        reference.step(dt);
+    }
+
+    double lowest = hot;
+    double highest = cold;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        lowest = std::min(lowest, passive.temperature(cell));
+        highest = std::max(highest, passive.temperature(cell));
+    }
+    // The bound is a theorem, so the tolerance is for roundoff only, not
+    // for discretization error -- a scheme that overshoots by a percent is
+    // failing, not approximating.
+    AETHER_CHECK(lowest >= cold - 1e-9);
+    AETHER_CHECK(highest <= hot + 1e-9);
+    // And the field is not trivially uniform: the hot lid must have
+    // actually heated something, or the bound above would be vacuous.
+    AETHER_CHECK(highest > cold + 1.0);
+
+    // **Passive means passive**: with no buoyancy, the momentum equation
+    // cannot see the temperature at all, so the velocity field must match
+    // the run that had no energy model -- bit for bit, since it is the
+    // same arithmetic in the same order.
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        AETHER_CHECK(passive.velocity(cell).x == reference.velocity(cell).x);
+        AETHER_CHECK(passive.velocity(cell).y == reference.velocity(cell).y);
+        AETHER_CHECK(passive.velocity(cell).z == reference.velocity(cell).z);
+    }
+
+    // --- Boussinesq: buoyancy drives flow from rest, and only when the
+    // fluid is not already at the reference temperature.
+    const auto stationary = [](const Vector3&) { return Vector3{0.0, 0.0, 0.0}; };
+
+    // Uniform at the reference temperature: the buoyancy force is
+    // identically zero everywhere, so a sealed box with stationary walls
+    // must stay at exactly zero velocity. This is the check that the force
+    // is wired to (T - Tref) and not to T.
+    UnstructuredCavitySolver3D neutral(mesh, 0.1, stationary);
+    neutral.enableEnergy(UnstructuredCavitySolver3D::EnergyModel::Boussinesq, 0.01,
+                          /*referenceTemperature=*/20.0, /*thermalExpansion=*/0.003,
+                          Vector3{0.0, 0.0, -9.81});
+    const double neutralDt = 1e-3;
+    for (int s = 0; s < 20; ++s) {
+        neutral.step(neutralDt);
+    }
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        AETHER_CHECK(neutral.velocity(cell).norm() == 0.0);
+    }
+
+    // Heated from below, stationary walls: buoyancy is the only thing that
+    // can move the fluid, so any motion at all is the coupling working.
+    UnstructuredCavitySolver3D heated(mesh, 0.1, stationary);
+    heated.enableEnergy(UnstructuredCavitySolver3D::EnergyModel::Boussinesq, 0.01,
+                         /*referenceTemperature=*/20.0, /*thermalExpansion=*/0.003,
+                         Vector3{0.0, 0.0, -9.81});
+    heated.setWallTemperature([](const Vector3& p) { return p.z < 1e-9; }, 60.0);
+    for (int s = 0; s < 400; ++s) {
+        heated.step(neutralDt);
+    }
+    double fastest = 0.0;
+    double warmest = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        fastest = std::max(fastest, heated.velocity(cell).norm());
+        warmest = std::max(warmest, heated.temperature(cell));
+    }
+    AETHER_CHECK(warmest > 20.0);  // the hot floor conducted into the fluid
+    AETHER_CHECK(fastest > 1e-9);  // and that warmth set it moving
+    AETHER_CHECK(std::isfinite(fastest));
+    // Mass is still conserved in the sealed box while all this happens.
+    AETHER_CHECK(std::fabs(heated.netBoundaryFlux()) < 1e-12);
+
+    std::printf("  [solver_tests] energia nao-estruturada: passivo em [%.3f, %.3f] dentro de "
+                "[%.1f, %.1f] e velocidade identica a sem energia; Boussinesq parte do repouso "
+                "(T max=%.2f, |u| max=%.3e)\n",
+                lowest, highest, cold, hot, warmest, fastest);
+    std::fflush(stdout);
+}
+
 void testUnstructuredMixingLengthTurbulence() {
     using aether::solver::UnstructuredCavitySolver3D;
     const std::size_t n = 4;
@@ -3289,6 +3403,7 @@ int main() {
     testConvectionSchemeOrder();
     testConvectionSchemesAgainstCellPeclet();
     testTetrahedralMeshCarriesEngineFields();
+    testUnstructuredEnergyTransport();
     testUnstructuredMixingLengthTurbulence();
     testUnstructuredCavityReproducesVortexTopology();
     testChannelWithOutletConservesGlobalMass();

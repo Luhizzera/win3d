@@ -186,6 +186,163 @@ void UnstructuredCavitySolver3D::buildBoundaryConditions() {
     }
 }
 
+void UnstructuredCavitySolver3D::enableEnergy(EnergyModel model, double thermalDiffusivity,
+                                              double referenceTemperature, double thermalExpansion,
+                                              Vector3 gravity) {
+    energy_ = model;
+    thermalDiffusivity_ = thermalDiffusivity;
+    referenceTemperature_ = referenceTemperature;
+    thermalExpansion_ = thermalExpansion;
+    gravity_ = gravity;
+    temperature_.assign(mesh_->cellCount(), referenceTemperature);
+    wallTemperature_.assign(boundaryFaces_.size(), referenceTemperature);
+    hasWallTemperature_.assign(boundaryFaces_.size(), 0);
+}
+
+void UnstructuredCavitySolver3D::setWallTemperature(
+    const std::function<bool(const Vector3&)>& selector, double value) {
+    if (hasWallTemperature_.size() != boundaryFaces_.size()) {
+        wallTemperature_.assign(boundaryFaces_.size(), referenceTemperature_);
+        hasWallTemperature_.assign(boundaryFaces_.size(), 0);
+    }
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        if (selector(boundaryFaces_[i].centroid)) {
+            wallTemperature_[i] = value;
+            hasWallTemperature_[i] = 1;
+        }
+    }
+}
+
+Vector3 UnstructuredCavitySolver3D::buoyancyAcceleration(std::size_t cell) const {
+    if (energy_ != EnergyModel::Boussinesq) {
+        return Vector3{};
+    }
+    // -beta (T - Tref) g: warmer than the reference means the force opposes
+    // gravity, which is what makes warm fluid rise. Written with the sign
+    // out front rather than folded into the gravity vector so the formula
+    // reads as the textbook one.
+    return gravity_ * (-thermalExpansion_ * (temperature_[cell] - referenceTemperature_));
+}
+
+void UnstructuredCavitySolver3D::advanceTemperature(double dt,
+                                                     const std::vector<double>& massFluxes) {
+    if (energy_ == EnergyModel::None) {
+        return;
+    }
+    const std::size_t n = mesh_->cellCount();
+
+    // Explicit advection plus implicit diffusion, mirroring exactly what
+    // momentum does -- same face mass fluxes, same limited reconstruction,
+    // same over-relaxed face decomposition for the diffusive part. Reusing
+    // the machinery rather than writing a second transport scheme is the
+    // point: a temperature that convected differently from momentum would
+    // be a second discretization to validate and keep in step.
+    const std::vector<Vector3> gradient = computeCellGradients(temperature_);
+
+    std::vector<double> flux(n, 0.0);
+    std::vector<double> outflow(n, 0.0);
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const double massFlux = massFluxes[i];
+        const double faceTemperature =
+            faceValue(face, massFlux, temperature_, gradient, convection_);
+        // Conservative form: what leaves one cell enters its neighbour
+        // exactly, so the scheme cannot create or destroy heat internally.
+        flux[face.owner] -= massFlux * faceTemperature;
+        flux[face.neighbour] += massFlux * faceTemperature;
+        // Same semi-implicit split as momentum (DIVIDA_TECNICA.md 4.2): the
+        // outflow half goes on the diagonal, which is what makes the update
+        // a convex combination and therefore bounded at any dt.
+        if (massFlux >= 0.0) {
+            outflow[face.owner] += massFlux;
+        } else {
+            outflow[face.neighbour] += -massFlux;
+        }
+    }
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        const BoundaryFace& face = boundaryFaces_[i];
+        const BoundaryCondition& condition = boundaryConditions_[i];
+        if (condition.isOutlet) {
+            // Zero-gradient: the cell's own temperature leaves with the
+            // flow, adding no new information.
+            const double massFlux = velocity_[face.cell].dot(face.areaVector);
+            if (massFlux >= 0.0) {
+                outflow[face.cell] += massFlux;
+            } else {
+                // Inflow through an outlet (recirculation) carries the
+                // cell's own value back in, which is the same
+                // zero-gradient statement seen from the other side.
+                flux[face.cell] += -massFlux * temperature_[face.cell];
+            }
+            continue;
+        }
+        const double massFlux = condition.wallVelocity.dot(face.areaVector);
+        if (massFlux < 0.0) {
+            // An inlet brings its prescribed temperature in with it; an
+            // adiabatic inlet brings the cell's own.
+            const double incoming =
+                hasWallTemperature_[i] != 0 ? wallTemperature_[i] : temperature_[face.cell];
+            flux[face.cell] += -massFlux * incoming;
+        } else if (massFlux > 0.0) {
+            outflow[face.cell] += massFlux;
+        }
+        // Diffusive wall flux: only a face with a prescribed temperature
+        // conducts. Everything else is adiabatic, which is the honest
+        // default -- it carries no heat rather than an invented value.
+        if (hasWallTemperature_[i] != 0) {
+            flux[face.cell] += thermalDiffusivity_ * face.coefficient * wallTemperature_[i];
+        }
+    }
+
+    // (V/dt + outflow + kappa*sum_f a_f) T = V/dt T^n + flux, solved with
+    // the same Helmholtz machinery: the operator is the Laplacian with a
+    // shifted diagonal, still symmetric positive definite, so the project's
+    // Conjugate Gradient applies unchanged.
+    std::vector<double> rhs(n);
+    for (std::size_t cell = 0; cell < n; ++cell) {
+        rhs[cell] = mesh_->cellVolume(cell) / dt * temperature_[cell] + flux[cell];
+    }
+    const std::vector<double> updated = solveEnergyHelmholtz(rhs, dt, outflow);
+    temperature_ = updated;
+}
+
+std::vector<double> UnstructuredCavitySolver3D::applyEnergyOperator(
+    const std::vector<double>& x, double dt, const std::vector<double>& outflow) const {
+    std::vector<double> result(x.size());
+    for (std::size_t cell = 0; cell < x.size(); ++cell) {
+        result[cell] = (mesh_->cellVolume(cell) / dt +
+                        thermalDiffusivity_ * interiorDiagonal_[cell] + outflow[cell]) *
+                       x[cell];
+    }
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        // Only a conducting (prescribed-temperature) wall stiffens the
+        // equation; an adiabatic face contributes no coefficient at all,
+        // exactly as a zero-gradient pressure wall does in the Poisson
+        // operator.
+        if (hasWallTemperature_[i] == 0) {
+            continue;
+        }
+        result[boundaryFaces_[i].cell] +=
+            thermalDiffusivity_ * boundaryFaces_[i].coefficient * x[boundaryFaces_[i].cell];
+    }
+    for (const InteriorFace& face : interiorFaces_) {
+        result[face.owner] -= thermalDiffusivity_ * face.coefficient * x[face.neighbour];
+        result[face.neighbour] -= thermalDiffusivity_ * face.coefficient * x[face.owner];
+    }
+    return result;
+}
+
+std::vector<double> UnstructuredCavitySolver3D::solveEnergyHelmholtz(
+    const std::vector<double>& rhs, double dt, const std::vector<double>& outflow) const {
+    std::vector<double> x(rhs.size(), 0.0);
+    conjugateGradient(
+        [this, dt, &outflow](const std::vector<double>& v) {
+            return applyEnergyOperator(v, dt, outflow);
+        },
+        rhs, x, rhs.size(), 1e-12);
+    return x;
+}
+
 double UnstructuredCavitySolver3D::stableTimeStep() const {
     // **Convection only.** With the viscous term solved implicitly there is
     // no diffusive stability bound at all, which is what that change was
@@ -615,6 +772,11 @@ void UnstructuredCavitySolver3D::stepWith(double dt, StepParts parts) {
     for (int c = 0; c < 3; ++c) {
         velocityGradient[c] = computeCellGradients(velocityComponent[c]);
     }
+    // Temperature is advanced first, on the same face mass fluxes momentum
+    // is about to use, so the buoyancy force below sees *this* step's
+    // temperature rather than the previous one's. A no-op when the energy
+    // model is None.
+    advanceTemperature(dt, massFluxes);
     // The turbulence closure rides along on the gradients the convection
     // limiter already needed, so it adds no gradient pass of its own. A
     // no-op when the closure is None, which is why it is unconditional.
@@ -700,6 +862,15 @@ void UnstructuredCavitySolver3D::stepWith(double dt, StepParts parts) {
         component[0][cell] += convectionOutflow[cell] * velocity_[cell].x;
         component[1][cell] += convectionOutflow[cell] * velocity_[cell].y;
         component[2][cell] += convectionOutflow[cell] * velocity_[cell].z;
+        // Buoyancy enters as an ordinary body force, V * acceleration --
+        // identically zero unless the energy model is Boussinesq, so the
+        // laminar and passive-transport paths are untouched rather than
+        // merely close.
+        const Vector3 buoyancy = buoyancyAcceleration(cell);
+        const double volume = mesh_->cellVolume(cell);
+        component[0][cell] += volume * buoyancy.x;
+        component[1][cell] += volume * buoyancy.y;
+        component[2][cell] += volume * buoyancy.z;
     }
     // The wall velocity is known, so its viscous flux is a source rather than
     // part of the operator. This is where the lid drives the flow.

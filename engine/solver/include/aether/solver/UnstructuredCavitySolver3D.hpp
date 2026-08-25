@@ -159,6 +159,50 @@ public:
         ConvectionScheme convection = ConvectionScheme::LimitedLinearUpwind,
         TurbulenceModel turbulence = TurbulenceModel::None);
 
+    // Switches on a transported temperature field (ROADMAP Fase 6.1).
+    //
+    // **Two capabilities, deliberately separable.** `Passive` transports
+    // temperature by the solved velocity -- advection with the same limited
+    // scheme momentum uses, plus diffusion at `thermalDiffusivity` -- and
+    // the momentum equation never sees it. That is forced convection:
+    // cooling a component in a duct, where the flow drives the heat and the
+    // heat does not drive the flow. `Boussinesq` adds the feedback, a
+    // buoyancy body force -beta (T - Tref) g, which is natural convection.
+    //
+    // Passive comes first and stands on its own because it is exactly
+    // checkable: a passive scalar obeys a maximum principle, so its field
+    // can never leave the range of its own initial and boundary values, no
+    // matter the mesh or the flow. Buoyancy has no such free check --
+    // which is why the two are separate settings rather than one flag.
+    enum class EnergyModel {
+        None,       // no temperature field at all
+        Passive,    // transported by the flow; no feedback into momentum
+        Boussinesq, // adds the buoyancy body force
+    };
+
+    // Turns on temperature transport. `referenceTemperature` is the
+    // temperature at which buoyancy vanishes (unused by Passive),
+    // `thermalExpansion` is beta in the Boussinesq force, and `gravity` is
+    // the acceleration vector it acts along.
+    //
+    // Call before stepping. The field starts uniform at
+    // `referenceTemperature`; use setTemperature()/setWallTemperature() to
+    // impose something else.
+    void enableEnergy(EnergyModel model, double thermalDiffusivity,
+                       double referenceTemperature = 0.0, double thermalExpansion = 0.0,
+                       core::Vector3 gravity = core::Vector3(0.0, 0.0, -9.81));
+
+    double temperature(std::size_t cell) const { return temperature_.at(cell); }
+    void setTemperature(std::size_t cell, double value) { temperature_.at(cell) = value; }
+
+    // Prescribed temperature on the boundary faces `selector` accepts,
+    // given their centroids -- the same selector-by-position convention
+    // wallVelocity and isOutlet already use, so a caller names boundaries
+    // one way throughout. A face no selector ever accepts stays adiabatic
+    // (zero gradient), which is the honest default: it carries no heat
+    // rather than an invented temperature.
+    void setWallTemperature(const std::function<bool(const core::Vector3&)>& selector, double value);
+
     // Turbulent (eddy) viscosity at a cell -- identically zero when the
     // closure is None, and zero at any solid wall even when it is not,
     // because the mixing length vanishes there by definition.
@@ -305,6 +349,29 @@ private:
     // does not move.
     void buildWallDistances();
 
+    // Advances the temperature field one step: the same limited-upwind
+    // advection on the same face mass fluxes momentum uses, plus diffusion
+    // through the same over-relaxed face decomposition, with prescribed
+    // wall temperatures entering as a Dirichlet flux and every other
+    // boundary face adiabatic.
+    void advanceTemperature(double dt, const std::vector<double>& massFluxes);
+
+    // The Boussinesq body force at a cell: -beta (T - Tref) g. Zero unless
+    // the model is Boussinesq, which is what keeps the momentum assembly
+    // free of a branch.
+    core::Vector3 buoyancyAcceleration(std::size_t cell) const;
+
+    // The energy equation's own Helmholtz operator and solve. Structurally
+    // the momentum one with thermal diffusivity in place of viscosity and
+    // only conducting walls contributing -- separate rather than shared
+    // because the boundary rule genuinely differs: momentum sees every
+    // non-outlet face as a no-slip wall, while an unprescribed face here is
+    // adiabatic and contributes nothing.
+    std::vector<double> applyEnergyOperator(const std::vector<double>& x, double dt,
+                                             const std::vector<double>& outflow) const;
+    std::vector<double> solveEnergyHelmholtz(const std::vector<double>& rhs, double dt,
+                                              const std::vector<double>& outflow) const;
+
     // Recomputes the per-face effective viscosity and the viscous diagonal
     // the momentum operator uses.
     //
@@ -381,6 +448,18 @@ private:
     // solved, exactly the error ROADMAP Fase 1 diagnosed for the structured
     // cavity's divergence.
     std::vector<double> boundaryFlux_;
+
+    EnergyModel energy_ = EnergyModel::None;
+    std::vector<double> temperature_;
+    // Per boundary face: the prescribed temperature, and whether one was
+    // prescribed at all. Parallel to boundaryFaces_, like
+    // boundaryConditions_.
+    std::vector<double> wallTemperature_;
+    std::vector<char> hasWallTemperature_;
+    double thermalDiffusivity_ = 0.0;
+    double referenceTemperature_ = 0.0;
+    double thermalExpansion_ = 0.0;
+    core::Vector3 gravity_{0.0, 0.0, -9.81};
 
     TurbulenceModel turbulence_ = TurbulenceModel::None;
     std::vector<double> eddyViscosity_;   // per cell; all zeros when laminar

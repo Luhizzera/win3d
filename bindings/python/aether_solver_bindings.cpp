@@ -442,6 +442,10 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("deficient_stencil_count", &UnstructuredScalarTransportSolver::deficientStencilCount);
 
     py::class_<UnstructuredCavitySolver3D> unstructuredCavity(m, "UnstructuredCavitySolver3D");
+    py::enum_<UnstructuredCavitySolver3D::EnergyModel>(unstructuredCavity, "EnergyModel")
+        .value("NONE", UnstructuredCavitySolver3D::EnergyModel::None)
+        .value("PASSIVE", UnstructuredCavitySolver3D::EnergyModel::Passive)
+        .value("BOUSSINESQ", UnstructuredCavitySolver3D::EnergyModel::Boussinesq);
     py::enum_<UnstructuredCavitySolver3D::TurbulenceModel>(unstructuredCavity, "TurbulenceModel")
         .value("NONE", UnstructuredCavitySolver3D::TurbulenceModel::None)
         .value("MIXING_LENGTH", UnstructuredCavitySolver3D::TurbulenceModel::MixingLength);
@@ -528,5 +532,19 @@ PYBIND11_MODULE(aether_solver_py, m) {
         // and zero at any solid wall even with one), and the wall distance
         // the mixing length is built from.
         .def("eddy_viscosity", &UnstructuredCavitySolver3D::eddyViscosity, py::arg("cell"))
-        .def("wall_distance", &UnstructuredCavitySolver3D::wallDistance, py::arg("cell"));
+        .def("wall_distance", &UnstructuredCavitySolver3D::wallDistance, py::arg("cell"))
+        // Temperature transport (ROADMAP Fase 6.1). PASSIVE is forced
+        // convection -- the flow carries the heat and the heat does not move
+        // the flow; BOUSSINESQ adds the buoyancy feedback, i.e. natural
+        // convection. A boundary face no set_wall_temperature() call ever
+        // selects stays adiabatic.
+        .def("enable_energy", &UnstructuredCavitySolver3D::enableEnergy, py::arg("model"),
+             py::arg("thermal_diffusivity"), py::arg("reference_temperature") = 0.0,
+             py::arg("thermal_expansion") = 0.0,
+             py::arg("gravity") = aether::core::Vector3(0.0, 0.0, -9.81))
+        .def("set_wall_temperature", &UnstructuredCavitySolver3D::setWallTemperature,
+             py::arg("selector"), py::arg("value"))
+        .def("temperature", &UnstructuredCavitySolver3D::temperature, py::arg("cell"))
+        .def("set_temperature", &UnstructuredCavitySolver3D::setTemperature, py::arg("cell"),
+             py::arg("value"));
 }
