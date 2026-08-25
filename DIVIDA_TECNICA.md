@@ -1214,13 +1214,34 @@ desbalanço de massa do canal vai de **6,5e-14** (correção pulada) para
 domínio fechado **permanece**, agora por um motivo mais estreito e melhor
 entendido do que "o caso com saída não funciona".
 
-**O que isto deixa para a próxima tentativa**: a pergunta deixou de ser
-"por que o operador falha numa saída" e passou a ser "qual direção
-quase-nula sobrevive depois de corrigido o termo afim". O caminho de
-diagnóstico é o mesmo que resolveu o caso fechado: extrair a base de
-Krylov onde a quebra ocorre e olhar em que células a direção final se
-concentra — o análogo do que localizou 88,8% da energia do modo instável
-em células de recuo, lá atrás neste mesmo item.
+**E o diagnóstico seguinte foi feito na mesma sessão, corrigindo o que o
+parágrafo acima presumia.** A suposição era que sobrava uma direção
+quase-nula e que o GMRES quebrava numericamente. Instrumentei os dois
+caminhos de quebra (Givens e "happy breakdown") e **nenhum dispara**: o
+GMRES *converge*, à sua própria tolerância relativa de 1e-8, em 64
+iterações. Não há singularidade.
+
+Uma segunda hipótese — que o piso de resíduo vinha do clamp em células de
+estêncil deficiente, onde o operador usa o gradiente sem clamp e o resíduo
+recomputado usa o clampeado — também foi **descartada por medição**: dois
+domínios fechados com **zero** estêncils deficientes (911 e 3493 células)
+continuam reduzindo o resíduo por um fator de 100–370 em vez de ir a
+precisão de máquina.
+
+**A causa real, encontrada relendo o código com essa pista**: numa face de
+contorno as duas quantidades divergem por construção.
+
+| quem | fluxo numa saída |
+|---|---|
+| `divergenceOfFlux` (o que o GMRES zera) | `velocity[cell] · areaVector` |
+| `maxFaceDivergence` (o que reporta conservação) | `boundaryFlux_[i]`, a fórmula com mistura de gradiente |
+
+É **a mesma classe de erro que a quarta tentativa encontrou** entre
+`fluxDt=0` e `fluxDt=dt`, um nível para fora: *medir o operador que de
+fato se resolve* — agora pela terceira vez neste item, em faces de
+contorno em vez de faces internas. Reconciliar as duas definições de fluxo
+de saída é o próximo passo concreto, e é uma pergunta mais estreita que
+qualquer formulação anterior desta lacuna.
 
 ### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
 

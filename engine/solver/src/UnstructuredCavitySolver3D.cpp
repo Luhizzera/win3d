@@ -391,14 +391,31 @@ void UnstructuredCavitySolver3D::projectToDivergenceFree(std::vector<Vector3>& v
     //
     // **It improved the outlet case and did not close it**, measured on the
     // channel: the per-step residual after correction fell from 0.047 to
-    // 0.033 (~30%), but GMRES still stops at 64 iterations against a budget
-    // of 728 -- a numerical breakdown, not an exhausted allowance, so some
-    // further near-null direction remains. Enabling the correction on an
-    // outlet domain in that state is a regression, not a partial win: the
+    // 0.033 (~30%). Enabling the correction on an outlet domain in that
+    // state is still a regression rather than a partial win -- the
     // channel's mass imbalance goes from 6.5e-14 (correction skipped) to
-    // 1.2e-4 (correction applied but stalled). So the gate stays, and the
-    // remaining direction is the open question -- now genuinely narrower
-    // than "the outlet case doesn't work".
+    // 1.2e-4 (correction applied) -- so the gate stays.
+    //
+    // **Why it does not close is now known, and it is not what an earlier
+    // version of this comment said.** That version claimed GMRES suffered
+    // a numerical breakdown. Instrumenting the two breakdown paths directly
+    // showed neither ever fires: GMRES *converges*, to its own 1e-8
+    // relative tolerance, in 64 iterations. So the operator it solves is
+    // simply not the exact linearization of the quantity that is measured
+    // afterwards -- and on a boundary face those two provably disagree:
+    //
+    //   divergenceOfFlux (what GMRES drives to zero) uses, at an outlet,
+    //     velocity[cell] . areaVector
+    //   maxFaceDivergence (what actually reports mass conservation) uses
+    //     boundaryFlux_[i], which is the gradient-blended formula recorded
+    //     further down this function.
+    //
+    // That is the same class of error the fourth attempt found between
+    // fluxDt=0 and fluxDt=dt, one level out: **measure the operator you
+    // actually solve**, now for the third time in this item, on boundary
+    // faces instead of interior ones. Reconciling the two outlet flux
+    // definitions is the next concrete step, and it is a narrower question
+    // than any previous framing of this gap.
     if (pinnedCell != kNoPinnedCell) {
     // The first corrector drives the fluxDt=0 residual above to ~1e-10 -- that
     // is its own convergence criterion -- but maxFaceDivergence(), the
