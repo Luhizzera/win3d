@@ -67,11 +67,17 @@ try:
     from aether_ml_py import MultiLayerPerceptron
     from aether_plugin_py import DiagnosticInfo, PluginHost
     from aether.pipeline import (
+        ConservationReport,
         FlowDomain,
         MeshGenerationError,
+        RunReport,
+        StabilityReport,
+        check_closed_domain_conservation,
         classify_boundary_face,
         driving_wall_velocity,
+        measure_mesh_stability,
         mesh_flow_around_object,
+        run_to_steady_state,
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -163,4 +169,10 @@ __all__ = [
     "driving_wall_velocity",
     "FlowDomain",
     "MeshGenerationError",
+    "check_closed_domain_conservation",
+    "ConservationReport",
+    "measure_mesh_stability",
+    "StabilityReport",
+    "run_to_steady_state",
+    "RunReport",
 ]

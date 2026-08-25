@@ -61,6 +61,17 @@ if(AETHER_BUILD_TESTS)
                          "${CMAKE_SOURCE_DIR}/python/tests/test_unstructured_bindings.py"
                          "$<TARGET_FILE_DIR:aether_solver_py>"
                          "${CMAKE_SOURCE_DIR}/python")
+        # Registered separately rather than folded into the suite above:
+        # this one exercises the geometry -> volume mesh -> solver pipeline,
+        # the only path in the engine that starts from an *imported* surface
+        # instead of a synthetic lattice, so a regression there would show
+        # up nowhere else. Same argument convention (extension dir, package
+        # dir) as the bindings suite.
+        add_test(NAME aether_pipeline_tests
+                 COMMAND "${aether_python}"
+                         "${CMAKE_SOURCE_DIR}/python/tests/test_pipeline.py"
+                         "$<TARGET_FILE_DIR:aether_solver_py>"
+                         "${CMAKE_SOURCE_DIR}/python")
     else()
         # Printed rather than silently skipped: a suite that quietly stops
         # registering is the exact failure the CI's --no-tests=error flag

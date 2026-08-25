@@ -443,3 +443,288 @@ def driving_wall_velocity(domain: FlowDomain, face: str = "z_max",
         return Vector3(ux * taper, uy * taper, uz * taper)
 
     return wall_velocity
+
+
+# -- Pre-flight checks (roadmap A2) ---------------------------------------
+#
+# Both of these answer "will this run?" *before* committing to a long
+# simulation, and both exist because this project has now paid for their
+# absence. DIVIDA_TECNICA.md 4.3 states plainly that there is no honest
+# a-priori mesh-quality threshold -- a mesh with non-orthogonality 2.24
+# runs fine and one with 2.07 diverges, and no quantity this engine
+# computes separates them. So neither of these invents a threshold on a
+# proxy metric. Instead they measure the two things that are actually
+# decisive, cheaply enough to run first: whether the boundary conditions
+# are solvable at all (pure geometry, instant), and what the step
+# operator's own spectral radius is (a few dozen steps on the rest state).
+
+
+@dataclass(frozen=True)
+class ConservationReport:
+    """Whether the prescribed wall velocities can be satisfied at all in a
+    closed domain."""
+
+    net_flux: float
+    total_absolute_flux: float
+    relative_imbalance: float
+    is_conservative: bool
+    # The largest |velocity . areaVector| on any single boundary face.
+    # Sharper than the net for a sealed box, and it took writing the test
+    # to notice why: a correct closed-domain wall is impermeable *face by
+    # face*, so a tangential lid gives exactly 0 here. A nonzero value
+    # means some wall is letting mass through even if the totals happen to
+    # cancel -- solvable (inflow on one wall balanced by outflow on
+    # another is a piston, not a contradiction) but almost certainly not
+    # what someone modelling a sealed box intended.
+    max_face_flux: float
+
+
+def check_closed_domain_conservation(mesh: TetrahedralMesh, wall_velocity,
+                                      tolerance: float = 1e-9) -> ConservationReport:
+    """Integrates the prescribed wall velocity over every boundary face and
+    reports whether the net mass flux is zero, as a **closed** domain
+    requires.
+
+    **This is the check whose absence cost the most so far.** Driving a
+    sealed box with a wall velocity that has a component along that wall's
+    own normal injects mass with nowhere to go: not a hard problem, an
+    unsolvable one. Measured when it happened: peak velocity 119x the
+    driving speed, on a mesh whose rest state was exactly zero and whose
+    spectral radius was a comfortable 0.245. Every symptom pointed at the
+    mesh; the cause was the boundary condition, and the evidence
+    (`net_boundary_flux()` sitting at -26 instead of 0) was already being
+    printed and simply not read.
+
+    It costs one pass over the boundary faces and no time-stepping at all,
+    because it is pure geometry: sum of `wall_velocity(centroid) . areaVector`,
+    with the area vector already pointing out of the domain on a boundary
+    face. `relative_imbalance` scales that sum by the total absolute flux
+    so the verdict does not depend on the domain's size or the driving
+    speed.
+
+    Only meaningful for a closed domain. A domain with an outlet is
+    *supposed* to have nonzero net wall flux -- that is what the outlet is
+    for -- so this returns a report to read rather than raising, and the
+    caller decides what the number should be.
+    """
+    net = 0.0
+    absolute = 0.0
+    worst = 0.0
+    for f in range(mesh.face_count()):
+        if not mesh.is_boundary_face(f):
+            continue
+        face = mesh.face(f)
+        velocity = wall_velocity(face.centroid)
+        flux = (velocity.x * face.area_vector.x + velocity.y * face.area_vector.y +
+                velocity.z * face.area_vector.z)
+        net += flux
+        absolute += abs(flux)
+        worst = max(worst, abs(flux))
+    scale = absolute if absolute > 0.0 else 1.0
+    relative = abs(net) / scale
+    return ConservationReport(net_flux=net, total_absolute_flux=absolute,
+                               relative_imbalance=relative,
+                               is_conservative=relative <= tolerance,
+                               max_face_flux=worst)
+
+
+@dataclass(frozen=True)
+class StabilityReport:
+    """What a short probe run says about whether this mesh will hold up."""
+
+    cell_count: int
+    spectral_radius: float
+    rest_state_max_velocity: float
+    max_non_orthogonality: float
+    deficient_stencil_count: int
+    volume_ratio: float
+    is_stable: bool
+
+
+def measure_mesh_stability(mesh: TetrahedralMesh, viscosity: float,
+                            iterations: int = 30) -> StabilityReport:
+    """Runs the two diagnostics this project applies to every solver, on
+    this mesh, before a real simulation is started.
+
+    **Rest state**: with every wall stationary there is no forcing
+    anywhere, so the field must stay at *exactly* zero -- not approximately.
+    Any drift means something structural is wrong, and it is a bit-exact
+    check rather than a tolerance.
+
+    **Spectral radius**: the growth factor of one step of the linearized
+    operator around that rest state, by power iteration (impose a random
+    unit field, step, renormalize, repeat). Above 1 the scheme amplifies
+    on this mesh and the run will diverge no matter how small the time
+    step -- which is exactly the property DIVIDA_TECNICA.md 4.3 spent its
+    whole investigation establishing, and the reason a smaller dt is not
+    the remedy people reach for first.
+
+    The quality metrics alongside them (non-orthogonality, deficient
+    stencils, volume ratio) are reported but deliberately **not** used to
+    decide `is_stable`: item 4.3 measured them failing to separate meshes
+    that run from meshes that do not. They are context for a human reading
+    the report, not the verdict.
+
+    Costs `iterations` steps on a zero-velocity field -- seconds on a mesh
+    where a real run takes minutes.
+    """
+    from aether_solver_py import UnstructuredCavitySolver3D, UnstructuredDiffusionSolver
+
+    n = mesh.cell_count()
+    still = Vector3(0.0, 0.0, 0.0)
+
+    resting = UnstructuredCavitySolver3D(mesh, viscosity, lambda p: still)
+    dt = resting.stable_time_step()
+    for _ in range(20):
+        resting.step(dt)
+    rest_max = max(abs(resting.velocity(c).x) + abs(resting.velocity(c).y) +
+                    abs(resting.velocity(c).z) for c in range(n))
+
+    probe = UnstructuredCavitySolver3D(mesh, viscosity, lambda p: still)
+    rng = random.Random(3)
+    velocity = [Vector3(rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0))
+                for _ in range(n)]
+    norm = math.sqrt(sum(v.x * v.x + v.y * v.y + v.z * v.z for v in velocity))
+    velocity = [Vector3(v.x / norm, v.y / norm, v.z / norm) for v in velocity]
+    probe.load_state(velocity, [0.0] * n, 0.0)
+
+    spectral_radius = float("inf")
+    try:
+        for _ in range(iterations):
+            probe.step(dt)
+            v = [probe.velocity(c) for c in range(n)]
+            p = [probe.pressure(c) for c in range(n)]
+            magnitude = math.sqrt(sum(x.x * x.x + x.y * x.y + x.z * x.z for x in v) +
+                                   sum(q * q for q in p))
+            if not math.isfinite(magnitude) or magnitude == 0.0:
+                spectral_radius = float("inf")
+                break
+            spectral_radius = magnitude
+            probe.load_state([Vector3(x.x / magnitude, x.y / magnitude, x.z / magnitude) for x in v],
+                              [q / magnitude for q in p], 0.0)
+    except RuntimeError:
+        # step() refuses rather than propagating NaN (DIVIDA_TECNICA.md
+        # 4.3); an unbounded operator is exactly what that guard catches.
+        spectral_radius = float("inf")
+
+    diffusion = UnstructuredDiffusionSolver(mesh)
+    diffusion.set_dirichlet_boundary(lambda p: True, 0.0)
+    volumes = sorted(mesh.cell_volume(c) for c in range(n))
+
+    return StabilityReport(
+        cell_count=n,
+        spectral_radius=spectral_radius,
+        rest_state_max_velocity=rest_max,
+        max_non_orthogonality=diffusion.max_non_orthogonality(),
+        deficient_stencil_count=diffusion.deficient_stencil_count(),
+        volume_ratio=volumes[-1] / volumes[0] if volumes[0] > 0.0 else float("inf"),
+        is_stable=rest_max == 0.0 and spectral_radius < 1.0,
+    )
+
+
+# -- Run reporting (roadmap A3) -------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunReport:
+    """What happened during a run, in the terms a caller actually needs to
+    decide whether to trust the answer."""
+
+    steps: int
+    time: float
+    converged: bool
+    diverged: bool
+    last_change: float
+    max_face_divergence: float
+    net_boundary_flux: float
+    max_velocity: float
+
+    def summary(self) -> str:
+        if self.diverged:
+            verdict = "DIVERGIU"
+        elif self.converged:
+            verdict = "convergiu"
+        else:
+            verdict = "nao convergiu (esgotou os passos)"
+        return (f"{verdict} em {self.steps} passos (t={self.time:.4g})\n"
+                f"  mudanca por passo   = {self.last_change:.3e}\n"
+                f"  divergencia (faces) = {self.max_face_divergence:.3e}\n"
+                f"  fluxo de contorno   = {self.net_boundary_flux:.3e}\n"
+                f"  velocidade maxima   = {self.max_velocity:.4g}")
+
+
+def run_to_steady_state(solver, mesh: TetrahedralMesh, max_steps: int = 5000,
+                        tolerance: float = 1e-6, check_every: int = 25,
+                        dt: float | None = None) -> RunReport:
+    """Marches `solver` until the velocity field stops changing, and reports
+    what happened in terms a caller can act on.
+
+    "Stopped changing" is measured as the largest per-cell velocity change
+    between checks, divided by the field's own current magnitude -- relative
+    rather than absolute, for the reason DIVIDA_TECNICA.md 5.4 records: an
+    absolute tolerance is either too loose to mean anything or too tight to
+    ever fire, depending entirely on the scale of the field it is applied
+    to, which the caller should not have to know in advance.
+
+    **Divergence is detected and reported, not raised.** The solver's own
+    guard already refuses to propagate a non-finite field; this catches the
+    softer case first -- a field growing steadily rather than exploding --
+    so the caller gets a `RunReport` naming the symptom instead of an
+    exception that arrives thousands of steps later. `measure_mesh_stability`
+    is the check that predicts this *before* the run.
+
+    Returns rather than prints, so it composes; `RunReport.summary()`
+    formats it when a human is reading.
+    """
+    n = mesh.cell_count()
+    if dt is None:
+        dt = solver.stable_time_step()
+
+    def snapshot():
+        return [solver.velocity(c) for c in range(n)]
+
+    def magnitude(field):
+        return max((math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) for v in field), default=0.0)
+
+    previous = snapshot()
+    steps = 0
+    last_change = float("inf")
+    diverged = False
+    converged = False
+
+    while steps < max_steps:
+        try:
+            for _ in range(check_every):
+                solver.step(dt)
+                steps += 1
+                if steps >= max_steps:
+                    break
+        except RuntimeError:
+            diverged = True
+            break
+
+        current = snapshot()
+        scale = max(magnitude(current), 1e-300)
+        last_change = max(
+            math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2)
+            for a, b in zip(current, previous)
+        ) / scale
+        if not math.isfinite(scale) or not math.isfinite(last_change):
+            diverged = True
+            break
+        previous = current
+        if last_change <= tolerance:
+            converged = True
+            break
+
+    field = snapshot()
+    return RunReport(
+        steps=steps,
+        time=solver.time(),
+        converged=converged,
+        diverged=diverged,
+        last_change=last_change,
+        max_face_divergence=solver.max_face_divergence(),
+        net_boundary_flux=solver.net_boundary_flux(),
+        max_velocity=magnitude(field),
+    )

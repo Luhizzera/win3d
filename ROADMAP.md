@@ -556,6 +556,56 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-20 (quarta rodada): checagens de pré-voo e relato de convergência — **Fase A do roadmap de usabilidade concluída**
+
+Os dois itens que faltavam da Fase A existiam no plano antes do erro da
+rodada anterior; depois dele ficou óbvio *qual* checagem faltava, então
+ambos foram construídos a partir do que a falha real ensinou, não do que
+parecia razoável no papel.
+
+**`check_closed_domain_conservation()` — a checagem cuja ausência custou
+mais caro.** Integra a velocidade prescrita sobre toda face de contorno e
+diz se o fluxo líquido é zero, como um domínio fechado exige. Custa uma
+passada de geometria pura, sem marchar um único passo. É exatamente o que
+teria pego, em segundos, o erro que consumiu boa parte da rodada anterior.
+Escrever o teste rendeu um diagnóstico mais afiado que o líquido: numa
+caixa selada cada parede deve ser impermeável **face a face**, e uma tampa
+tangencial dá `max_face_flux` exatamente 0 — então o relatório expõe esse
+número também, e é ele que aponta *qual* parede está vazando quando os
+totais por acaso se cancelam.
+
+**`measure_mesh_stability()` — mede em vez de inventar um limiar.**
+DIVIDA_TECNICA.md 4.3 afirma que não há critério a-priori honesto de
+qualidade de malha (não-ortogonalidade 2,24 roda, 2,07 diverge). Então esta
+sonda não inventa limiar nenhum sobre métrica-proxy: roda os dois
+diagnósticos que de fato decidem — repouso exato e raio espectral por
+potência iterada em torno dele — em dezenas de passos, contra os milhares
+de uma marcha real. As métricas de qualidade (não-ortogonalidade, estêncil
+deficiente, razão de volume) entram no relatório como contexto para quem
+lê, e **deliberadamente não** entram no veredito `is_stable`, porque o
+item 4.3 já mediu que elas não separam malha que roda de malha que não.
+
+**`run_to_steady_state()` / `RunReport` — o relato que faltava.** Marcha
+até o campo parar de mudar (tolerância *relativa*, pela mesma razão que o
+item 5.4 registra: um limiar absoluto é frouxo demais ou apertado demais
+conforme a escala do campo, que o chamador não deveria precisar saber de
+antemão), detecta divergência suave (campo crescendo, não só explodindo) e
+devolve divergência por faces, fluxo de contorno e velocidade máxima num
+objeto — com `summary()` para quando um humano está lendo.
+
+**Registrado no ctest como `aether_pipeline_tests`** (13 suítes agora), e
+não como script solto: é o único caminho do engine que parte de superfície
+*importada* em vez da rede sintética, então uma regressão ali não
+apareceria em nenhum outro lugar. O teste inclui a verificação decisiva de
+que o checador **pega** a tampa não-tangencial — um checador que sempre
+aprova passaria por um teste que só olha o caso bom.
+
+Custo mantido honesto: a primeira versão do teste levava 143s (duas
+marchas de 400 passos duplicadas, malha fina à toa). Fundidas numa marcha
+só e com malha mais grossa — nenhuma das asserções é sobre resolução, são
+identidades exatas e checagens de sinal — caiu para **5,7s**. Suíte
+completa: **13/13 em 55s**.
+
 ## Fase 4 — GPU para valer
 
 **Objetivo**: (4.1) solve de CG inteiramente residente na GPU; (4.2)
