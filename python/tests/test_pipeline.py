@@ -238,6 +238,59 @@ def test_vtk_export_carries_the_result(aether, domain, solver):
           f"e o campo escrito nao e trivialmente nulo (max |p| = {max(abs(v) for v in written):.3e})")
 
 
+def test_freestream_sends_flow_through_and_conserves_mass(aether, domain):
+    """The other way to drive the same mesh: flow enters one face and
+    leaves the opposite one past the object.
+
+    The claim is mass conservation, and unlike the sealed box the number to
+    watch is "in equals out", not "in equals zero" -- so the inflow is
+    computed here from the geometry alone, independently of anything the
+    solver reports, and the solver's own net boundary flux is compared
+    against it.
+    """
+    print("escoamento passante: entra por uma face, sai pela oposta")
+
+    # The guards first: both failure modes are easy to hit and neither is
+    # obvious from a stack trace later.
+    for args, why in ((("x_min", "x_min", (1.0, 0.0, 0.0)), "mesma face"),
+                      (("x_min", "x_max", (0.0, 1.0, 0.0)), "velocidade tangencial")):
+        raised = False
+        try:
+            aether.freestream_boundary(domain, *args)
+        except ValueError:
+            raised = True
+        check(raised, f"freestream_boundary recusa {why}")
+
+    wall_velocity, is_outlet = aether.freestream_boundary(
+        domain, inlet_face="x_min", outlet_face="x_max", velocity=(1.0, 0.0, 0.0))
+    solver = aether.UnstructuredCavitySolver3D(domain.mesh, 0.5, wall_velocity, is_outlet, 0.0)
+    dt = solver.stable_time_step()
+    for _ in range(300):
+        solver.step(dt)
+
+    inflow = 0.0
+    for f in range(domain.mesh.face_count()):
+        if not domain.mesh.is_boundary_face(f):
+            continue
+        face = domain.mesh.face(f)
+        if aether.classify_boundary_face(face.centroid, domain) == "x_min":
+            inflow += abs(face.area_vector.x)
+    check(inflow > 0.0, f"a entrada tem area ({inflow:.3f})")
+
+    imbalance = abs(solver.net_boundary_flux()) / inflow
+    print(f"       entrada={inflow:.4f}, desbalanco={imbalance*100:.4f}% da entrada, "
+          f"divergencia={solver.max_face_divergence():.3e}")
+    check(imbalance < 1e-3, f"o que entra sai ({imbalance*100:.4f}% de desbalanco)")
+
+    speeds = [(solver.velocity(c).x ** 2 + solver.velocity(c).y ** 2 +
+               solver.velocity(c).z ** 2) ** 0.5 for c in range(domain.mesh.cell_count())]
+    # Flow squeezing past an obstacle speeds up, so exceeding the inlet
+    # speed is expected -- but not without bound, and a runaway would show
+    # here first.
+    check(max(speeds) < 5.0, f"velocidade maxima limitada ({max(speeds):.4f})")
+    check(all(s == s for s in speeds), "nenhum NaN no campo")
+
+
 def main():
     if len(sys.argv) > 1:
         sys.path.insert(0, sys.argv[1])
@@ -253,6 +306,7 @@ def main():
     test_conservation_check_catches_non_tangential_lid(aether, domain)
     solver = test_probe_predicts_the_run_and_the_run_shows_a_vortex(aether, domain)
     test_vtk_export_carries_the_result(aether, domain, solver)
+    test_freestream_sends_flow_through_and_conserves_mass(aether, domain)
 
     if failures:
         print(f"\nFALHOU: {len(failures)} verificacao(oes)")

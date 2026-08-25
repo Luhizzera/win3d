@@ -21,15 +21,22 @@ flow (the interior of a possibly non-convex closed surface, discarding
 tetrahedra *outside* the recovered walls instead of inside a seed region) --
 that is a real, different capability, not attempted here.
 
-**Scope chosen deliberately: closed domain, not inlet/outlet.** The mesh
-this module builds is a plain box with the object as an interior wall --
-callers are expected to build a *closed* `UnstructuredCavitySolver3D`
-(no `is_outlet`), driving flow via a moving wall (like a lid) on one box
-face, the way `driving_wall_velocity()` below does. DIVIDA_TECNICA.md 4.3's
-coupling-correction fix is proven only for closed domains; a domain with an
-outlet still has the open GMRES-stagnation gap documented there. Extending
-this pipeline to inlet/outlet domains is future work gated on that fix, not
-on anything in this module.
+**Two ways to drive the same mesh**, since the box-with-a-hole geometry
+serves both. `driving_wall_velocity()` stirs a *closed* domain with one
+tangentially-sliding face -- a lid-driven cavity containing an obstacle.
+`freestream_boundary()` sends flow *through*, entering one face and leaving
+the opposite one past the object, which is ordinary external aerodynamics.
+
+That second option only became available once DIVIDA_TECNICA.md 4.3 was
+closed for outlet domains as well as closed ones; while the solver's outlet
+handling was untrustworthy on a distorted mesh, this module deliberately
+built closed domains only. Measured after the fix, on the icosahedron case:
+mass balance closes to 0.0032% of the inflow. Worth knowing, and recorded
+rather than smoothed over: through-flow leaves a larger peak face
+divergence (~1e-03) than the closed case (~4e-06) on the same mesh -- the
+outlet's zero-gradient velocity condition is a weaker statement than a
+prescribed wall, so it is not obviously a defect, but it has not been run
+down either.
 """
 
 from __future__ import annotations
@@ -445,6 +452,67 @@ def driving_wall_velocity(domain: FlowDomain, face: str = "z_max",
     return wall_velocity
 
 
+def freestream_boundary(domain: FlowDomain, inlet_face: str = "x_min",
+                        outlet_face: str = "x_max",
+                        velocity: tuple[float, float, float] = (1.0, 0.0, 0.0)):
+    """Builds the `(wall_velocity, is_outlet)` pair for flow that *enters*
+    one box face and *leaves* the opposite one, passing the object on the
+    way -- external aerodynamics rather than a stirred box.
+
+    Returns two callables in the order `UnstructuredCavitySolver3D` takes
+    them, so a caller can splat them straight in.
+
+    **Why this is separate from `driving_wall_velocity`, and why it only
+    became possible now.** A closed domain has to be stirred by a
+    tangential wall, because it has nowhere to put injected mass. Flow
+    *through* a domain is the opposite arrangement: the inlet deliberately
+    pushes along its own normal, and that is well posed precisely because
+    an outlet exists to let the same mass out. Until DIVIDA_TECNICA.md
+    4.3's seventh attempt the solver's outlet handling was not trustworthy
+    on a distorted mesh, so this pipeline built closed domains only; with
+    the outlet flux definition reconciled, the restriction went away.
+
+    Unlike `driving_wall_velocity` this does **not** taper the inlet
+    profile to zero at the face's edges. The taper exists to remove the
+    corner discontinuity where a *sliding* wall meets a stationary one; an
+    inlet meets the side walls at a stagnation line instead, where a
+    uniform normal velocity is the physically ordinary condition -- a
+    tapered inlet would be modelling a different problem, not a
+    better-behaved version of this one.
+
+    Raises ValueError if the two faces are the same, or if the velocity has
+    no component along the inlet's normal (a purely tangential "inlet"
+    injects nothing and leaves the case with no forcing at all).
+    """
+    if inlet_face == outlet_face:
+        raise ValueError("freestream_boundary: inlet and outlet must be different faces")
+    for face in (inlet_face, outlet_face):
+        if face not in _FACE_NORMALS:
+            raise ValueError(f"freestream_boundary: unknown face {face!r}; "
+                              f"expected one of {sorted(_FACE_NORMALS)}")
+
+    nx, ny, nz = _FACE_NORMALS[inlet_face]
+    vx, vy, vz = velocity
+    if abs(vx * nx + vy * ny + vz * nz) < 1e-12:
+        raise ValueError(
+            f"freestream_boundary: velocity {velocity} is tangential to the inlet face "
+            f"{inlet_face!r} (normal {(nx, ny, nz)}), so nothing enters the domain."
+        )
+
+    def wall_velocity(position: Vector3) -> Vector3:
+        # Only the inlet moves. The outlet's velocity is never consulted --
+        # it carries a zero-gradient condition, not a prescribed one -- and
+        # every other face, including the object, is a no-slip wall.
+        if classify_boundary_face(position, domain) == inlet_face:
+            return Vector3(vx, vy, vz)
+        return Vector3(0.0, 0.0, 0.0)
+
+    def is_outlet(position: Vector3) -> bool:
+        return classify_boundary_face(position, domain) == outlet_face
+
+    return wall_velocity, is_outlet
+
+
 # -- Pre-flight checks (roadmap A2) ---------------------------------------
 #
 # Both of these answer "will this run?" *before* committing to a long
@@ -505,7 +573,10 @@ def check_closed_domain_conservation(mesh: TetrahedralMesh, wall_velocity,
     Only meaningful for a closed domain. A domain with an outlet is
     *supposed* to have nonzero net wall flux -- that is what the outlet is
     for -- so this returns a report to read rather than raising, and the
-    caller decides what the number should be.
+    caller decides what the number should be. For a through-flow case built
+    by `freestream_boundary`, the number to watch is the solver's own
+    `net_boundary_flux()` after running, which counts the outlet too: in
+    equals out is the statement there, not in equals zero.
     """
     net = 0.0
     absolute = 0.0
