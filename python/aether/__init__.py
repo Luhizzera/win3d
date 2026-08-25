@@ -100,7 +100,15 @@ try:
         marching_squares_2d,
         write_tetrahedral_mesh_vtk,
     )
-    from aether_persistence_py import FieldArchive, HistoryEntry, ProjectHistory, load_grid, save_grid
+    from aether_persistence_py import (
+        FieldArchive,
+        HistoryEntry,
+        ProjectHistory,
+        load_grid,
+        load_tetrahedral_mesh,
+        save_grid,
+        save_tetrahedral_mesh,
+    )
     from aether_optimization_py import NelderMead, OptimizationResult
     from aether_analysis_py import FieldStatistics, checkerboard_index, compute_statistics, max_courant_number, summarize_field
     from aether_ml_py import MultiLayerPerceptron
@@ -193,6 +201,8 @@ __all__ = [
     "ProjectHistory",
     "save_grid",
     "load_grid",
+    "save_tetrahedral_mesh",
+    "load_tetrahedral_mesh",
     "NelderMead",
     "OptimizationResult",
     "FieldStatistics",

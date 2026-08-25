@@ -2,6 +2,7 @@ add_library(aether_persistence STATIC
     src/FieldArchive.cpp
     src/ProjectHistory.cpp
     src/GridArchive.cpp
+    src/TetrahedralMeshArchive.cpp
 )
 
 target_include_directories(aether_persistence PUBLIC

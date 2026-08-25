@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <stdexcept>
 
 namespace aether::mesh {
 
@@ -48,32 +49,56 @@ std::array<std::size_t, 3> sortedKey(const std::array<std::size_t, 3>& v) {
 
 TetrahedralMesh TetrahedralMesh::fromTetrahedralization(
     const DelaunayTetrahedralization3D& tetrahedralization) {
+    // A thin adapter over fromCells(): the generator's own storage is
+    // points plus vertex quadruples, which is exactly what fromCells takes,
+    // so there is no second copy of the connectivity build to keep in step.
+    std::vector<Vector3> vertices;
+    vertices.reserve(tetrahedralization.pointCount());
+    for (std::size_t i = 0; i < tetrahedralization.pointCount(); ++i) {
+        vertices.push_back(tetrahedralization.point(i));
+    }
+    std::vector<std::array<std::size_t, 4>> cells;
+    cells.reserve(tetrahedralization.tetrahedronCount());
+    for (std::size_t t = 0; t < tetrahedralization.tetrahedronCount(); ++t) {
+        cells.push_back(tetrahedralization.tetrahedron(t).vertices);
+    }
+    return fromCells(vertices, cells);
+}
+
+TetrahedralMesh TetrahedralMesh::fromCells(const std::vector<Vector3>& vertices,
+                                            const std::vector<std::array<std::size_t, 4>>& cells) {
     TetrahedralMesh mesh;
 
-    for (std::size_t i = 0; i < tetrahedralization.pointCount(); ++i) {
-        mesh.mesh_.addVertex(tetrahedralization.point(i));
+    for (const Vector3& vertex : vertices) {
+        mesh.mesh_.addVertex(vertex);
     }
 
     // First pass: cell geometry. A tetrahedron's centroid is exactly the
     // average of its vertices and its volume exactly |det|/6, so neither
     // is an approximation here.
     std::vector<std::array<std::size_t, 4>> cellVertices;
-    for (std::size_t t = 0; t < tetrahedralization.tetrahedronCount(); ++t) {
-        const auto& tet = tetrahedralization.tetrahedron(t);
-        const Vector3& a = mesh.mesh_.vertex(tet.vertices[0]);
-        const Vector3& b = mesh.mesh_.vertex(tet.vertices[1]);
-        const Vector3& c = mesh.mesh_.vertex(tet.vertices[2]);
-        const Vector3& d = mesh.mesh_.vertex(tet.vertices[3]);
+    for (const auto& tet : cells) {
+        for (const std::size_t index : tet) {
+            if (index >= vertices.size()) {
+                throw std::invalid_argument(
+                    "TetrahedralMesh::fromCells: a cell references a vertex index past the end "
+                    "of the vertex list");
+            }
+        }
+        const Vector3& a = mesh.mesh_.vertex(tet[0]);
+        const Vector3& b = mesh.mesh_.vertex(tet[1]);
+        const Vector3& c = mesh.mesh_.vertex(tet[2]);
+        const Vector3& d = mesh.mesh_.vertex(tet[3]);
 
         const double signedVolume = (b - a).dot((c - a).cross(d - a)) / 6.0;
         if (std::fabs(signedVolume) == 0.0) {
             continue; // degenerate: carries no flux, and would divide by zero downstream
         }
 
-        cellVertices.push_back(tet.vertices);
+        cellVertices.push_back(tet);
         // Registered in the core mesh too, so a ScalarField built over
         // coreMesh() is indexed by exactly these cells, in this order.
-        mesh.mesh_.addCell({tet.vertices[0], tet.vertices[1], tet.vertices[2], tet.vertices[3]});
+        mesh.mesh_.addCell({tet[0], tet[1], tet[2], tet[3]});
         mesh.cellVolumes_.push_back(std::fabs(signedVolume));
         mesh.cellCentroids_.push_back((a + b + c + d) / 4.0);
     }

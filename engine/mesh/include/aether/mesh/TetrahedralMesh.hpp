@@ -53,6 +53,29 @@ public:
     // zero downstream.
     static TetrahedralMesh fromTetrahedralization(const DelaunayTetrahedralization3D& tetrahedralization);
 
+    // The same construction from plain vertex positions and cell
+    // connectivity, for a mesh that did not come from this project's own
+    // Delaunay generator.
+    //
+    // **This existed as a gap, not a choice.** Until it was added, the only
+    // route to a TetrahedralMesh was through DelaunayTetrahedralization3D,
+    // which meant a mesh could not be *reloaded* from a checkpoint (see
+    // engine/persistence/TetrahedralMeshArchive) or imported from any other
+    // mesher without re-running a tetrahedralization that would not
+    // necessarily reproduce the same cells. fromTetrahedralization() is now
+    // a thin adapter over this.
+    //
+    // The winding of each cell is checked and corrected internally, exactly
+    // as it already was: a tetrahedron from the Delaunay generator is
+    // positively oriented by construction, and one from a file is whatever
+    // the file says.
+    //
+    // Throws std::invalid_argument if a cell references a vertex index that
+    // does not exist -- a corrupt file should fail at the boundary, not
+    // read out of bounds somewhere downstream.
+    static TetrahedralMesh fromCells(const std::vector<core::Vector3>& vertices,
+                                      const std::vector<std::array<std::size_t, 4>>& cells);
+
     // **Vertices and cells live in a core::Mesh, not in a second copy here.**
     // That was DIVIDA_TECNICA.md 2.2: this class was built in Fase 2.1
     // alongside core::Mesh rather than on top of it, so the engine carried two

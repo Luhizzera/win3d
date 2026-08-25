@@ -1,11 +1,18 @@
 #include "aether/persistence/FieldArchive.hpp"
 #include "aether/persistence/GridArchive.hpp"
 #include "aether/persistence/ProjectHistory.hpp"
+#include "aether/persistence/TetrahedralMeshArchive.hpp"
 #include "aether/solver/LidDrivenCavitySolver2D.hpp"
 #include "aether/solver/StaggeredLidDrivenCavitySolver3D.hpp"
 #include "aether/testing/Check.hpp"
 
 #include <filesystem>
+#include <array>
+#include <algorithm>
+#include <cmath>
+#include <string>
+#include <cstdio>
+#include <cstdint>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -13,6 +20,10 @@
 using aether::core::Vector3;
 using aether::mesh::StructuredGrid3D;
 using aether::persistence::FieldArchive;
+using aether::mesh::DelaunayTetrahedralization3D;
+using aether::mesh::TetrahedralMesh;
+using aether::persistence::saveTetrahedralMesh;
+using aether::persistence::loadTetrahedralMesh;
 using aether::persistence::HistoryEntry;
 using aether::persistence::ProjectHistory;
 using aether::solver::LidDrivenCavitySolver2D;
@@ -357,6 +368,144 @@ void testProjectHistoryPersistsAcrossInstances() {
     std::filesystem::remove_all(dir);
 }
 
+// **A mesh checkpoint is only worth anything if the reloaded mesh is the
+// same mesh**, so this checks identity rather than plausibility: every
+// vertex position bit for bit, every cell's connectivity, and -- because
+// those two alone would not catch a face-connectivity bug -- the derived
+// quantities the finite-volume layer actually consumes: per-cell volume,
+// per-cell centroid, face count, and the discrete divergence theorem on
+// every cell.
+//
+// The last of those is the sharpest: a closed polyhedron's outward area
+// vectors sum to identically zero, so a reload that lost or misoriented a
+// face shows up there even if the vertex and cell arrays round-tripped
+// perfectly.
+void testTetrahedralMeshArchiveRoundTripsExactly() {
+    DelaunayTetrahedralization3D tets;
+    // A jittered lattice rather than a regular one, for the reason the mesh
+    // suite already documents: a regular lattice tetrahedralizes into
+    // co-spherical ties, the degenerate case, which would make this a
+    // weaker test than it looks.
+    std::uint64_t state = 0x243F6A8885A308D3ull;
+    const auto nextJitter = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return (static_cast<double>(state >> 11) / 9007199254740992.0 - 0.5) * 0.2;
+    };
+    for (int i = 0; i <= 2; ++i) {
+        for (int j = 0; j <= 2; ++j) {
+            for (int k = 0; k <= 2; ++k) {
+                const bool interior = i > 0 && i < 2 && j > 0 && j < 2 && k > 0 && k < 2;
+                tets.addPoint(i * 0.5 + (interior ? nextJitter() : 0.0),
+                              j * 0.5 + (interior ? nextJitter() : 0.0),
+                              k * 0.5 + (interior ? nextJitter() : 0.0));
+            }
+        }
+    }
+    tets.tetrahedralize();
+    const TetrahedralMesh original = TetrahedralMesh::fromTetrahedralization(tets);
+    AETHER_CHECK(original.cellCount() > 0);
+
+    const std::string path = "aether_tet_mesh_roundtrip.aecf";
+    {
+        FieldArchive archive;
+        saveTetrahedralMesh(archive, original);
+        // A field defined over the mesh travels in the same archive, which
+        // is the whole point of reusing FieldArchive rather than inventing
+        // a second container: a checkpoint whose mesh and fields could be
+        // separated is a checkpoint that can be silently mismatched.
+        std::vector<double> pressure(original.cellCount());
+        for (std::size_t c = 0; c < original.cellCount(); ++c) {
+            pressure[c] = static_cast<double>(c) * 0.25;
+        }
+        archive.setField("pressure", pressure);
+        archive.save(path);
+    }
+
+    const FieldArchive reloaded = FieldArchive::load(path);
+    const TetrahedralMesh restored = loadTetrahedralMesh(reloaded);
+    std::remove(path.c_str());
+
+    AETHER_CHECK(restored.vertexCount() == original.vertexCount());
+    AETHER_CHECK(restored.cellCount() == original.cellCount());
+    AETHER_CHECK(restored.faceCount() == original.faceCount());
+
+    for (std::size_t v = 0; v < original.vertexCount(); ++v) {
+        // Exact, not near: FieldArchive stores raw doubles, so anything
+        // other than bit equality is a bug rather than accumulated error.
+        AETHER_CHECK(restored.vertex(v).x == original.vertex(v).x);
+        AETHER_CHECK(restored.vertex(v).y == original.vertex(v).y);
+        AETHER_CHECK(restored.vertex(v).z == original.vertex(v).z);
+    }
+
+    double worstAreaSum = 0.0;
+    for (std::size_t c = 0; c < original.cellCount(); ++c) {
+        AETHER_CHECK(restored.cellVertices(c) == original.cellVertices(c));
+        AETHER_CHECK(restored.cellVolume(c) == original.cellVolume(c));
+        AETHER_CHECK(restored.cellCentroid(c).x == original.cellCentroid(c).x);
+        AETHER_CHECK(restored.cellCentroid(c).y == original.cellCentroid(c).y);
+        AETHER_CHECK(restored.cellCentroid(c).z == original.cellCentroid(c).z);
+        worstAreaSum = std::max(worstAreaSum, restored.cellAreaVectorSum(c).norm());
+    }
+    AETHER_CHECK(worstAreaSum < 1e-12);
+    AETHER_CHECK(restored.totalVolume() == original.totalVolume());
+
+    // The co-travelling field survives untouched.
+    AETHER_CHECK(reloaded.hasField("pressure"));
+    AETHER_CHECK(reloaded.field("pressure").size() == original.cellCount());
+    AETHER_CHECK(reloaded.field("pressure")[1] == 0.25);
+
+    std::printf("  [persistence_tests] malha tetraedrica: %zu vertices, %zu celulas, %zu faces "
+                "identicas apos ida e volta (pior soma de areas %.2e)\n",
+                restored.vertexCount(), restored.cellCount(), restored.faceCount(), worstAreaSum);
+    std::fflush(stdout);
+}
+
+// A truncated or foreign archive has to fail where it is read. Checked
+// because a validation nobody exercises is a validation that quietly stops
+// working -- and because the failure it prevents (a mesh silently missing
+// its last cell) is exactly the kind that surfaces much later as a wrong
+// answer rather than as an error.
+void testTetrahedralMeshArchiveRefusesMalformedInput() {
+    bool refusedEmpty = false;
+    try {
+        FieldArchive empty;
+        loadTetrahedralMesh(empty);
+    } catch (const std::runtime_error&) {
+        refusedEmpty = true;
+    }
+    AETHER_CHECK(refusedEmpty);
+
+    bool refusedTruncated = false;
+    try {
+        FieldArchive truncated;
+        truncated.setField("tetrahedral_mesh_vertices", {0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                                          0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+        truncated.setField("tetrahedral_mesh_cells", {0.0, 1.0, 2.0}); // three, not four
+        loadTetrahedralMesh(truncated);
+    } catch (const std::runtime_error&) {
+        refusedTruncated = true;
+    }
+    AETHER_CHECK(refusedTruncated);
+
+    bool refusedOutOfRange = false;
+    try {
+        FieldArchive bad;
+        bad.setField("tetrahedral_mesh_vertices", {0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                                    0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+        bad.setField("tetrahedral_mesh_cells", {0.0, 1.0, 2.0, 99.0}); // no vertex 99
+        loadTetrahedralMesh(bad);
+    } catch (const std::exception&) {
+        refusedOutOfRange = true;
+    }
+    AETHER_CHECK(refusedOutOfRange);
+
+    std::printf("  [persistence_tests] malha tetraedrica: arquivo vazio, truncado e com indice "
+                "fora de faixa recusados\n");
+    std::fflush(stdout);
+}
+
 } // namespace
 
 int main() {
@@ -368,6 +517,8 @@ int main() {
     testResumeMatchesUninterruptedRun3D();
     testGridArchiveRoundTripIsExact();
     testProjectHistoryPersistsAcrossInstances();
+    testTetrahedralMeshArchiveRoundTripsExactly();
+    testTetrahedralMeshArchiveRefusesMalformedInput();
     std::printf("aether_persistence_tests: OK\n");
     return 0;
 }

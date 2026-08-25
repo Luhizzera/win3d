@@ -14,7 +14,7 @@ pybind11_add_module(aether_postprocessing_py aether_postprocessing_bindings.cpp)
 target_link_libraries(aether_postprocessing_py PRIVATE aether_postprocessing aether_mesh)
 
 pybind11_add_module(aether_persistence_py aether_persistence_bindings.cpp)
-target_link_libraries(aether_persistence_py PRIVATE aether_persistence)
+target_link_libraries(aether_persistence_py PRIVATE aether_persistence aether_mesh)
 
 pybind11_add_module(aether_optimization_py aether_optimization_bindings.cpp)
 target_link_libraries(aether_optimization_py PRIVATE aether_optimization)

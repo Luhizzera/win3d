@@ -1,5 +1,6 @@
 #include "aether/persistence/FieldArchive.hpp"
 #include "aether/persistence/GridArchive.hpp"
+#include "aether/persistence/TetrahedralMeshArchive.hpp"
 #include "aether/persistence/ProjectHistory.hpp"
 
 #include <pybind11/pybind11.h>
@@ -35,4 +36,12 @@ PYBIND11_MODULE(aether_persistence_py, m) {
 
     m.def("save_grid", &saveGrid, py::arg("archive"), py::arg("grid"));
     m.def("load_grid", &loadGrid, py::arg("archive"));
+
+    // The unstructured counterpart. Unlike a StructuredGrid3D, which is six
+    // scalars, a tetrahedral mesh carries connectivity that nothing else in
+    // the project could write down -- so before this, fields over an
+    // imported geometry could be checkpointed while the mesh they were
+    // indexed against could not, which makes the checkpoint unusable alone.
+    m.def("save_tetrahedral_mesh", &saveTetrahedralMesh, py::arg("archive"), py::arg("mesh"));
+    m.def("load_tetrahedral_mesh", &loadTetrahedralMesh, py::arg("archive"));
 }
