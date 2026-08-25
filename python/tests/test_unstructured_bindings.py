@@ -27,8 +27,10 @@ Run: python test_unstructured_bindings.py <extension-dir> <python-package-dir>
 
 import gc
 import math
+import os
 import random
 import sys
+import tempfile
 
 failures = []
 
@@ -380,6 +382,100 @@ def test_distorted_mesh_refuses_instead_of_returning_nan():
               "a mensagem diz que reduzir o passo nao resolve")
 
 
+def test_step_io_binding():
+    """Binding-surface check for load_step/StepLoadResult (StepIO.hpp).
+
+    The C++ suite (engine/geometry/tests/geometry_tests.cpp) already checks
+    the parser and the faceted-BREP geometry itself against a hand-built
+    Part 21 file. What that suite structurally cannot check is the binding:
+    that `StepLoadResult.mesh` -- a `def_readonly` member returning a
+    reference into a C++ struct pybind11 itself owns -- actually keeps that
+    struct alive from Python once the `StepLoadResult` object it came from
+    is gone, and that `unsupported_features` (a `std::vector<std::string>`)
+    crosses over as a plain Python list rather than an opaque handle.
+    """
+    import aether
+
+    tetra_step = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('t.step','2024-01-01T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2=CARTESIAN_POINT('',(1.0,0.0,0.0));
+#3=CARTESIAN_POINT('',(0.0,1.0,0.0));
+#4=CARTESIAN_POINT('',(0.0,0.0,1.0));
+#10=POLY_LOOP('',(#1,#3,#2));
+#11=POLY_LOOP('',(#1,#2,#4));
+#12=POLY_LOOP('',(#1,#4,#3));
+#13=POLY_LOOP('',(#2,#3,#4));
+#20=FACE_OUTER_BOUND('',#10,.T.);
+#21=FACE_OUTER_BOUND('',#11,.T.);
+#22=FACE_OUTER_BOUND('',#12,.T.);
+#23=FACE_OUTER_BOUND('',#13,.T.);
+#30=FACE('',(#20));
+#31=FACE('',(#21));
+#32=FACE('',(#22));
+#33=FACE('',(#23));
+#40=CLOSED_SHELL('',(#30,#31,#32,#33));
+#50=FACETED_BREP('',#40);
+ENDSEC;
+END-ISO-10303-21;
+"""
+    curved_step = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('c.step','2024-01-01T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#10=EDGE_LOOP('',(#101,#102,#103));
+#20=FACE_OUTER_BOUND('',#10,.T.);
+#30=FACE('',(#20));
+#40=CLOSED_SHELL('',(#30));
+#50=FACETED_BREP('',#40);
+ENDSEC;
+END-ISO-10303-21;
+"""
+
+    print("load_step: solido facetado (tetraedro)")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        path = os.path.join(tmp_dir, "tetra.step")
+        with open(path, "w") as f:
+            f.write(tetra_step)
+
+        result = aether.load_step(path)
+        check(result.mesh.vertex_count() == 4, "4 vertices")
+        check(result.mesh.triangle_count() == 4, "4 triangulos")
+        check(abs(result.mesh.volume() - 1.0 / 6.0) < 1e-9, "volume bate com o tetraedro unitario")
+        check(result.unsupported_features == [], "nenhum recurso reportado como nao suportado")
+        check(isinstance(result.unsupported_features, list),
+              "unsupported_features atravessa para Python como list")
+
+        # The mesh is a reference into `result`'s own C++ struct
+        # (def_readonly); it must keep that struct alive on its own once
+        # `result` itself is collected, the same ownership property already
+        # verified for TetrahedralMesh in test_mesh_outlives_python_reference.
+        mesh = result.mesh
+        del result
+        gc.collect()
+        check(mesh.vertex_count() == 4, "mesh sobrevive ao StepLoadResult que a devolveu")
+
+    print("load_step: contorno curvo (EDGE_LOOP) reportado, nao adivinhado")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        path = os.path.join(tmp_dir, "curved.step")
+        with open(path, "w") as f:
+            f.write(curved_step)
+
+        result = aether.load_step(path)
+        check(result.mesh.triangle_count() == 0, "nenhum triangulo gerado para o contorno curvo")
+        check(len(result.unsupported_features) > 0, "recurso nao suportado foi reportado")
+        check(any("#30" in feature for feature in result.unsupported_features),
+              "o relatorio aponta a face que nao pode ser interpretada")
+
+
 def main():
     if len(sys.argv) < 3:
         print("uso: test_unstructured_bindings.py <dir-das-extensoes> <dir-do-pacote>")
@@ -393,7 +489,7 @@ def main():
     import aether
 
     for name in ("TetrahedralMesh", "UnstructuredDiffusionSolver", "UnstructuredCavitySolver3D",
-                 "UnstructuredScalarTransportSolver"):
+                 "UnstructuredScalarTransportSolver", "load_step", "StepLoadResult"):
         check(hasattr(aether, name), f"aether.{name} exportado pelo pacote")
 
     mesh = build_jittered_lattice(3)
@@ -403,6 +499,7 @@ def main():
     test_channel_mass_balance(mesh)
     test_distorted_mesh_refuses_instead_of_returning_nan()
     test_mesh_outlives_python_reference()
+    test_step_io_binding()
 
     print()
     if failures:

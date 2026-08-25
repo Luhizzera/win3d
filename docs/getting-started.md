@@ -70,6 +70,24 @@ conectividade compartilhada, então sem soldar nenhum par de triângulos
 divide uma aresta e a superfície inteira parece cheia de furos.
 `load_obj` não solda porque OBJ já guarda uma lista indexada.
 
+Para geometria vinda de um CAD real, há `load_step`:
+
+```python
+result = aether.load_step("peca.step")
+if result.unsupported_features:
+    print(result.unsupported_features)  # o que não pôde ser interpretado
+surface = result.mesh
+```
+
+Só o subconjunto **BREP facetado** de STEP é entendido — toda face plana,
+todo contorno um `POLY_LOOP` simples, sem furos. É o formato que a maioria
+dos exportadores de CAD produz quando pedem uma malha "facetada"/"low
+poly" em vez de superfícies exatas. Uma face curva (cilíndrica, B-spline)
+ou uma representação tesselada não trava nem falha em silêncio: aparece
+listada em `unsupported_features`, e `result.mesh` traz o que pôde ser
+extraído do resto do arquivo. Não há suporte a IGES nem a CAD curvo de
+verdade — isso exigiria um kernel CAD (OpenCASCADE), ainda não incluído.
+
 **A superfície precisa ser fechada.** O mesher esculpe o *interior* do
 objeto de dentro de uma caixa de fluido, e uma superfície com furos não tem
 interior:
@@ -261,7 +279,12 @@ Registrado aqui para não ser descoberto no meio de um projeto:
 - **Escoamento compressível** — só incompressível.
 - **Multifásico** — só uma fase.
 - **Multi-região / multi-material** — um domínio de fluido por vez.
-- **STEP/IGES** — só STL e OBJ; CAD de verdade precisa de um kernel
+- **STEP/IGES** — `aether.load_step` importa STEP (ISO 10303-21), mas só o
+  subconjunto **BREP facetado** (toda face plana, todo contorno um
+  `POLY_LOOP`, sem furos): o caso comum de CAD já exportado como facetas.
+  Uma face curva ou a representação tesselada do AP242 é detectada e
+  reportada em `StepLoadResult.unsupported_features`, não adivinhada. CAD
+  curvo de verdade e IGES continuam de fora — exigem um kernel CAD completo
   (OpenCASCADE), decisão de dependência ainda em aberto.
 - **Escoamento interno em duto** — o mesher esculpe o objeto de dentro de
   uma caixa (escoamento externo); o caso oposto, tetraedralizar o interior

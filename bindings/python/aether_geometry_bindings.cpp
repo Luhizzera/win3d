@@ -1,4 +1,5 @@
 #include "aether/geometry/ObjIO.hpp"
+#include "aether/geometry/StepIO.hpp"
 #include "aether/geometry/StlIO.hpp"
 #include "aether/geometry/TriangleMesh.hpp"
 
@@ -50,4 +51,12 @@ PYBIND11_MODULE(aether_geometry_py, m) {
     m.def("save_stl_binary", &saveStlBinary, py::arg("mesh"), py::arg("path"));
     m.def("load_obj", &loadObj, py::arg("path"));
     m.def("save_obj", &saveObj, py::arg("mesh"), py::arg("path"));
+
+    // See StepIO.hpp's own header comment for exactly what this does and
+    // does not interpret: planar faceted BREPs only, with every other
+    // construct named in `unsupported_features` rather than guessed at.
+    py::class_<StepLoadResult>(m, "StepLoadResult")
+        .def_readonly("mesh", &StepLoadResult::mesh)
+        .def_readonly("unsupported_features", &StepLoadResult::unsupportedFeatures);
+    m.def("load_step", &loadStep, py::arg("path"));
 }

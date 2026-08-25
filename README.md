@@ -17,12 +17,13 @@ camada de orquestração/API/IA em Python.
 ```
 engine/core/          Módulo 1 - core matemático em C++ (Vector3, Tensor3x3,
                        Mesh, ScalarField, VectorField)
-engine/geometry/       Módulo 2 (escopo STL+OBJ) - TriangleMesh, weld de
-                       vértices, normais, área/volume, detecção de buracos,
-                       import/export STL e OBJ (faces com mais de 3 vértices
-                       são trianguladas em leque). STEP/IGES ficam de fora
-                       por enquanto (exigem um kernel CAD completo, ex.
-                       OpenCASCADE)
+engine/geometry/       Módulo 2 (escopo STL+OBJ+STEP facetado) - TriangleMesh,
+                       weld de vértices, normais, área/volume, detecção de
+                       buracos, import/export STL e OBJ (faces com mais de 3
+                       vértices são trianguladas em leque), e import de STEP
+                       (ISO 10303-21) restrito a BREP facetado - ver StepIO.hpp.
+                       CAD curvo de verdade e IGES continuam de fora (exigem
+                       um kernel CAD completo, ex. OpenCASCADE)
 engine/mesh/           Módulo 3 - StructuredGrid3D (malha Cartesiana
                        uniforme), DelaunayTriangulation2D (Bowyer-Watson,
                        nuvem de pontos) e PolygonTriangulation2D (ear

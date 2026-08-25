@@ -877,14 +877,44 @@ extraída antes dos módulos 9-14).
 solver (Fase 3) — antes disso, importar CAD sofisticado para simular uma
 caixa não entrega nada.
 
-**Decisão pendente, sua**: STEP/IGES exige um kernel CAD de verdade
-(OpenCASCADE é o caminho realista). Seria a **segunda** dependência externa
-pesada do projeto, depois do CUDA — e diferente do CUDA, que era
-insubstituível, aqui é uma escolha entre depender de uma biblioteca grande
-ou não suportar CAD. Vale decidir quando chegar a hora, não agora.
+**Concluído em 2026-08-25, parcialmente e por decisão explícita de escopo**:
+importação de STEP (ISO 10303-21) para o subconjunto **BREP facetado** —
+`FACETED_BREP`/`MANIFOLD_SOLID_BREP` cujas faces são todas `POLY_LOOP`
+planos, sem furos. Sem OpenCASCADE, sem dependência nova: um tokenizer
+Part 21 de ~450 linhas (`engine/geometry/src/StepIO.cpp`) mais o
+triangulador planar que o motor já tinha (`PolygonTriangulation2D`,
+reaproveitado sem alterar). Cada entidade EXPRESS usada
+(`CARTESIAN_POINT`, `POLY_LOOP`, `FACE_BOUND`/`FACE_OUTER_BOUND`, `FACE`,
+`CLOSED_SHELL`, `(FACETED_)MANIFOLD_SOLID_BREP`) foi conferida contra o
+schema publicado da ISO 10303-42 antes de ser implementada, não assumida de
+memória — a mesma disciplina que este projeto já aplica a física.
 
-**Portão de conclusão**: um arquivo STEP real importa, tetraedraliza e
-resolve, com o volume da geometria batendo com o do CAD de origem.
+**O que continua em aberto, e por quê isso não é o portão original
+completo**: essa fatia cobre só a parte de um arquivo STEP que já chega
+triangulada. Uma face curva (cilíndrica, B-spline, `ADVANCED_FACE`) ou a
+representação tesselada do AP242 (`TRIANGULATED_SURFACE_SET`, instanciada
+via sintaxe de entidade complexa do Part 21) não são interpretadas — o
+carregador **relata isso explicitamente** em
+`StepLoadResult::unsupported_features` em vez de produzir uma malha errada
+ou vazia em silêncio (ver o header de `StepIO.hpp` para o motivo exato de
+`TRIANGULATED_SURFACE_SET` ter ficado de fora: a sintaxe da instância real
+não foi verificada com confiança suficiente para implementar). Um arquivo
+com geometria curva de verdade ainda exige um kernel CAD — a decisão sobre
+OpenCASCADE (**a segunda dependência externa pesada do projeto**, depois do
+CUDA) continua seus, e sem prazo.
+**IGES não foi tocado** — nem a fatia facetada: seu formato de entidades é
+diferente o bastante do Part 21 do STEP que não haveria reaproveitamento
+direto do parser escrito aqui.
+Placement de assembly (`AXIS2_PLACEMENT_3D` via item mapeado/NAUO) também
+não é aplicado — um arquivo multi-sólido carrega a união bruta da geometria
+de cada sólido, sem transformar nenhum deles.
+
+**Portão de conclusão original, ainda parcialmente aberto**: um arquivo
+STEP real importa, tetraedraliza e resolve, com o volume da geometria
+batendo com o do CAD de origem. Verificado para o caso facetado (teste
+`testStepLoadsFacetedTetrahedron` em `geometry_tests.cpp`, mais o binding
+Python em `test_unstructured_bindings.py`); o caso curvo/IGES continua
+dependendo da decisão acima.
 
 ---
 

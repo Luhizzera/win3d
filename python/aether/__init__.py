@@ -56,7 +56,15 @@ _ensure_extensions_importable()
 
 try:
     from aether_core_py import Mesh, ScalarField, Tensor3x3, Vector3, VectorField
-    from aether_geometry_py import TriangleMesh, load_obj, load_stl, save_obj, save_stl_binary
+    from aether_geometry_py import (
+        StepLoadResult,
+        TriangleMesh,
+        load_obj,
+        load_step,
+        load_stl,
+        save_obj,
+        save_stl_binary,
+    )
     from aether_mesh_py import (
         DelaunayTetrahedralization3D,
         DelaunayTriangulation2D,
@@ -161,6 +169,8 @@ __all__ = [
     "save_stl_binary",
     "load_obj",
     "save_obj",
+    "load_step",
+    "StepLoadResult",
     "StructuredGrid3D",
     "DelaunayTriangulation2D",
     "PolygonTriangulation2D",
