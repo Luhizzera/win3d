@@ -466,6 +466,49 @@ exatamente o erro que os itens 1.1, 1.2 e 4.3 já custaram. Separar exige uma
 malha de skewness alta e não-ortogonalidade baixa, que não é trivial de
 construir.
 
+---
+
+**Atualização 2026-08-25: metade da atribuição fecha — não-ortogonalidade
+sozinha NÃO custa ordem.**
+
+A malha que faltava é obtida por **cisalhamento afim**, não por gradação.
+Um cisalhamento leva toda célula numa paralelepípeda congruente: a linha
+centroide-a-centroide continua cruzando cada face no centro (skewness
+fica baixa) enquanto a normal da face se inclina em relação a essa linha
+(não-ortogonalidade sobe). É exatamente a separação que faltava.
+
+Medido com a mesma régua do item 3.2 (solução manufaturada
+`sin(πx)sin(πy)sin(πz)`, fonte exata, n = 4 → 6), em
+`python/research/skewness_vs_nonorthogonality.py`:
+
+| cisalhamento | skew (n=4 / n=6) | naoOrtog (n=4 / n=6) | ordem |
+|---|---|---|---|
+| 0,0 | 0,44 / 0,41 | 1,54 / 1,59 | **2,72** |
+| 0,6 | 0,48 / 0,51 | 2,15 / 3,29 | **2,06** |
+| 1,2 | 1,02 / 0,99 | 3,95 / **9,43** | **2,15** |
+
+**Com a skewness segurada em torno de 1,0, a não-ortogonalidade sobe de
+1,54 a 9,43 e a ordem não se move de ~2,1.** A correção diferida dá conta
+dela — o que é consistente com o próprio achado deste item de que a
+correção não-ortogonal converge até não-ortogonalidade 563 com o
+amortecimento certo. As varreduras crescem (74 → 179 → 546), ou seja, ela
+trabalha mais, mas entrega a mesma ordem.
+
+**A janela de isolação tem teto, e vale registrar.** Em cisalhamento 1,8 e
+2,4 a tetraedralização deixa de preservar a estrutura afim e a skewness
+sobe junto (2,35 e 2,20), com a ordem caindo para 0,81 e 1,02 — de volta
+ao regime em que as duas andam juntas e nada se separa. A tentativa
+complementar (gradação axial, que deveria subir skewness segurando
+não-ortogonalidade) **não isolou**: a não-ortogonalidade subiu a 16,33
+junto. Está no script, registrada como o que é.
+
+**O que isto conclui e o que não conclui.** Conclui, com medição: a
+não-ortogonalidade **não é** a causa da perda de ordem, na faixa onde as
+duas podem ser separadas. Não conclui que a causa seja a skewness — isso
+seria eliminação por sobra, que é o erro que este item se propôs a evitar.
+Uma malha de skewness alta com não-ortogonalidade baixa continua sendo o
+experimento que falta, e a gradação axial não a produz.
+
 **O achado que veio de graça, e é maior que o item.** A primeira leitura desta
 medição deu "ordem 0,62" para a malha graduada 20× — e era **lixo**: aquele
 solve estava divergindo, e o número saiu de onde o teto de varreduras por acaso
