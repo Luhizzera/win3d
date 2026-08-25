@@ -62,10 +62,46 @@ add_subdirectory(apps/unified_viewer)
 
 if(AETHER_BUILD_PYTHON_BINDINGS)
     find_package(pybind11 CONFIG QUIET)
+
+    # **Ask a Python interpreter where pybind11 is, before giving up.**
+    # find_package alone searches CMake's own prefixes, which do not include
+    # a virtualenv's site-packages -- so on a machine where pybind11 is
+    # installed *in the venv this repository ships*, the plain lookup fails
+    # and the whole Python layer is skipped.
+    #
+    # That failure was silent and expensive: a clean configure produced a
+    # C++-only build, ctest reported 11 suites passing, and the two Python
+    # suites simply were not there to fail. `--no-tests=error` does not
+    # catch it either, because tests do exist -- just fewer of them. It went
+    # unnoticed for as long as it did because an older build directory
+    # carried a cached pybind11_DIR from a one-off manual configure, so only
+    # a genuinely clean build (or a fresh clone) ever hit it.
+    if(NOT pybind11_FOUND)
+        find_program(AETHER_PYTHON
+                     NAMES python python3
+                     HINTS "${CMAKE_SOURCE_DIR}/python/.venv/Scripts"
+                           "${CMAKE_SOURCE_DIR}/python/.venv/bin"
+                     NO_CACHE)
+        if(AETHER_PYTHON)
+            execute_process(COMMAND "${AETHER_PYTHON}" -m pybind11 --cmakedir
+                            OUTPUT_VARIABLE AETHER_PYBIND11_DIR
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET)
+            if(AETHER_PYBIND11_DIR)
+                find_package(pybind11 CONFIG QUIET
+                             PATHS "${AETHER_PYBIND11_DIR}" NO_DEFAULT_PATH)
+            endif()
+        endif()
+    endif()
+
     if(pybind11_FOUND)
         add_subdirectory(bindings/python)
     else()
-        message(STATUS "pybind11 not found - skipping Python bindings. "
-                        "Run 'pip install pybind11' in your Python env and re-run cmake to enable them.")
+        # A warning, not a status message: skipping this drops two whole
+        # test suites and the entire orchestration layer, which is not a
+        # detail to scroll past.
+        message(WARNING "pybind11 not found - skipping Python bindings AND the two Python "
+                        "test suites that go with them. Run 'pip install pybind11' in the "
+                        "Python environment CMake is using, or pass -Dpybind11_DIR=<path>.")
     endif()
 endif()

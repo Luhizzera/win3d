@@ -37,18 +37,29 @@ REPO_ROOT = Path(__file__).resolve().parent
 BUILD_DIR = REPO_ROOT / "build"
 
 
-def run(command: list[str], description: str) -> None:
+def run(command: list[str], description: str, capture: bool = False) -> str:
     """Runs a step, echoing the command so a failure can be reproduced by
-    hand rather than only through this script."""
+    hand rather than only through this script.
+
+    With `capture`, the output is both shown and returned, so a caller can
+    inspect it -- used below to notice a configure that silently dropped a
+    whole layer.
+    """
     print(f"\n=== {description}")
     print("    " + " ".join(command), flush=True)
-    result = subprocess.run(command, cwd=REPO_ROOT)
+    if capture:
+        result = subprocess.run(command, cwd=REPO_ROOT, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(result.stdout, end="", flush=True)
+    else:
+        result = subprocess.run(command, cwd=REPO_ROOT)
     if result.returncode != 0:
         # Exits rather than raising: a CMake or compiler failure has already
         # printed its own diagnosis, and a Python traceback on top of it
         # would bury the part that matters.
         print(f"\nFALHOU: {description} (codigo {result.returncode})", file=sys.stderr)
         sys.exit(result.returncode)
+    return result.stdout if capture else ""
 
 
 def main() -> int:
@@ -70,7 +81,15 @@ def main() -> int:
         print("cmake nao encontrado no PATH. Instale o CMake e tente de novo.", file=sys.stderr)
         return 1
 
-    run(["cmake", "-S", ".", "-B", "build"], "configurando")
+    configure_output = run(["cmake", "-S", ".", "-B", "build"], "configurando", capture=True)
+    # **A configure that skips the Python bindings is not a detail to scroll
+    # past.** It drops the whole orchestration layer and two of the thirteen
+    # test suites -- and ctest then reports the remaining eleven passing,
+    # which reads as success. `--no-tests=error` does not catch it either,
+    # since tests do exist, just fewer of them. This went unnoticed once
+    # already: a stale build directory carried a cached pybind11_DIR from an
+    # old manual configure, so only a genuinely clean build ever hit it.
+    bindings_skipped = "skipping Python bindings" in configure_output
     # --config belongs here, not on the configure line: a multi-config
     # generator picks the configuration at build time, and passing
     # CMAKE_BUILD_TYPE at configure time is silently ignored by it.
@@ -84,6 +103,12 @@ def main() -> int:
             "rodando a suite")
 
     print("\n=== pronto")
+    if bindings_skipped:
+        print("    ATENCAO: os bindings Python foram pulados -- este build tem apenas o")
+        print("             nucleo C++. O pacote 'aether' NAO vai importar, e duas suites")
+        print("             de teste nao foram registradas. Instale o pybind11 no ambiente")
+        print("             Python que o CMake usa, ou passe -Dpybind11_DIR=<caminho>.")
+        return 1
     print("    import aether  # com python/ no PYTHONPATH, ou a partir da raiz do repo")
     return 0
 
