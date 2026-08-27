@@ -1612,17 +1612,62 @@ não de código.
 
 ## 5. Verificação incompleta
 
-### 5.1 O CI nunca rodou
+### 5.1 ~~O CI nunca rodou~~ — RESOLVIDO em 2026-08-27
 
-O workflow existe e a metade local do portão está provada (regressão
-deliberada reprovou). Mas nada foi enviado ao GitHub, então o CI nunca
-executou.
+O workflow existia e a metade local do portão estava provada (regressão
+deliberada reprovou). Mas nada tinha sido enviado ao GitHub, então o CI
+nunca tinha executado.
 
-**Por que importa**: um workflow que nunca rodou é uma hipótese, não uma rede
-de proteção. Erros de YAML, de caminho e de ambiente só aparecem na primeira
-execução.
+**Por que importava**: um workflow que nunca rodou é uma hipótese, não uma
+rede de proteção. Erros de YAML, de caminho e de ambiente só aparecem na
+primeira execução — e foi exatamente isso que aconteceu.
 
-**O que fazer**: um push. O resto já está pronto.
+**O push já tinha sido feito numa sessão anterior — e o CI falhou nas 6
+execuções seguintes, sempre no mesmo passo, sem que ninguém notasse.**
+GitHub agora exige login para ler o log de uma execução mesmo em
+repositório público, então a falha ficou invisível para qualquer coisa
+sem uma sessão de navegador autenticada — inclusive para este agente.
+Tentativas de reproduzir localmente os comandos exatos do workflow (Python
+limpo do sistema, com e sem CUDA disponível) não reproduziram nada: o
+build local sempre passava.
+
+**A saída foi tornar o próprio erro público.** O passo `Configure` passou a
+capturar a saída do `cmake` e, ao falhar, ecoar as últimas linhas como uma
+única anotação `::error::` — que a API REST pública de check-runs devolve
+sem autenticação, ao contrário do log em si. Isso revelou a causa real na
+primeira tentativa:
+
+```
+CMake Error at CMakeLists.txt:39 (add_subdirectory):
+  add_subdirectory given source "engine/testing" which is not an existing
+  directory.
+```
+
+**A causa raiz não era de ambiente — era `engine/testing/` nunca ter sido
+versionado, desde o primeiro commit deste repositório.** A regra `Testing/`
+em `.gitignore` (pensada para o diretório de log que o próprio CTest gera)
+casava também com `engine/testing/`: um padrão sem barra inicial casa em
+qualquer profundidade, e em filesystem case-insensitive (Windows)
+`Testing/` e `testing/` são o mesmo padrão. `engine/testing/` — a biblioteca
+`aether_testing` com a macro `AETHER_CHECK` que as 13 suítes C++ usam —
+ficou de fora do controle de versão inteiro esse tempo, e isso nunca
+apareceu localmente porque o diretório já existia em disco antes mesmo do
+primeiro commit. Só um clone de verdade — exatamente o que o runner do CI
+faz a cada execução — expõe o problema.
+
+**Corrigido** em duas partes: a regra virou `/Testing/` (ancorada na raiz,
+não casa mais `engine/testing/`), e `engine/testing/` entrou no
+repositório pela primeira vez. Verificado com um clone de verdade (não só
+localmente confiado): `git clone` para um diretório novo, `cmake -S . -B
+build` com os mesmos argumentos do workflow, configure limpo. **O CI
+passou pela primeira vez na história deste projeto** na execução seguinte
+(run #8, ~10 min, build completo + suíte de testes).
+
+O passo de diagnóstico (as anotações `::error::`/`::notice::` no
+`Configure`) foi deixado no lugar — descrito no próprio `ci.yml` como
+"remover assim que Configure passar pela primeira vez", mas vale manter
+mais uma rodada: é barato, e a próxima falha real (se houver) se beneficia
+da mesma visibilidade sem depender de login.
 
 ### 5.2 ~~Solvers não-estruturados sem bindings Python~~ — RESOLVIDO em 2026-08-16
 
@@ -1849,7 +1894,11 @@ Por dependência, não por tamanho:
 10. ~~**4.4**~~ — FEITO: resolvido no 2D e no solver 1D; portado (opção, não
     default) para os seis 3D e medido em Re=400 — inconclusivo, decisão de
     manter `Central` como default está registrada e justificada
-11. **5.1** (push) — um comando
+11. ~~**5.1**~~ — FEITO: o push já tinha sido feito, mas o CI falhava 100%
+    das vezes (`engine/testing/` nunca versionado, por um `.gitignore`
+    ambíguo) sem que ninguém pudesse ver por quê, já que o GitHub exige
+    login até para ler o log em repositório público. Corrigido e
+    **verificado rodando** — primeira vez que o CI passa neste projeto
 
 O item **6** (tetraedralização restrita) fica por último não por prioridade,
 mas porque é o único que não se resolve com disciplina — se resolve com
