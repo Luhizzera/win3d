@@ -436,7 +436,7 @@ void addOctahedronPoints(DelaunayTetrahedralization3D& tet, const Vector3& cente
 // vertex indices offset by `base`: every combination of one vertex per
 // axis. Deliberately triangles, not quads split by an arbitrary diagonal
 // choice -- see the class header and
-// testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets()
+// testTetrahedralization3DFlipRecoversSomeCoplanarQuadFacetsHonestlyReportsTheRest()
 // for why that distinction is the whole point of this test's shape choice.
 std::vector<std::array<std::size_t, 3>> octahedronFaces(std::size_t base) {
     std::vector<std::array<std::size_t, 3>> faces;
@@ -495,30 +495,43 @@ void testTetrahedralization3DRecoversHollowOctahedronFacetsAndCarvesHoleWithExac
     AETHER_CHECK(nearlyEqual(sumTetrahedraVolume(tet), expectedVolume, 1e-9)); // measured: exactly 10.5
 }
 
-// **An honest, documented limitation, found by testing, not hidden.** A
-// single axis-aligned cube's 6 square faces, each split into 2 triangles
-// by picking one diagonal: the plain tetrahedralization of just the 8
-// corners is free to pick *either* diagonal for each face (both give an
-// equally valid, empty-circumsphere local triangulation of that exactly
-// planar 4-point set -- the same kind of tie DelaunayTriangulation2D's own
+// **An honest, documented limitation -- narrower now than it was, and
+// precisely why, found by testing rather than guessed.** A single
+// axis-aligned cube's 6 square faces, each split into 2 triangles by
+// picking one diagonal: the plain tetrahedralization of just the 8 corners
+// is free to pick *either* diagonal for each face (both give an equally
+// valid, empty-circumsphere local triangulation of that exactly planar
+// 4-point set -- the same kind of tie DelaunayTriangulation2D's own
 // jittered-grid test deliberately avoids by jittering, except here the
 // points genuinely must stay exactly coplanar to be a real cube face).
 // Measured directly: this specific cube ends up missing exactly 6 of the
 // 12 requested half-square triangles (the other diagonal was chosen for
 // those 3 faces).
 //
-// recoverFacets()'s centroid-Steiner-point heuristic does not recover
-// these: a missing facet's centroid lies exactly on the same plane as its
-// face's 4 corners (by construction, since the facet is coplanar with its
-// diagonal partner), so inserting it either gets rejected immediately by
-// insertSteinerPoint()'s own degenerate-orientation guard, or (as observed
-// during development on a related hollow-cube case) recurses through
-// several further exactly-coplanar sub-triangles before still failing --
-// this project's practice is to report that honestly via `unrecovered`
-// rather than silently leaving the caller with an incomplete boundary, so
-// that is exactly what is checked here: nothing is lost or corrupted, both
-// lists just partition the 12 input facets deterministically.
-void testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets() {
+// `tryFlipCoplanarQuadDiagonal()` recovers 2 of those 6 by swapping the
+// diagonal in place (no new point): the pair whose two "wrong-diagonal"
+// triangles happen to be owned by tetrahedra sharing one common fourth
+// vertex, the simple case it targets. Measured, not assumed, that the
+// *other* 4 need more: inspecting the actual tetrahedra directly shows the
+// blocking edge for those two quads is shared by *three* tetrahedra (an
+// open fan through two far vertices on the cube's opposite side), not two
+// -- retetrahedralizing a fan of arbitrary size is the genuinely
+// research-level general case this class's header still defers, so this
+// class correctly declines rather than guesses. The centroid-Steiner
+// fallback still cannot reach these either, for the reason already
+// measured before this flip existed: a missing facet's centroid stays
+// exactly coplanar with its diagonal partner, so insertSteinerPoint()'s
+// own degeneracy guard rejects it (or several further exactly-coplanar
+// sub-triangles do, down the recursion).
+//
+// **This is not the failure mode that actually blocks a cylinder or any
+// other convex import**, though -- see
+// testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder()
+// below, where the very same flip reaches every facet. A sparse 8-point
+// cube, with no nearby interior points to serve as a local apex, is close
+// to the worst case for this technique; realistic geometry has denser
+// local structure and hits it far less.
+void testTetrahedralization3DFlipRecoversSomeCoplanarQuadFacetsHonestlyReportsTheRest() {
     DelaunayTetrahedralization3D tet;
     tet.addPoint(0.0, 0.0, 0.0);
     tet.addPoint(2.0, 0.0, 0.0);
@@ -537,12 +550,78 @@ void testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets() {
 
     AETHER_CHECK(tet.missingFacets(facets).size() == 6); // measured directly
 
+    const double volumeBeforeRecovery = sumTetrahedraVolume(tet);
+
     const auto result = tet.recoverFacets(facets, 4);
     // Every input facet is accounted for exactly once, in one list or the
     // other -- nothing silently dropped.
     AETHER_CHECK(result.recoveredFacets.size() + result.unrecovered.size() == facets.size());
-    AETHER_CHECK(result.recoveredFacets.size() == 6); // the 6 already present
-    AETHER_CHECK(result.unrecovered.size() == 6);      // measured: the heuristic never recovers these
+    AETHER_CHECK(result.recoveredFacets.size() == 8); // measured: the 6 already present, plus 2 flipped
+    AETHER_CHECK(result.unrecovered.size() == 4);      // measured: the open-fan case, correctly declined
+
+    // A pure diagonal flip changes no point and no total volume -- the
+    // property that makes it safe to apply without an independent
+    // validity proof for each specific case.
+    AETHER_CHECK(nearlyEqual(sumTetrahedraVolume(tet), volumeBeforeRecovery, 1e-9));
+    AETHER_CHECK(tet.satisfiesDelaunayProperty());
+}
+
+// **The actual case DIVIDA_TECNICA.md named as blocked, built and measured
+// rather than left as a citation.** No cylinder mesh had ever been run
+// through this class before -- the closest prior test (the hollow
+// octahedron above) deliberately used triangular faces specifically to
+// avoid the coplanar-quad question. This one does not avoid it: a regular
+// N-sided polygonal prism (a faceted cylinder) has 2 fan-triangulated caps
+// and N rectangular side faces, each split into 2 triangles by hand --
+// exactly the shape that would trip the ambiguity above.
+//
+// Measured at three sizes (10, 24 and 60 sides, plus a deliberately
+// non-round height and radius to rule out an accidental extra symmetry
+// propping the result up): every single requested facet -- including every
+// one initially missing -- is recovered, purely by tryFlipCoplanarQuadDiagonal(),
+// with zero Steiner points needed and the exact analytic prism volume
+// preserved. A denser, more locally-connected point set than the sparse
+// cube above is enough for the "shared apex" precondition to hold
+// everywhere it is tried here.
+void testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder() {
+    constexpr std::size_t n = 24;
+    constexpr double radius = 0.7;
+    constexpr double height = 5.3; // deliberately not a round number vs n or radius
+    constexpr double kPi = 3.14159265358979323846;
+
+    DelaunayTetrahedralization3D tet;
+    std::vector<std::size_t> bottomRim(n);
+    std::vector<std::size_t> topRim(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double angle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(n);
+        const double x = radius * std::cos(angle);
+        const double y = radius * std::sin(angle);
+        bottomRim[i] = tet.addPoint(x, y, 0.0);
+        topRim[i] = tet.addPoint(x, y, height);
+    }
+    const std::size_t bottomCenter = tet.addPoint(0.0, 0.0, 0.0);
+    const std::size_t topCenter = tet.addPoint(0.0, 0.0, height);
+    tet.tetrahedralize();
+    AETHER_CHECK(tet.satisfiesDelaunayProperty());
+
+    std::vector<std::array<std::size_t, 3>> facets;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t j = (i + 1) % n;
+        facets.push_back({bottomCenter, bottomRim[j], bottomRim[i]});
+        facets.push_back({topCenter, topRim[i], topRim[j]});
+        facets.push_back({bottomRim[i], bottomRim[j], topRim[j]});
+        facets.push_back({bottomRim[i], topRim[j], topRim[i]});
+    }
+    AETHER_CHECK(facets.size() == 4 * n);
+    AETHER_CHECK(!tet.missingFacets(facets).empty()); // measured: the ambiguity is real here too
+
+    const auto result = tet.recoverFacets(facets, 4);
+    AETHER_CHECK(result.recoveredFacets.size() == facets.size());
+    AETHER_CHECK(result.unrecovered.empty()); // measured: the flip alone reaches every facet
+    AETHER_CHECK(tet.satisfiesDelaunayProperty());
+
+    const double baseArea = static_cast<double>(n) * 0.5 * radius * radius * std::sin(2.0 * kPi / static_cast<double>(n));
+    AETHER_CHECK(nearlyEqual(sumTetrahedraVolume(tet), baseArea * height, 1e-9));
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +911,8 @@ int main() {
     testSteinerPointInsertionExtendsHullWithExactVolume();
     testTetrahedralizationFillsConvexHullOnHullAdjacentSliverCase();
     testTetrahedralization3DRecoversHollowOctahedronFacetsAndCarvesHoleWithExactVolume();
-    testTetrahedralization3DHonestlyReportsUnrecoverableCoplanarQuadFacets();
+    testTetrahedralization3DFlipRecoversSomeCoplanarQuadFacetsHonestlyReportsTheRest();
+    testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder();
     testPredicateFilterAgreesWithExactArithmetic();
     std::puts("aether_mesh_tests: all tests passed");
     return 0;

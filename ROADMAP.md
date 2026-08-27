@@ -961,11 +961,15 @@ Itens independentes entre si, ordenáveis conforme a necessidade:
 - **Backend Vulkan** (Módulo 8): esforço grande e isolado; o pipeline GL 3.3
   atende tudo que o projeto renderiza hoje. Só se o gargalo virar
   renderização, o que não é o caso.
-- **Recuperação combinatória de facetas na CDT** (caso do quadrilátero
-  coplanar) e o caso Schönhardt-difícil: a CDT atual cobre a fatia tratável.
-  Vira prioridade se a Fase 3 esbarrar nesses casos com geometria real —
-  o que é plausível, e aí sobe de prioridade por evidência, não por
-  antecipação.
+- ~~**Recuperação combinatória de facetas na CDT** (caso do quadrilátero
+  coplanar)~~ — FEITO em 2026-08-27 (`tryFlipCoplanarQuadDiagonal()`,
+  DIVIDA_TECNICA.md §6): medido recuperando 100% das facetas de um
+  cilindro aproximado por prisma poligonal (10/24/60 lados), sem nenhum
+  ponto de Steiner. O caso Schönhardt-difícil (contorno genuinamente
+  não-convexo) continua em aberto — nunca construído neste código, citado
+  como teto teórico. Ainda falta validar o pipeline completo
+  (`mesh_flow_around_object` + solver) com um cilindro de verdade
+  importado como STL, não só a tetraedralização isolada.
 - **Validação contra benchmarks de literatura** (Ghia et al. e afins): o
   projeto evitou isso por princípio, porque recordar tabelas de memória é
   risco real de imprecisão. Continua correto. Quando credibilidade externa

@@ -24,12 +24,19 @@ namespace aether::mesh {
 // refinement -- both interior points and points that extend the current
 // convex hull. Boundary-constrained tetrahedralization (holes, multiple
 // contours, preserving an imported surface mesh's own faces exactly) is a
-// genuinely harder next step on this same core -- it needs recovering an
-// arbitrary, possibly non-convex boundary, which can require its own
-// Steiner points even to make tetrahedralizable at all (the classic
-// Schonhardt-polyhedron obstruction) -- deliberately still deferred rather
-// than attempted without the ability to validate it as thoroughly as the
-// rest of this class.
+// genuinely harder next step on this same core. recoverFacets() below
+// covers two practical slices of it: the plain "usually already there"
+// case, and (via tryFlipCoplanarQuadDiagonal()) the coplanar-quad diagonal
+// ambiguity a convex boundary's own flat faces produce -- which is enough
+// for any convex or mildly non-convex domain, a cylinder or box included.
+// What is *not* covered, and remains genuinely open research, is a
+// boundary with actual reflex (non-convex) structure severe enough that no
+// local combinatorial swap or bounded Steiner subdivision recovers it at
+// all -- the classic Schonhardt-polyhedron obstruction, where a
+// tetrahedralization using only the boundary's own vertices provably does
+// not exist for some inputs. No such input has ever actually been
+// constructed or hit in this codebase; it is cited as the theoretical
+// ceiling on what "guaranteed recovery" could mean, not an observed bug.
 //
 // A real bug once lived here and is now FIXED -- worth recording because
 // the first diagnosis of it was wrong, and the wrong diagnosis was
@@ -132,11 +139,29 @@ public:
     };
 
     // Attempts to recover every facet in `facets` that missingFacets()
-    // would flag: for each one still missing, inserts its centroid as a
-    // Steiner point (insertSteinerPoint()) and recurses on the resulting
-    // three sub-triangles, up to maxRounds levels deep. This is a
-    // heuristic, not a guarantee -- the honest framing is "the standard
-    // practical technique", not "always terminates".
+    // would flag, in two phases -- combinatorial first, Steiner-point
+    // subdivision second -- mirroring the order production mesh generators
+    // (TetGen et al.) use:
+    //
+    //  1. tryFlipCoplanarQuadDiagonal(): for each pair of still-missing
+    //     facets that together describe one half-quad each of the same
+    //     coplanar quadrilateral, swaps which diagonal the existing
+    //     tetrahedra use -- no new point, just two tetrahedra replaced by
+    //     two others covering the identical volume. This is the technique
+    //     DIVIDA_TECNICA.md/ROADMAP.md name as still missing (the "caso do
+    //     quadrilátero coplanar"), and it is what fixes the one concretely
+    //     reproduced failure this class has ever had: an axis-aligned
+    //     cube's square faces, each an arbitrary choice between its two
+    //     diagonals.
+    //  2. Whatever the first phase couldn't reach: the original heuristic,
+    //     inserting a missing facet's centroid as a Steiner point
+    //     (insertSteinerPoint()) and recursing on the resulting three
+    //     sub-triangles, up to maxRounds levels deep.
+    //
+    // Neither phase is a guarantee -- see tryFlipCoplanarQuadDiagonal()'s
+    // own comment for exactly which cases phase 1 does and does not cover,
+    // and this class's header for why full generality past a genuinely
+    // non-convex (Schonhardt-style) boundary remains open research.
     FacetRecoveryResult recoverFacets(const std::vector<std::array<std::size_t, 3>>& facets,
                                        int maxRounds = 4);
 
@@ -173,6 +198,31 @@ private:
     void recoverFacetRecursive(const std::array<std::size_t, 3>& facet, int roundsLeft,
                                 std::vector<std::array<std::size_t, 3>>& recovered,
                                 std::vector<std::array<std::size_t, 3>>& unrecovered);
+
+    // recoverFacets()'s combinatorial first phase for one candidate pair.
+    // Applicable when `f1` and `f2` share exactly one edge and, together
+    // with that edge's two endpoints, describe a single coplanar
+    // quadrilateral -- i.e. f1/f2 are the two triangles of one diagonal
+    // choice on a quad whose *other* diagonal is what the tetrahedralization
+    // actually built. Recovers both at once by replacing the two
+    // tetrahedra straddling that quad (which must share one common fourth
+    // vertex -- the simple "bipyramid" case) with two others built on the
+    // requested diagonal instead, after confirming explicitly (not by
+    // trusting makeTetrahedron()'s own orientation auto-correction) that
+    // the quad is convex as seen from that shared vertex, so the swap
+    // covers exactly the same volume rather than overlapping or leaving a
+    // gap.
+    //
+    // Deliberately narrow: a facet pair not fitting this exact shape (no
+    // shared edge, not coplanar, the two straddling tetrahedra having
+    // *different* fourth vertices, or a non-convex quad) is left for
+    // recoverFacetRecursive()'s Steiner fallback rather than guessed at --
+    // the general case (an arbitrary local cavity needing more than two
+    // tetrahedra retetrahedralized) is the genuinely research-level part of
+    // this problem this class's header already flags.
+    //
+    // Returns true and mutates the mesh iff the flip was performed.
+    bool tryFlipCoplanarQuadDiagonal(const std::array<std::size_t, 3>& f1, const std::array<std::size_t, 3>& f2);
 
     // Shared cavity-finding step between tetrahedralize()'s main loop and
     // insertSteinerPoint(): every tetrahedron whose circumsphere contains

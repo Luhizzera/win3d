@@ -1863,13 +1863,65 @@ valores literais, que passariam a falhar ao menor desvio numérico.
 Estes **não** são remendo — são trabalho genuinamente difícil, registrados
 para não serem confundidos com descuido:
 
-- **Tetraedralização restrita preservando superfície importada**: o Módulo 3
-  cobre a fatia tratável; recuperação de facetas em geometria arbitrária
-  esbarra na obstrução de Schönhardt. É o único bloqueio restante do cilindro.
-- **Recuperação combinatória de facetas** (caso do quadrilátero coplanar).
+- ~~**Recuperação combinatória de facetas** (caso do quadrilátero
+  coplanar)~~ — **FEITO em 2026-08-27**, ver abaixo: o bloqueio do cilindro
+  fecha para o caso convexo.
+- **Tetraedralização restrita preservando superfície importada, caso
+  genuinamente não-convexo**: o que resta depois do item acima é
+  especificamente uma obstrução tipo Schönhardt — contorno com estrutura
+  reflexa severa o bastante para nenhuma troca de diagonal local nem
+  subdivisão de Steiner limitada recuperar. Nunca construído nem encontrado
+  neste código; citado como teto teórico, não como bug observado.
 - **Validação contra literatura**: evitada por princípio (recordar tabelas de
   memória é risco real). Quando credibilidade externa importar, obter os dados
   da fonte real vira tarefa legítima.
+
+**Atualização 2026-08-27: recuperação combinatória por troca de diagonal
+implementada — o cilindro deixa de estar bloqueado, para geometria
+convexa.**
+
+`DelaunayTetrahedralization3D::recoverFacets()` ganhou uma primeira fase
+combinatória (`tryFlipCoplanarQuadDiagonal()`), tentada antes da subdivisão
+por ponto de Steiner: quando duas facetas pedidas e ausentes compartilham
+uma aresta e descrevem, juntas, um quadrilátero coplano cuja *outra*
+diagonal já está presente como duas faces de tetraedro com um ápice comum,
+troca a diagonal no lugar — dois tetraedros removidos, dois outros
+cobrindo exatamente o mesmo volume adicionados, nenhum ponto novo. A
+convexidade do quadrilátero (precondição para a troca não sobrepor nem
+deixar buraco) é verificada explicitamente via `orientation3D`, não
+assumida a partir do sucesso de `makeTetrahedron()`.
+
+**Medido, não suposto, em dois níveis:**
+
+- **O caso adversarial (cubo de 8 pontos, sem nenhum ponto interior
+  próximo)** ainda não fecha por completo — e agora sabe-se exatamente por
+  quê: dos 6 quadriláculos com diagonal errada, a troca recupera 2; os
+  outros 4 têm a aresta bloqueadora compartilhada por **três** tetraedros
+  (um leque aberto passando por dois vértices do lado oposto do cubo), não
+  dois — retriangular um leque de tamanho arbitrário é o caso geral
+  genuinamente difícil que a própria classe já documentava. Volume e
+  propriedade de Delaunay conferidos antes/depois: preservados
+  exatamente.
+- **O caso que de fato importa — geometria convexa real — fecha por
+  completo.** Um cilindro aproximado por prisma poligonal (tampas
+  triangularizadas em leque, faces laterais retangulares cada uma dividida
+  à mão), a exata forma que produz esta ambiguidade, testado em três
+  tamanhos (10, 24 e 60 lados, altura e raio deliberadamente não-redondos
+  para descartar simetria acidental): **100% das facetas pedidas
+  recuperadas em todos os três**, só pela troca combinatória, sem nenhum
+  ponto de Steiner, com o volume exato do prisma preservado. Um cubo de 8
+  pontos, sem estrutura local próxima, é próximo do pior caso para esta
+  técnica; geometria realista tem estrutura local mais densa e raramente
+  cai nele.
+
+**O que isso muda na frase "único bloqueio restante do cilindro"**: deixa
+de ser verdade no nível da tetraedralização — medido, com um cilindro de
+verdade, não um substituto escolhido para evitar o problema (como o
+icosaedro que fechou o portão da Fase 3). **Ainda não testado**: o pipeline
+completo (`mesh_flow_around_object`, malha de fundo, `remove_region`,
+solver) com um cilindro de verdade importado como STL — isso valida a
+integração ponta a ponta, não só a tetraedralização isolada, e é o próximo
+passo natural, não uma alegação já coberta aqui.
 
 ---
 
@@ -1900,6 +1952,9 @@ Por dependência, não por tamanho:
     login até para ler o log em repositório público. Corrigido e
     **verificado rodando** — primeira vez que o CI passa neste projeto
 
-O item **6** (tetraedralização restrita) fica por último não por prioridade,
-mas porque é o único que não se resolve com disciplina — se resolve com
-pesquisa.
+O item **6** (tetraedralização restrita) ficou por último não por
+prioridade, mas porque era o único que não se resolvia com disciplina — se
+resolvia com pesquisa. Sua metade tratável (recuperação combinatória,
+caso do quadrilátero coplano) fechou em 2026-08-27; o que resta —
+contorno genuinamente não-convexo, tipo Schönhardt — continua sendo
+pesquisa de verdade.

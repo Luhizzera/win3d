@@ -118,6 +118,29 @@ std::array<std::size_t, 3> sortedFace(const std::array<std::size_t, 3>& f) {
     return s;
 }
 
+// The tetrahedron owning `face` (any winding) together with its one vertex
+// not in `face` -- the "apex" over that face, needed by
+// tryFlipCoplanarQuadDiagonal() to identify the two tetrahedra straddling a
+// coplanar quad. tetIndex is -1 if no tetrahedron owns the face.
+struct FaceOwner {
+    long long tetIndex = -1;
+    std::size_t apex = 0;
+};
+
+FaceOwner findFaceOwnerWithApex(const std::vector<DelaunayTetrahedralization3D::Tetrahedron>& tetrahedra,
+                                 const std::array<std::size_t, 3>& face) {
+    const std::array<std::size_t, 3> key = sortedFace(face);
+    for (std::size_t t = 0; t < tetrahedra.size(); ++t) {
+        const auto faces = tetrahedronFaces(tetrahedra[t]);
+        for (int li = 0; li < 4; ++li) {
+            if (sortedFace({faces[li].a, faces[li].b, faces[li].c}) == key) {
+                return {static_cast<long long>(t), tetrahedra[t].vertices[li]};
+            }
+        }
+    }
+    return {};
+}
+
 // True iff p lies inside or on tetrahedron t (which is positively oriented
 // by construction, same requirement as every other predicate here). Same
 // vertex-substitution trick as isFaceVisible(), just checking the sign
@@ -506,8 +529,148 @@ void DelaunayTetrahedralization3D::recoverFacetRecursive(const std::array<std::s
     recoverFacetRecursive({facet[2], facet[0], c}, roundsLeft - 1, recovered, unrecovered);
 }
 
+bool DelaunayTetrahedralization3D::tryFlipCoplanarQuadDiagonal(const std::array<std::size_t, 3>& f1,
+                                                                 const std::array<std::size_t, 3>& f2) {
+    // Identify the shared edge {sharedA, sharedB} = f1 ∩ f2 (the diagonal
+    // this flip would introduce) and each triangle's own vertex not in the
+    // other (q from f1, s from f2 -- together with sharedA/sharedB, the
+    // quad's other diagonal). Anything but exactly 2 shared vertices means
+    // f1/f2 do not describe two triangles of one shared quadrilateral.
+    std::array<std::size_t, 2> shared{};
+    std::size_t sharedCount = 0;
+    std::size_t q = 0;
+    bool qSet = false;
+    for (std::size_t v : f1) {
+        const bool inF2 = (v == f2[0] || v == f2[1] || v == f2[2]);
+        if (inF2) {
+            if (sharedCount >= 2) {
+                return false; // f1 == f2 as a vertex set
+            }
+            shared[sharedCount++] = v;
+        } else {
+            q = v;
+            qSet = true;
+        }
+    }
+    if (sharedCount != 2 || !qSet) {
+        return false;
+    }
+    std::size_t s = 0;
+    bool sSet = false;
+    for (std::size_t v : f2) {
+        const bool inF1 = (v == f1[0] || v == f1[1] || v == f1[2]);
+        if (!inF1) {
+            if (sSet) {
+                return false; // more than one vertex of f2 absent from f1
+            }
+            s = v;
+            sSet = true;
+        }
+    }
+    if (!sSet || s == q) {
+        return false;
+    }
+    const std::size_t sharedA = shared[0];
+    const std::size_t sharedB = shared[1];
+
+    // Coplanarity: sharedA, sharedB, q and s must lie in one plane --
+    // otherwise f1/f2 do not describe a single planar quadrilateral and no
+    // diagonal flip relates them.
+    if (orientation3D(points_[sharedA], points_[sharedB], points_[q], points_[s]) != 0) {
+        return false;
+    }
+
+    // The candidate quad, in cyclic order, is sharedA-q-sharedB-s (edge
+    // sharedA-q and q-sharedB from f1, sharedB-s and s-sharedA from f2).
+    // {sharedA, sharedB} is the diagonal this flip introduces; {q, s} is
+    // the one the tetrahedralization currently uses instead, which must
+    // presently split the quad into exactly two tetrahedra sharing one
+    // common fourth vertex -- the simple "bipyramid" case this flip
+    // handles. A different local structure (the two triangles owned by
+    // tetrahedra with different fourth vertices, or missing outright) is
+    // left to the caller's Steiner fallback.
+    const FaceOwner ownerQ = findFaceOwnerWithApex(tetrahedra_, {sharedA, q, s});
+    const FaceOwner ownerS = findFaceOwnerWithApex(tetrahedra_, {sharedB, q, s});
+    if (ownerQ.tetIndex < 0 || ownerS.tetIndex < 0 || ownerQ.apex != ownerS.apex) {
+        return false;
+    }
+    const std::size_t apex = ownerQ.apex;
+
+    // Convexity of quad sharedA-q-sharedB-s, seen consistently from `apex`:
+    // all four consecutive-triple orientations must agree in sign, the
+    // same turn-direction test a 2D convex-polygon check uses, with `apex`
+    // fixing which side of the shared plane counts as positive. A
+    // non-convex quad would make this diagonal an invalid split (the new
+    // tetrahedra would overlap or leave a gap instead of exactly
+    // partitioning the same volume the old two did) -- checked explicitly
+    // here rather than trusted, since makeTetrahedron() below would
+    // "succeed" at building a positively-oriented tetrahedron regardless of
+    // whether the split is geometrically sound.
+    const int t1 = orientation3D(points_[sharedA], points_[q], points_[sharedB], points_[apex]);
+    const int t2 = orientation3D(points_[q], points_[sharedB], points_[s], points_[apex]);
+    const int t3 = orientation3D(points_[sharedB], points_[s], points_[sharedA], points_[apex]);
+    const int t4 = orientation3D(points_[s], points_[sharedA], points_[q], points_[apex]);
+    if (t1 == 0 || t2 == 0 || t3 == 0 || t4 == 0 || !(t1 == t2 && t2 == t3 && t3 == t4)) {
+        return false;
+    }
+
+    const auto t1Index = static_cast<std::size_t>(ownerQ.tetIndex);
+    const auto t2Index = static_cast<std::size_t>(ownerS.tetIndex);
+    std::vector<Tetrahedron> kept;
+    kept.reserve(tetrahedra_.size());
+    for (std::size_t t = 0; t < tetrahedra_.size(); ++t) {
+        if (t != t1Index && t != t2Index) {
+            kept.push_back(tetrahedra_[t]);
+        }
+    }
+    // {sharedA, q, sharedB, apex} exposes face f1 = {sharedA, q, sharedB};
+    // {sharedA, sharedB, s, apex} exposes face f2 = {sharedA, sharedB, s}.
+    // Together they occupy exactly the same volume the two removed
+    // tetrahedra did (same base quad, same apex, only the internal
+    // diagonal differs), confirmed convex above.
+    kept.push_back(makeTetrahedron(sharedA, q, sharedB, apex, points_));
+    kept.push_back(makeTetrahedron(sharedA, sharedB, s, apex, points_));
+    tetrahedra_ = std::move(kept);
+    return true;
+}
+
 DelaunayTetrahedralization3D::FacetRecoveryResult DelaunayTetrahedralization3D::recoverFacets(
     const std::vector<std::array<std::size_t, 3>>& facets, int maxRounds) {
+    // Phase 1: combinatorial recovery, tried before any new point --
+    // repeatedly scan the still-missing facets for a flippable coplanar-quad
+    // pair (see tryFlipCoplanarQuadDiagonal()) until a full pass finds none.
+    // Bounded by construction: each successful flip strictly reduces the
+    // missing count by 2, so this terminates in at most facets.size()/2
+    // successful iterations regardless of the outer restart-on-success
+    // pattern below.
+    std::vector<std::array<std::size_t, 3>> stillMissing = missingFacets(facets);
+    std::vector<bool> flipped(stillMissing.size(), false);
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (std::size_t i = 0; i < stillMissing.size() && !progress; ++i) {
+            if (flipped[i]) {
+                continue;
+            }
+            for (std::size_t j = i + 1; j < stillMissing.size(); ++j) {
+                if (flipped[j]) {
+                    continue;
+                }
+                if (tryFlipCoplanarQuadDiagonal(stillMissing[i], stillMissing[j])) {
+                    flipped[i] = true;
+                    flipped[j] = true;
+                    progress = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Phase 2: every facet in the original request, in its original order.
+    // hasFace() (recoverFacetRecursive()'s first check) already reflects
+    // phase 1's flips, so a facet fixed above costs nothing extra here; an
+    // untouched facet falls through to the centroid-Steiner heuristic
+    // exactly as before phase 1 existed.
     FacetRecoveryResult result;
     for (const auto& f : facets) {
         recoverFacetRecursive(f, maxRounds, result.recoveredFacets, result.unrecovered);

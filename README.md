@@ -1099,6 +1099,47 @@ genuinamente Schönhardt-difícil onde nenhuma subdivisão finita resolve sem
 uma escolha de ponto mais cuidadosa; GMRES/BiCGSTAB; módulos 9-14 do
 roadmap.
 
+### Atualização 2026-08-27: recuperação combinatória de faceta implementada — o cilindro fecha
+
+A peça que faltava acima. `recoverFacets()` ganhou uma fase prévia,
+`tryFlipCoplanarQuadDiagonal()`: para duas facetas pedidas que
+compartilham uma aresta e descrevem juntas um quadrilátero coplano cuja
+diagonal *atual* já está presente como duas faces de tetraedro com um
+ápice comum, troca a diagonal no lugar — sem ponto novo, só dois
+tetraedros trocados por outros dois cobrindo exatamente o mesmo volume.
+Convexidade do quadrilátero (a precondição que evita sobreposição ou
+buraco) verificada explicitamente via `orientation3D`, não assumida do
+sucesso de `makeTetrahedron()`.
+
+**Medido em duas geometrias, com resultado bem diferente entre elas — e a
+diferença é o achado.** No cubo de 8 pontos do teste original, a troca
+recupera 2 das 6 facetas antes perdidas; as outras 4 não têm o "ápice
+comum" que a troca simples exige — inspecionando os tetraedros
+diretamente, a aresta bloqueadora nesses casos é compartilhada por *três*
+tetraedros num leque aberto que atravessa o cubo inteiro, não dois. Isso
+não é mais "esbarra em algo tipo Schönhardt" vago — é uma caracterização
+precisa e testável do que falta (retriangular um leque de tamanho
+arbitrário), estreitando o problema em vez de só descrevê-lo.
+
+Mas construindo pela primeira vez um cilindro de verdade neste código (um
+prisma poligonal — tampas em leque, faces laterais retangulares divididas
+à mão — testado a 10, 24 e 60 lados, altura e raio não-redondos de
+propósito): **100% das facetas recuperadas nos três tamanhos**, só pela
+troca, sem nenhum ponto de Steiner, volume exato preservado. O cubo de 8
+pontos, sem estrutura local por perto, era o quase-pior caso para esta
+técnica; geometria convexa real tem pontos vizinhos suficientes para o
+ápice comum aparecer quase sempre. **"É o único bloqueio restante do
+cilindro" deixa de ser verdade no nível da tetraedralização** — medido com
+um cilindro de verdade, não um substituto escolhido para evitar o
+problema. Falta ainda validar o pipeline completo
+(`mesh_flow_around_object` + solver) com um STL de cilindro real — essa é
+a integração ponta a ponta, e continua sendo o próximo passo, não algo já
+coberto aqui.
+
+Suíte C++: 13/13. Nenhuma mudança de comportamento para chamadores
+existentes — `recoverFacets`/`recover_facets` mantém a mesma assinatura, a
+fase nova só melhora o que já era tentado depois dela.
+
 ## BiCGSTAB: o primeiro sistema linear genuinamente não-simétrico do projeto
 
 Todo sistema linear resolvido neste projeto até aqui era simétrico (Poisson
