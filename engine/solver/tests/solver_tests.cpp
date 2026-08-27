@@ -1739,6 +1739,109 @@ void testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology() {
     AETHER_CHECK(bottomMeanU < 0.0);  // reversed by mass conservation, measured ~-0.0036
 }
 
+// DIVIDA_TECNICA.md 4.4 (restante): FirstOrderUpwind and LimitedLinearUpwind
+// added to StaggeredCavityBase3D's shared momentum predictor, alongside the
+// original Central. Central stays the default -- see
+// StaggeredLidDrivenCavitySolver3D's constructor comment -- so every other
+// test in this file that never mentions ConvectionScheme is, by
+// construction, still exercising exactly the original formula; the checks
+// below are what is new instead.
+//
+// Rest state is exact for any scheme, not just Central: with the lid
+// stationary every convecting velocity in the predictor's sign test is
+// itself exactly 0.0, and every stencil point participating in the
+// transported-value blend is also exactly 0.0 at rest, so
+// schemeTransportValue's branches all return 0.0 regardless of which one
+// is taken. That makes this the one comparison across schemes that can be
+// asserted bit-for-bit rather than "small and plausible".
+void testStaggeredLidDrivenCavity3DConvectionSchemesStayAtRestWhenLidStationary() {
+    const std::size_t n = 6;
+    for (auto scheme : {StaggeredCavityBase3D::ConvectionScheme::Central,
+                         StaggeredCavityBase3D::ConvectionScheme::FirstOrderUpwind,
+                         StaggeredCavityBase3D::ConvectionScheme::LimitedLinearUpwind}) {
+        StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0, scheme);
+        const double dt = solver.stableTimeStep();
+        for (int s = 0; s < 20; ++s) {
+            solver.step(dt);
+        }
+        for (std::size_t k = 0; k < n; ++k) {
+            for (std::size_t j = 0; j < n; ++j) {
+                for (std::size_t i = 0; i <= n; ++i) {
+                    AETHER_CHECK(solver.u(i, j, k) == 0.0);
+                }
+            }
+        }
+    }
+}
+
+// With the lid moving, every scheme must independently keep the projection's
+// own guarantee -- near-machine-precision divergence, exactly like
+// testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology -- since
+// projectToDivergenceFree() only ever sees uStar/vStar/wStar and has no way
+// to know which scheme produced them. A convection bug that corrupted the
+// predicted field without introducing spurious divergence (e.g. a sign
+// error shared between two terms) would slip past a divergence check alone,
+// which is why finiteness and the same vortex topology already validated
+// for Central are checked too: a bad stencil is far more likely to blow up,
+// stall the recirculation, or reverse it than to reproduce the same sign
+// structure by accident.
+void testStaggeredLidDrivenCavity3DConvectionSchemesStayBoundedAndConserveMass() {
+    const std::size_t n = 12;
+    for (auto scheme : {StaggeredCavityBase3D::ConvectionScheme::Central,
+                         StaggeredCavityBase3D::ConvectionScheme::FirstOrderUpwind,
+                         StaggeredCavityBase3D::ConvectionScheme::LimitedLinearUpwind}) {
+        StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0, scheme); // Re = 10
+        const double dt = solver.stableTimeStep();
+
+        for (int s = 0; s < 300; ++s) {
+            solver.step(dt);
+            AETHER_CHECK(solver.maxDivergence() < 1e-9);
+        }
+
+        double topMeanU = 0.0;
+        double bottomMeanU = 0.0;
+        std::size_t count = 0;
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                const double top = solver.u(i, j, n - 1);
+                const double bottom = solver.u(i, j, 0);
+                AETHER_CHECK(std::isfinite(top));
+                AETHER_CHECK(std::isfinite(bottom));
+                topMeanU += top;
+                bottomMeanU += bottom;
+                ++count;
+            }
+        }
+        topMeanU /= static_cast<double>(count);
+        bottomMeanU /= static_cast<double>(count);
+        AETHER_CHECK(topMeanU > 0.0);    // dragged in the lid's direction
+        AETHER_CHECK(bottomMeanU < 0.0); // reversed by mass conservation
+    }
+}
+
+// The default constructor argument actually wires up Central, not merely
+// documents it: constructing with and without the explicit scheme must
+// produce bit-for-bit identical fields, since both should resolve to the
+// exact same enum value flowing into the exact same predictor code path.
+void testStaggeredLidDrivenCavity3DDefaultConvectionSchemeIsCentral() {
+    const std::size_t n = 6;
+    StaggeredLidDrivenCavitySolver3D implicit(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0);
+    StaggeredLidDrivenCavitySolver3D explicitCentral(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0,
+                                                      StaggeredCavityBase3D::ConvectionScheme::Central);
+    const double dt = implicit.stableTimeStep();
+    for (int s = 0; s < 50; ++s) {
+        implicit.step(dt);
+        explicitCentral.step(dt);
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                AETHER_CHECK(implicit.u(i, j, k) == explicitCentral.u(i, j, k));
+            }
+        }
+    }
+}
+
 // MixingLengthLidDrivenCavitySolver3D: the first turbulence closure in this
 // project coupled to a real 3D convecting field (every earlier closure that
 // saw real convection -- MixingLengthLidDrivenCavitySolver2D,
@@ -3375,6 +3478,9 @@ int main() {
     testStaggeredNavierStokes3DMatchesBeltramiDecay();
     testStaggeredLidDrivenCavity3DStaysAtRestWhenLidStationary();
     testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology();
+    testStaggeredLidDrivenCavity3DConvectionSchemesStayAtRestWhenLidStationary();
+    testStaggeredLidDrivenCavity3DConvectionSchemesStayBoundedAndConserveMass();
+    testStaggeredLidDrivenCavity3DDefaultConvectionSchemeIsCentral();
     testMixingLengthCavity3DStaysAtRestWhenLidStationary();
     testMixingLengthCavity3DMassConservationTopologyAndEddyViscosity();
     testKEpsilonCavity3DVelocityStaysAtRestWhenLidStationary();

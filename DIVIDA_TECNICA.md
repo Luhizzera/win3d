@@ -1398,7 +1398,7 @@ continua sendo o piso que transforma isso em recusa em vez de campo de
 NaN, e o teste dele subiu de jitter 0,65 para 0,95 pela terceira vez,
 sempre porque o solver melhorou.
 
-### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; os seis 3D seguem centrais
+### 4.4 ~~Diferença central na convecção estruturada~~ — RESOLVIDO em 2026-08-16 no solver 2D; medido em 2026-08-26 nos seis 3D, sem justificar trocar o default
 
 Os solvers estruturados usam diferença central na convecção, e a cavidade a
 Re=400 roda com Re de célula 12,5 (medido, não estimado). Acima de 2,
@@ -1541,6 +1541,72 @@ Vale registrar que foi um teste de *outra camada* que pegou.
 `StaggeredCavityBase3D` continuam com diferença central. Eles compartilham um
 preditor diferente, e portá-lo é a sua própria medição — a régua e o esquema
 agora existem, então é trabalho de repetir o que está acima, não de inventar.
+
+---
+
+**Atualização 2026-08-26: portado para os seis 3D, com o mesmo cuidado do
+2D — mas a medição não repetiu o resultado do 2D, e o default não mudou.**
+
+`StaggeredCavityBase3D::ConvectionScheme` (`Central`/`FirstOrderUpwind`/
+`LimitedLinearUpwind`) foi adicionado ao preditor conservativo compartilhado
+pelos seis solvers de cavidade 3D, reaproveitando `ConvectionLimiter.hpp`
+(o mesmo limitador de van Leer do 2D e do lado não-estruturado). `Central`
+continua default: **cada um dos nove termos de fluxo do preditor (self e
+cruzado, para u/v/w) foi reescrito para que o caso `Central` devolva o
+valor central original, sem nenhuma aritmética nova** — não apenas igual,
+literalmente o mesmo `double`, o que faz o default reproduzir todo número
+que este preditor já produziu bit a bit. Verificado, não assumido: as 13
+suítes passam sem alteração de nenhum resultado numérico, incluindo os
+testes dos seis solvers que herdam este preditor.
+
+Uma diferença de geometria em relação ao 2D exigiu uma decisão que o 2D não
+precisou tomar: a direção própria de cada componente (i para u, j para v,
+k para w) não tem célula-fantasma além das duas faces físicas de contorno
+— ao contrário das direções tangenciais, que já espelham corretamente para
+qualquer distância. O ponto "mais distante" do limitador nessa direção
+própria é então fixado (`std::clamp`) na face de contorno mais próxima em
+vez de lido fora do domínio, o que é seguro (nunca acessa memória fora do
+array) e apenas reduz o limitador ao upwind na única célula adjacente a
+cada parede — degradação padrão e localizada, não um defeito.
+
+**Medição, mesma régua do 2D**: cavidade a Re=400 (viscosidade =
+lidVelocity·L/Re), marchando a t=12, desvio rms de u na linha vertical
+central. O 2D usou n=128 como referência (Re de célula 3,1); um equivalente
+3D não cabe em tempo razoável (custo escala com n⁴, não n²), então a
+referência aqui é n=32 (Re de célula 12,5) — mais grosseira que a do 2D em
+termos absolutos. Script preservado em
+`python/research/convection_scheme_3d_cavity.py`.
+
+| esquema | n=8 (ReCel 50,0) | n=16 (ReCel 25,0) |
+|---|---|---|
+| central | 0,081547 | **0,041718** |
+| upwind 1ª ordem | 0,079147 | 0,047443 |
+| limitado (van Leer) | **0,079598** | 0,044765 |
+
+**Ao contrário do 2D, não há vencedor claro — e a razão é mensurável, não
+uma desculpa.** Central é o melhor em n=16; upwind e limitado disputam o
+melhor em n=8, todos dentro de 3% um do outro. O que decide isso não é o
+esquema: `peak|u|` entre n=8, n=16 e n=32 sobe 0,222 → 0,433 → 0,650 —
+ainda mudando ~50% a cada duplicação de resolução, muito longe de
+convergido. Nessas resoluções o erro de malha grosseira domina completamente
+sobre a escolha de esquema, então comparar contra uma referência (n=32) que
+ela mesma não convergiu não separa "esquema melhor" de "ruído de malha
+grosseira". A diferença central-versus-limitado entre malhas consecutivas
+também não cai monotonicamente (rms central-vs-limitado: 0,00935 → 0,01072
+→ 0,00385 em n=8/16/32) — mais um sinal de que a comparação ainda não está
+no regime assintótico onde ela seria decisiva.
+
+**Decisão**: `Central` permanece default nos seis solvers 3D. Diferente do
+2D, onde a medição decisiva (n=128, cell Re 3,1) justificou trocar o
+default, aqui a medição afordável é honesta mas **inconclusiva** — trocar o
+default sem essa justificativa repetiria exatamente o erro que os itens
+1.1, 1.2 e 4.3 já custaram (mudar comportamento validado sem medição que
+mostre ganho). `FirstOrderUpwind` e `LimitedLinearUpwind` ficam disponíveis
+como opção explícita — quem precisa do limite formal (boundedness acima de
+Re de célula 2) já pode escolher — mas nenhum dos seis fechamentos muda de
+comportamento por padrão. Reabrir esta decisão exigiria uma referência 3D
+genuinamente fina, o que é uma questão de orçamento de tempo computacional,
+não de código.
 
 ---
 
@@ -1780,8 +1846,9 @@ Por dependência, não por tamanho:
 8. ~~**3.1** (esquema de alta ordem)~~ — FEITO: upwind medido em ordem 1, limitado em 2
 9. ~~**4.1** (margem nos estruturados)~~ — FEITO; abriu o 4.4
 9b. ~~**5.4**, ~~**5.3**~~, ~~**3.3**~~ (medido), ~~**4.2**~~ — FEITOS nesta rodada
-10. **4.4** — MEDIDO (central overshoot 3,17 em Pe 8,3) e resolvido no solver
-    1D; portar para as cavidades precisa antes de um caso a Re=400 na suíte
+10. ~~**4.4**~~ — FEITO: resolvido no 2D e no solver 1D; portado (opção, não
+    default) para os seis 3D e medido em Re=400 — inconclusivo, decisão de
+    manter `Central` como default está registrada e justificada
 11. **5.1** (push) — um comando
 
 O item **6** (tetraedralização restrita) fica por último não por prioridade,

@@ -50,8 +50,16 @@ namespace aether::solver {
 // class used to spell out itself.
 class StaggeredLidDrivenCavitySolver3D : public StaggeredCavityBase3D {
 public:
+    // `convection` defaults to Central, reproducing every number this class
+    // has ever produced bit-for-bit -- see DIVIDA_TECNICA.md 4.4 for why,
+    // and StaggeredCavityBase3D::ConvectionScheme for what the other two
+    // options mean on this staggered grid specifically. Exposed here (and
+    // not yet on the five turbulence closures) because this is the class
+    // the Re=400 measurement that would justify changing the default runs
+    // against -- the same one 2D's own port was measured on.
     StaggeredLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY, double lengthZ,
-           double viscosity, double lidVelocity);
+           double viscosity, double lidVelocity,
+           ConvectionScheme convection = ConvectionScheme::Central);
 
     void step(double dt);
 

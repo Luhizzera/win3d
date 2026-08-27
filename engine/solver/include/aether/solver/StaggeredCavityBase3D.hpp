@@ -46,6 +46,30 @@ namespace aether::solver {
 // pointer is neither needed nor allowed here).
 class StaggeredCavityBase3D {
 public:
+    // How the convected velocity is reconstructed at a face, mirroring
+    // LidDrivenCavitySolver2D::ConvectionScheme (DIVIDA_TECNICA.md 4.4) --
+    // not the same type, because sharing it would mean the 2D class's
+    // enum stops being self-contained for no benefit here, but the same
+    // three points on the same line:
+    //
+    //   phi = phi_upwind + psi * (phi_central - phi_upwind)
+    //
+    // Central is the default because it is what every one of the six
+    // classes built on this base has always used: every published number
+    // stays reproducible bit-for-bit until a caller opts into one of the
+    // other two. See computeMomentumPredictor() for why "central" here
+    // means something slightly different from the 2D collocated case: this
+    // grid is staggered, so the value that already plays "the central
+    // estimate" in the original conservative formula (a plain average
+    // between two neighboring staggered points) is reused unchanged as
+    // Central's output, and only the *other* two schemes reconstruct a
+    // different value at that same location.
+    enum class ConvectionScheme {
+        Central,
+        FirstOrderUpwind,
+        LimitedLinearUpwind,
+    };
+
     double u(std::size_t i, std::size_t j, std::size_t k) const { return u_[indexU(i, j, k)]; }
     double v(std::size_t i, std::size_t j, std::size_t k) const { return v_[indexV(i, j, k)]; }
     double w(std::size_t i, std::size_t j, std::size_t k) const { return w_[indexW(i, j, k)]; }
@@ -75,7 +99,8 @@ protected:
                    double time);
 
     StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
-                           double lengthZ, double viscosity, double lidVelocity);
+                           double lengthZ, double viscosity, double lidVelocity,
+                           ConvectionScheme convection = ConvectionScheme::Central);
     ~StaggeredCavityBase3D() = default;
 
     std::size_t indexU(std::size_t i, std::size_t j, std::size_t k) const {
@@ -121,6 +146,26 @@ protected:
     void computeMomentumPredictor(std::vector<double>& uStar, std::vector<double>& vStar,
                                    std::vector<double>& wStar, double dt) const;
 
+    // Reconstructs the value transported through a location shared by two
+    // neighboring staggered points, given the plain average of those two
+    // points (`centralValue`, always computed the same way regardless of
+    // scheme) and the velocity whose sign decides which of the two is
+    // upwind (`convectingVelocity` -- the same quantity as centralValue for
+    // a component's self-convection term, a different one for its cross
+    // terms). `near0`/`near1` are the two points centralValue averages;
+    // `far0`/`far1` are one step beyond each, in the same order, for the
+    // limiter's ratio -- the caller is responsible for clamping those to a
+    // valid index when the true neighbor would fall outside the domain
+    // (see computeMomentumPredictor.cpp for why that only matters for a
+    // component's own staggered direction).
+    //
+    // Central returns centralValue unchanged -- not merely equal to it,
+    // literally the same double, no arithmetic performed -- which is what
+    // makes ConvectionScheme::Central bit-for-bit identical to this
+    // predictor's original (pre-4.4) formula.
+    double schemeTransportValue(double centralValue, double convectingVelocity, double near0, double near1,
+                                 double far0, double far1) const;
+
     // Matrix-free Poisson operator for the pressure correction, with cell 0
     // pinned to remove the pure-Neumann null space.
     std::vector<double> applyLaplacian(const std::vector<double>& x) const;
@@ -147,6 +192,7 @@ protected:
     std::vector<double> w_;
     std::vector<double> p_;
     double time_ = 0.0;
+    ConvectionScheme convection_;
 
 private:
     const std::vector<double>* eddyViscosity_ = nullptr;

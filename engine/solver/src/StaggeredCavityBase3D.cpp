@@ -1,6 +1,8 @@
 #include "aether/solver/ExplicitTimeStep.hpp"
 #include "aether/solver/StaggeredCavityBase3D.hpp"
 
+#include "aether/solver/ConvectionLimiter.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -9,12 +11,35 @@ namespace aether::solver {
 
 StaggeredCavityBase3D::StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX,
                                                double lengthY, double lengthZ, double viscosity,
-                                               double lidVelocity)
+                                               double lidVelocity, ConvectionScheme convection)
     : nx_(nx), ny_(ny), nz_(nz), lengthX_(lengthX), lengthY_(lengthY), lengthZ_(lengthZ),
       dx_(lengthX / static_cast<double>(nx)), dy_(lengthY / static_cast<double>(ny)),
       dz_(lengthZ / static_cast<double>(nz)), viscosity_(viscosity), lidVelocity_(lidVelocity),
       u_((nx + 1) * ny * nz, 0.0), v_(nx * (ny + 1) * nz, 0.0), w_(nx * ny * (nz + 1), 0.0),
-      p_(nx * ny * nz, 0.0) {}
+      p_(nx * ny * nz, 0.0), convection_(convection) {}
+
+double StaggeredCavityBase3D::schemeTransportValue(double centralValue, double convectingVelocity,
+                                                    double near0, double near1, double far0,
+                                                    double far1) const {
+    if (convection_ == ConvectionScheme::Central) {
+        return centralValue;
+    }
+    const double upwind = convectingVelocity >= 0.0 ? near0 : near1;
+    const double downwind = convectingVelocity >= 0.0 ? near1 : near0;
+    if (convection_ == ConvectionScheme::FirstOrderUpwind) {
+        return upwind;
+    }
+    const double farUpwind = convectingVelocity >= 0.0 ? far0 : far1;
+    const double difference = downwind - upwind;
+    if (faceDifferenceIsNegligible(difference, upwind, downwind)) {
+        return upwind;
+    }
+    // Same ratio and blend as LidDrivenCavitySolver2D::schemeFaceValue --
+    // see ConvectionLimiter.hpp for why a uniform-grid central estimate
+    // makes the classic and gradient-based ratio formulas the same formula.
+    const double ratio = (upwind - farUpwind) / difference;
+    return upwind + vanLeerLimiter(ratio) * (0.5 * (upwind + downwind) - upwind);
+}
 
 void StaggeredCavityBase3D::loadState(std::vector<double> u, std::vector<double> v, std::vector<double> w,
                                        std::vector<double> p, double time) {
@@ -154,33 +179,59 @@ void StaggeredCavityBase3D::computeMomentumPredictor(std::vector<double>& uStar,
                 const auto li = static_cast<long long>(i);
                 const auto lj = static_cast<long long>(j);
                 const auto lk = static_cast<long long>(k);
+                const auto nxLL = static_cast<long long>(nx_);
 
                 const double uHere = uAt(li, lj, lk);
-                const double uCenterAtI = 0.5 * (uHere + uAt(li + 1, lj, lk));
-                const double uCenterAtIm1 = 0.5 * (uAt(li - 1, lj, lk) + uHere);
-                const double duudx = (uCenterAtI * uCenterAtI - uCenterAtIm1 * uCenterAtIm1) / dx_;
+                const double uAtIp1 = uAt(li + 1, lj, lk);
+                const double uAtIm1 = uAt(li - 1, lj, lk);
+                const double uCenterAtI = 0.5 * (uHere + uAtIp1);
+                const double uCenterAtIm1 = 0.5 * (uAtIm1 + uHere);
+                // i is u's own staggered direction: uAt has no ghost beyond
+                // its two physical boundary faces there (see the class
+                // comment), so a stencil point two faces out is clamped to
+                // the nearer of those two rather than fetched unchecked.
+                const double uAtIp2 = uAt(std::clamp<long long>(li + 2, 0LL, nxLL), lj, lk);
+                const double uAtIm2 = uAt(std::clamp<long long>(li - 2, 0LL, nxLL), lj, lk);
+                const double transportAtI =
+                    schemeTransportValue(uCenterAtI, uCenterAtI, uHere, uAtIp1, uAtIm1, uAtIp2);
+                const double transportAtIm1 =
+                    schemeTransportValue(uCenterAtIm1, uCenterAtIm1, uAtIm1, uHere, uAtIm2, uAtIp1);
+                const double duudx = (uCenterAtI * transportAtI - uCenterAtIm1 * transportAtIm1) / dx_;
 
-                const double uEdgeJp = 0.5 * (uHere + uAt(li, lj + 1, lk));
-                const double uEdgeJm = 0.5 * (uAt(li, lj - 1, lk) + uHere);
+                const double uAtJp1 = uAt(li, lj + 1, lk);
+                const double uAtJm1 = uAt(li, lj - 1, lk);
+                const double uEdgeJp = 0.5 * (uHere + uAtJp1);
+                const double uEdgeJm = 0.5 * (uAtJm1 + uHere);
                 const double vEdgeIJp = 0.5 * (vAt(li - 1, lj + 1, lk) + vAt(li, lj + 1, lk));
                 const double vEdgeIJ = 0.5 * (vAt(li - 1, lj, lk) + vAt(li, lj, lk));
-                const double duvdy = (uEdgeJp * vEdgeIJp - uEdgeJm * vEdgeIJ) / dy_;
+                // j is tangential to u's own face here, so uAt's existing
+                // wall mirror already covers any offset safely -- no clamp.
+                const double uAtJp2 = uAt(li, lj + 2, lk);
+                const double uAtJm2 = uAt(li, lj - 2, lk);
+                const double transportJp = schemeTransportValue(uEdgeJp, vEdgeIJp, uHere, uAtJp1, uAtJm1, uAtJp2);
+                const double transportJm = schemeTransportValue(uEdgeJm, vEdgeIJ, uAtJm1, uHere, uAtJm2, uAtJp1);
+                const double duvdy = (vEdgeIJp * transportJp - vEdgeIJ * transportJm) / dy_;
 
-                const double uEdgeKp = 0.5 * (uHere + uAt(li, lj, lk + 1));
-                const double uEdgeKm = 0.5 * (uAt(li, lj, lk - 1) + uHere);
+                const double uAtKp1 = uAt(li, lj, lk + 1);
+                const double uAtKm1 = uAt(li, lj, lk - 1);
+                const double uEdgeKp = 0.5 * (uHere + uAtKp1);
+                const double uEdgeKm = 0.5 * (uAtKm1 + uHere);
                 const double wEdgeIKp = 0.5 * (wAt(li - 1, lj, lk + 1) + wAt(li, lj, lk + 1));
                 const double wEdgeIK = 0.5 * (wAt(li - 1, lj, lk) + wAt(li, lj, lk));
-                const double duwdz = (uEdgeKp * wEdgeIKp - uEdgeKm * wEdgeIK) / dz_;
+                const double uAtKp2 = uAt(li, lj, lk + 2);
+                const double uAtKm2 = uAt(li, lj, lk - 2);
+                const double transportKp = schemeTransportValue(uEdgeKp, wEdgeIKp, uHere, uAtKp1, uAtKm1, uAtKp2);
+                const double transportKm = schemeTransportValue(uEdgeKm, wEdgeIK, uAtKm1, uHere, uAtKm2, uAtKp1);
+                const double duwdz = (wEdgeIKp * transportKp - wEdgeIK * transportKm) / dz_;
 
                 const double gammaE = viscosity_ + nutAt(li, lj, lk);
                 const double gammaW = viscosity_ + nutAt(li - 1, lj, lk);
                 const double gammaTransverse = viscosity_ + 0.5 * (nutAt(li - 1, lj, lk) + nutAt(li, lj, lk));
 
                 const double diffusionU =
-                    (gammaE * (uAt(li + 1, lj, lk) - uHere) - gammaW * (uHere - uAt(li - 1, lj, lk))) /
-                        (dx_ * dx_) +
-                    gammaTransverse * (uAt(li, lj + 1, lk) - 2.0 * uHere + uAt(li, lj - 1, lk)) / (dy_ * dy_) +
-                    gammaTransverse * (uAt(li, lj, lk + 1) - 2.0 * uHere + uAt(li, lj, lk - 1)) / (dz_ * dz_);
+                    (gammaE * (uAtIp1 - uHere) - gammaW * (uHere - uAtIm1)) / (dx_ * dx_) +
+                    gammaTransverse * (uAtJp1 - 2.0 * uHere + uAtJm1) / (dy_ * dy_) +
+                    gammaTransverse * (uAtKp1 - 2.0 * uHere + uAtKm1) / (dz_ * dz_);
 
                 uStar[indexU(i, j, k)] = uHere + dt * (-(duudx + duvdy + duwdz) + diffusionU);
             }
@@ -194,33 +245,55 @@ void StaggeredCavityBase3D::computeMomentumPredictor(std::vector<double>& uStar,
                 const auto li = static_cast<long long>(i);
                 const auto lj = static_cast<long long>(j);
                 const auto lk = static_cast<long long>(k);
+                const auto nyLL = static_cast<long long>(ny_);
 
                 const double vHere = vAt(li, lj, lk);
-                const double vCenterAtJ = 0.5 * (vHere + vAt(li, lj + 1, lk));
-                const double vCenterAtJm1 = 0.5 * (vAt(li, lj - 1, lk) + vHere);
-                const double dvvdy = (vCenterAtJ * vCenterAtJ - vCenterAtJm1 * vCenterAtJm1) / dy_;
+                const double vAtJp1 = vAt(li, lj + 1, lk);
+                const double vAtJm1 = vAt(li, lj - 1, lk);
+                const double vCenterAtJ = 0.5 * (vHere + vAtJp1);
+                const double vCenterAtJm1 = 0.5 * (vAtJm1 + vHere);
+                // j is v's own staggered direction -- same clamp as u's own
+                // direction above, and for the same reason.
+                const double vAtJp2 = vAt(li, std::clamp<long long>(lj + 2, 0LL, nyLL), lk);
+                const double vAtJm2 = vAt(li, std::clamp<long long>(lj - 2, 0LL, nyLL), lk);
+                const double transportAtJ =
+                    schemeTransportValue(vCenterAtJ, vCenterAtJ, vHere, vAtJp1, vAtJm1, vAtJp2);
+                const double transportAtJm1 =
+                    schemeTransportValue(vCenterAtJm1, vCenterAtJm1, vAtJm1, vHere, vAtJm2, vAtJp1);
+                const double dvvdy = (vCenterAtJ * transportAtJ - vCenterAtJm1 * transportAtJm1) / dy_;
 
-                const double vEdgeKp = 0.5 * (vHere + vAt(li, lj, lk + 1));
-                const double vEdgeKm = 0.5 * (vAt(li, lj, lk - 1) + vHere);
+                const double vAtKp1 = vAt(li, lj, lk + 1);
+                const double vAtKm1 = vAt(li, lj, lk - 1);
+                const double vEdgeKp = 0.5 * (vHere + vAtKp1);
+                const double vEdgeKm = 0.5 * (vAtKm1 + vHere);
                 const double wEdgeJKp = 0.5 * (wAt(li, lj - 1, lk + 1) + wAt(li, lj, lk + 1));
                 const double wEdgeJK = 0.5 * (wAt(li, lj - 1, lk) + wAt(li, lj, lk));
-                const double dvwdz = (vEdgeKp * wEdgeJKp - vEdgeKm * wEdgeJK) / dz_;
+                const double vAtKp2 = vAt(li, lj, lk + 2);
+                const double vAtKm2 = vAt(li, lj, lk - 2);
+                const double transportKp = schemeTransportValue(vEdgeKp, wEdgeJKp, vHere, vAtKp1, vAtKm1, vAtKp2);
+                const double transportKm = schemeTransportValue(vEdgeKm, wEdgeJK, vAtKm1, vHere, vAtKm2, vAtKp1);
+                const double dvwdz = (wEdgeJKp * transportKp - wEdgeJK * transportKm) / dz_;
 
-                const double vEdgeIp = 0.5 * (vHere + vAt(li + 1, lj, lk));
-                const double vEdgeIm = 0.5 * (vAt(li - 1, lj, lk) + vHere);
+                const double vAtIp1 = vAt(li + 1, lj, lk);
+                const double vAtIm1 = vAt(li - 1, lj, lk);
+                const double vEdgeIp = 0.5 * (vHere + vAtIp1);
+                const double vEdgeIm = 0.5 * (vAtIm1 + vHere);
                 const double uEdgeJIp = 0.5 * (uAt(li + 1, lj - 1, lk) + uAt(li + 1, lj, lk));
                 const double uEdgeJI = 0.5 * (uAt(li, lj - 1, lk) + uAt(li, lj, lk));
-                const double dvudx = (vEdgeIp * uEdgeJIp - vEdgeIm * uEdgeJI) / dx_;
+                const double vAtIp2 = vAt(li + 2, lj, lk);
+                const double vAtIm2 = vAt(li - 2, lj, lk);
+                const double transportIp = schemeTransportValue(vEdgeIp, uEdgeJIp, vHere, vAtIp1, vAtIm1, vAtIp2);
+                const double transportIm = schemeTransportValue(vEdgeIm, uEdgeJI, vAtIm1, vHere, vAtIm2, vAtIp1);
+                const double dvudx = (vEdgeIp * transportIp - vEdgeIm * transportIm) / dx_;
 
                 const double gammaN = viscosity_ + nutAt(li, lj, lk);
                 const double gammaS = viscosity_ + nutAt(li, lj - 1, lk);
                 const double gammaTransverse = viscosity_ + 0.5 * (nutAt(li, lj - 1, lk) + nutAt(li, lj, lk));
 
                 const double diffusionV =
-                    (gammaN * (vAt(li, lj + 1, lk) - vHere) - gammaS * (vHere - vAt(li, lj - 1, lk))) /
-                        (dy_ * dy_) +
-                    gammaTransverse * (vAt(li + 1, lj, lk) - 2.0 * vHere + vAt(li - 1, lj, lk)) / (dx_ * dx_) +
-                    gammaTransverse * (vAt(li, lj, lk + 1) - 2.0 * vHere + vAt(li, lj, lk - 1)) / (dz_ * dz_);
+                    (gammaN * (vAtJp1 - vHere) - gammaS * (vHere - vAtJm1)) / (dy_ * dy_) +
+                    gammaTransverse * (vAtIp1 - 2.0 * vHere + vAtIm1) / (dx_ * dx_) +
+                    gammaTransverse * (vAtKp1 - 2.0 * vHere + vAtKm1) / (dz_ * dz_);
 
                 vStar[indexV(i, j, k)] = vHere + dt * (-(dvvdy + dvwdz + dvudx) + diffusionV);
             }
@@ -234,33 +307,55 @@ void StaggeredCavityBase3D::computeMomentumPredictor(std::vector<double>& uStar,
                 const auto li = static_cast<long long>(i);
                 const auto lj = static_cast<long long>(j);
                 const auto lk = static_cast<long long>(k);
+                const auto nzLL = static_cast<long long>(nz_);
 
                 const double wHere = wAt(li, lj, lk);
-                const double wCenterAtK = 0.5 * (wHere + wAt(li, lj, lk + 1));
-                const double wCenterAtKm1 = 0.5 * (wAt(li, lj, lk - 1) + wHere);
-                const double dwwdz = (wCenterAtK * wCenterAtK - wCenterAtKm1 * wCenterAtKm1) / dz_;
+                const double wAtKp1 = wAt(li, lj, lk + 1);
+                const double wAtKm1 = wAt(li, lj, lk - 1);
+                const double wCenterAtK = 0.5 * (wHere + wAtKp1);
+                const double wCenterAtKm1 = 0.5 * (wAtKm1 + wHere);
+                // k is w's own staggered direction -- same clamp as u's and
+                // v's own directions above, and for the same reason.
+                const double wAtKp2 = wAt(li, lj, std::clamp<long long>(lk + 2, 0LL, nzLL));
+                const double wAtKm2 = wAt(li, lj, std::clamp<long long>(lk - 2, 0LL, nzLL));
+                const double transportAtK =
+                    schemeTransportValue(wCenterAtK, wCenterAtK, wHere, wAtKp1, wAtKm1, wAtKp2);
+                const double transportAtKm1 =
+                    schemeTransportValue(wCenterAtKm1, wCenterAtKm1, wAtKm1, wHere, wAtKm2, wAtKp1);
+                const double dwwdz = (wCenterAtK * transportAtK - wCenterAtKm1 * transportAtKm1) / dz_;
 
-                const double wEdgeIp = 0.5 * (wHere + wAt(li + 1, lj, lk));
-                const double wEdgeIm = 0.5 * (wAt(li - 1, lj, lk) + wHere);
+                const double wAtIp1 = wAt(li + 1, lj, lk);
+                const double wAtIm1 = wAt(li - 1, lj, lk);
+                const double wEdgeIp = 0.5 * (wHere + wAtIp1);
+                const double wEdgeIm = 0.5 * (wAtIm1 + wHere);
                 const double uEdgeKIp = 0.5 * (uAt(li + 1, lj, lk - 1) + uAt(li + 1, lj, lk));
                 const double uEdgeKI = 0.5 * (uAt(li, lj, lk - 1) + uAt(li, lj, lk));
-                const double dwudx = (wEdgeIp * uEdgeKIp - wEdgeIm * uEdgeKI) / dx_;
+                const double wAtIp2 = wAt(li + 2, lj, lk);
+                const double wAtIm2 = wAt(li - 2, lj, lk);
+                const double transportIp = schemeTransportValue(wEdgeIp, uEdgeKIp, wHere, wAtIp1, wAtIm1, wAtIp2);
+                const double transportIm = schemeTransportValue(wEdgeIm, uEdgeKI, wAtIm1, wHere, wAtIm2, wAtIp1);
+                const double dwudx = (wEdgeIp * transportIp - wEdgeIm * transportIm) / dx_;
 
-                const double wEdgeJp = 0.5 * (wHere + wAt(li, lj + 1, lk));
-                const double wEdgeJm = 0.5 * (wAt(li, lj - 1, lk) + wHere);
+                const double wAtJp1 = wAt(li, lj + 1, lk);
+                const double wAtJm1 = wAt(li, lj - 1, lk);
+                const double wEdgeJp = 0.5 * (wHere + wAtJp1);
+                const double wEdgeJm = 0.5 * (wAtJm1 + wHere);
                 const double vEdgeKJp = 0.5 * (vAt(li, lj + 1, lk - 1) + vAt(li, lj + 1, lk));
                 const double vEdgeKJ = 0.5 * (vAt(li, lj, lk - 1) + vAt(li, lj, lk));
-                const double dwvdy = (wEdgeJp * vEdgeKJp - wEdgeJm * vEdgeKJ) / dy_;
+                const double wAtJp2 = wAt(li, lj + 2, lk);
+                const double wAtJm2 = wAt(li, lj - 2, lk);
+                const double transportJp = schemeTransportValue(wEdgeJp, vEdgeKJp, wHere, wAtJp1, wAtJm1, wAtJp2);
+                const double transportJm = schemeTransportValue(wEdgeJm, vEdgeKJ, wAtJm1, wHere, wAtJm2, wAtJp1);
+                const double dwvdy = (vEdgeKJp * transportJp - vEdgeKJ * transportJm) / dy_;
 
                 const double gammaF = viscosity_ + nutAt(li, lj, lk);
                 const double gammaB = viscosity_ + nutAt(li, lj, lk - 1);
                 const double gammaTransverse = viscosity_ + 0.5 * (nutAt(li, lj, lk - 1) + nutAt(li, lj, lk));
 
                 const double diffusionW =
-                    (gammaF * (wAt(li, lj, lk + 1) - wHere) - gammaB * (wHere - wAt(li, lj, lk - 1))) /
-                        (dz_ * dz_) +
-                    gammaTransverse * (wAt(li + 1, lj, lk) - 2.0 * wHere + wAt(li - 1, lj, lk)) / (dx_ * dx_) +
-                    gammaTransverse * (wAt(li, lj + 1, lk) - 2.0 * wHere + wAt(li, lj - 1, lk)) / (dy_ * dy_);
+                    (gammaF * (wAtKp1 - wHere) - gammaB * (wHere - wAtKm1)) / (dz_ * dz_) +
+                    gammaTransverse * (wAtIp1 - 2.0 * wHere + wAtIm1) / (dx_ * dx_) +
+                    gammaTransverse * (wAtJp1 - 2.0 * wHere + wAtJm1) / (dy_ * dy_);
 
                 wStar[indexW(i, j, k)] = wHere + dt * (-(dwwdz + dwudx + dwvdy) + diffusionW);
             }

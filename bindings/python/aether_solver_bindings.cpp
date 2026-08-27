@@ -119,10 +119,17 @@ PYBIND11_MODULE(aether_solver_py, m) {
         .def("time", &StaggeredNavierStokesSolver3D::time)
         .def("max_divergence", &StaggeredNavierStokesSolver3D::maxDivergence);
 
-    py::class_<StaggeredLidDrivenCavitySolver3D>(m, "StaggeredLidDrivenCavitySolver3D")
-        .def(py::init<std::size_t, std::size_t, std::size_t, double, double, double, double, double>(),
+    py::class_<StaggeredLidDrivenCavitySolver3D> staggeredCavity3D(m, "StaggeredLidDrivenCavitySolver3D");
+    py::enum_<StaggeredCavityBase3D::ConvectionScheme>(staggeredCavity3D, "ConvectionScheme")
+        .value("CENTRAL", StaggeredCavityBase3D::ConvectionScheme::Central)
+        .value("FIRST_ORDER_UPWIND", StaggeredCavityBase3D::ConvectionScheme::FirstOrderUpwind)
+        .value("LIMITED_LINEAR_UPWIND", StaggeredCavityBase3D::ConvectionScheme::LimitedLinearUpwind);
+    staggeredCavity3D
+        .def(py::init<std::size_t, std::size_t, std::size_t, double, double, double, double, double,
+                      StaggeredCavityBase3D::ConvectionScheme>(),
              py::arg("nx"), py::arg("ny"), py::arg("nz"), py::arg("length_x"), py::arg("length_y"),
-             py::arg("length_z"), py::arg("viscosity"), py::arg("lid_velocity"))
+             py::arg("length_z"), py::arg("viscosity"), py::arg("lid_velocity"),
+             py::arg("convection") = StaggeredCavityBase3D::ConvectionScheme::Central)
         .def("stable_time_step", &StaggeredLidDrivenCavitySolver3D::stableTimeStep)
         .def("step", &StaggeredLidDrivenCavitySolver3D::step, py::arg("dt"))
         .def("u", &StaggeredLidDrivenCavitySolver3D::u)
