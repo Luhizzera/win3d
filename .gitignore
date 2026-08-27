@@ -26,7 +26,21 @@ cmake_install.cmake
 *.vcxproj
 *.vcxproj.filters
 CTestTestfile.cmake
-Testing/
+# CTest's own log directory, for the rare invocation that runs it without
+# --test-dir build (this repo's own scripts always pass that, so this
+# normally lands under build/ and the rule above already covers it -- this
+# is only for a bare `ctest` run from the repo root itself). Anchored with
+# a leading slash on purpose: an unanchored "Testing/" here previously
+# matched engine/testing/ too -- case-insensitively, on a case-insensitive
+# filesystem, since gitignore patterns with no leading slash match at any
+# depth -- which silently kept that entire directory (aether_testing, the
+# AETHER_CHECK macro every one of the 13 C++ suites uses) out of version
+# control since this repository's very first commit. Never caught locally
+# because the directory already existed on disk from before that first
+# commit; only a truly fresh clone -- like CI's -- ever hit the resulting
+# "add_subdirectory given source engine/testing which is not an existing
+# directory" failure.
+/Testing/
 
 # Machine-local Claude Code settings (paths and permissions are specific to
 # one device; settings.json would be shared, settings.local.json is not).
