@@ -985,11 +985,32 @@ Itens independentes entre si, ordenáveis conforme a necessidade:
   permanente em `test_pipeline.py` (roda no ctest a cada build) — 0 de 48
   facetas perdidas, volume exato, desbalanço de massa de 0,0014% da
   entrada.
-- **Validação contra benchmarks de literatura** (Ghia et al. e afins): o
-  projeto evitou isso por princípio, porque recordar tabelas de memória é
-  risco real de imprecisão. Continua correto. Quando credibilidade externa
-  importar, o caminho honesto é obter os dados da fonte real, não de
-  memória — e nesse momento vira uma tarefa legítima, não um atalho.
+- ~~**Validação contra benchmarks de literatura** (Ghia et al. e afins)~~ —
+  FEITA em 2026-08-28 (`python/research/ghia_1982_validation.py`), com os
+  dados obtidos de fontes reais (duas transcrições independentes do artigo,
+  a coluna Re=100 cruzada entre elas), não de memória — exatamente o
+  cuidado que este item sempre disse que exigiria. **Resultado é honesto,
+  não um "bateu": `LidDrivenCavitySolver2D` não reproduz a tabela de Ghia
+  diretamente, e refinar a malha (n=64→128, 4x as células) não fecha a
+  diferença** — o que descarta erro de discretização como explicação, já
+  que esse encolheria com refino, e aponta pra uma diferença na *condição
+  de contorno posta*, não um bug: o lid deste solver usa
+  `lidVelocity·sin²(πx/L)`, suavizado nos cantos pra remover a
+  singularidade de pressão/vorticidade de um lid literalmente descontínuo
+  — decisão deliberada e documentada, não descoberta agora — enquanto a
+  cavidade clássica de Ghia usa lid uniforme. A média desse taper sobre
+  toda a largura é exatamente 0,5 (fato de forma fechada, verificado por
+  integração numérica no próprio script) — metade do momento de um lid
+  uniforme, uma redução bem maior que a das cavidades "regularizadas" da
+  literatura (que só suavizam uma faixa estreita perto de cada canto,
+  mantendo o lid em velocidade plena na maior parte da largura), o que
+  explica por que o desvio medido aqui (~10-20% do próprio range do campo)
+  é maior que o "pequeno, concentrado nos cantos" que essa literatura
+  registra. **O que isso não prova**: que o taper seja a explicação
+  inteira — confirmar isso pediria uma ablação (rodar com lid uniforme e
+  ver se o desvio some) que este script não tentou. O que isso prova: o
+  projeto tem agora um ponto de comparação externo real, explicado com o
+  mesmo rigor que qualquer achado interno, em vez de nenhum.
 
 ---
 
