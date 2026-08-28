@@ -11,6 +11,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(AETHER_BUILD_TESTS "Build Aether C++ unit tests" ON)
 option(AETHER_BUILD_PYTHON_BINDINGS "Build Python bindings (requires pybind11)" ON)
+# OFF only for the wheel build (see pyproject.toml's cmake.define): the
+# desktop viewer and its Win32/OpenGL dependency chain are irrelevant to
+# `pip install`ing the Python package and cost real build time (and, on a
+# platform without a desktop OpenGL stack, could fail outright) for no
+# benefit to that build. ON by default so every existing local/CI build
+# keeps building the app exactly as before.
+option(AETHER_BUILD_APPS "Build the example plugins and desktop viewer app" ON)
 # Module 10: GPU. CUDA was chosen deliberately over the dependency-free
 # alternatives (GL 4.3 compute shaders, OpenCL) -- see engine/gpu's own
 # README/header comments for the tradeoff this reverses (a CUDA Toolkit
@@ -49,16 +56,24 @@ add_subdirectory(engine/ml)
 add_subdirectory(engine/plugin)
 # Example plugins (Module 14). Built as standalone shared libraries that
 # nothing links against -- the engine discovers them by path at run time.
+# Not gated behind AETHER_BUILD_APPS below: engine/plugin/tests hard-depends
+# on these two targets existing whenever AETHER_BUILD_TESTS is on (it passes
+# their $<TARGET_FILE:...> in as a compile definition), and they are tiny,
+# portable C libraries with no Win32/OpenGL dependency of their own -- the
+# thing AETHER_BUILD_APPS actually exists to skip.
 add_subdirectory(plugins)
 if(AETHER_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
     add_subdirectory(engine/gpu)
 endif()
-add_subdirectory(apps/common)
-# apps/unified_viewer supersedes the four standalone viewers this project
-# started with (viewer, field_viewer, cavity_viewer, turbulence_viewer):
-# each became a mode of the single executable, so the originals were
-# removed rather than left as a second, drifting copy of the same code.
-add_subdirectory(apps/unified_viewer)
+if(AETHER_BUILD_APPS)
+    add_subdirectory(apps/common)
+    # apps/unified_viewer supersedes the four standalone viewers this
+    # project started with (viewer, field_viewer, cavity_viewer,
+    # turbulence_viewer): each became a mode of the single executable, so
+    # the originals were removed rather than left as a second, drifting
+    # copy of the same code.
+    add_subdirectory(apps/unified_viewer)
+endif()
 
 if(AETHER_BUILD_PYTHON_BINDINGS)
     find_package(pybind11 CONFIG QUIET)

@@ -7,6 +7,10 @@ __pycache__/
 build/
 out/
 CMakeFiles/
+
+# Python wheel/sdist build output (pyproject.toml)
+dist/
+*.egg-info/
 CMakeCache.txt
 cmake_install.cmake
 *.dir/

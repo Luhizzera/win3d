@@ -32,9 +32,9 @@ def _ensure_extensions_importable() -> None:
     resolves it rather than documenting it.
 
     An extension that is *already* importable is left alone and this
-    returns immediately: an explicit PYTHONPATH, a virtualenv install or a
-    future wheel all mean the caller has already said where the extensions
-    are, and overriding that would be worse than the friction it removes.
+    returns immediately: an explicit PYTHONPATH or a virtualenv install
+    already means the caller (or pip) has said where the extensions are,
+    and overriding that would be worse than the friction it removes.
     """
     import importlib.util
     import pathlib
@@ -43,8 +43,24 @@ def _ensure_extensions_importable() -> None:
     if importlib.util.find_spec("aether_core_py") is not None:
         return
 
-    # python/aether/__init__.py -> python/aether -> python -> repository root
-    repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
+    # A wheel install (see pyproject.toml / bindings/python/CMakeLists.txt's
+    # install() rules) places the compiled extensions directly alongside
+    # this very file, inside the aether/ package directory -- checked
+    # first since it is the cheapest candidate and the one a real install
+    # actually uses. They import here as bare top-level names
+    # (aether_core_py, not aether.aether_core_py) purely because this
+    # directory ends up on sys.path the same way the dev build/ directory
+    # below does; the pybind11 modules themselves are not renamed and do
+    # not know or care which way they were found.
+    package_dir = pathlib.Path(__file__).resolve().parent
+    if any(package_dir.glob("aether_core_py*")):
+        sys.path.insert(0, str(package_dir))
+        return
+
+    # Dev checkout, not installed: python/aether/__init__.py -> python/aether
+    # -> python -> repository root, then into wherever CMake wrote the
+    # extensions.
+    repo_root = package_dir.parent.parent
     build = repo_root / "build" / "bindings" / "python"
     for candidate in (build / "Release", build / "Debug", build):
         if candidate.is_dir() and any(candidate.glob("aether_core_py*")):

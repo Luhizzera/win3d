@@ -37,6 +37,37 @@ if(TARGET aether_gpu)
     target_link_libraries(aether_gpu_py PRIVATE aether_gpu)
 endif()
 
+# Wheel packaging (see ../../pyproject.toml): scikit-build-core stages a
+# wheel by running `cmake --install`, so every extension needs an install()
+# rule placing it inside the `aether` Python package directory -- the same
+# directory python/aether's own .py files are packaged from, so the two
+# merge into one importable package once unpacked. Both RUNTIME and LIBRARY
+# destinations are set because a MODULE library's loadable artifact is
+# classified differently per platform (a Windows .pyd is a RUNTIME artifact,
+# a Linux/macOS .so is a LIBRARY artifact) -- setting only one silently
+# installs nothing on the other platform, which a build log alone does not
+# make obvious. Harmless for the everyday `cmake --build` used everywhere
+# else in this project: install() rules do nothing unless something actually
+# runs `cmake --install` or an equivalent (which only the wheel build does).
+set(AETHER_PY_MODULES
+    aether_core_py
+    aether_geometry_py
+    aether_mesh_py
+    aether_solver_py
+    aether_postprocessing_py
+    aether_persistence_py
+    aether_optimization_py
+    aether_analysis_py
+    aether_ml_py
+    aether_plugin_py
+)
+if(TARGET aether_gpu_py)
+    list(APPEND AETHER_PY_MODULES aether_gpu_py)
+endif()
+install(TARGETS ${AETHER_PY_MODULES}
+        RUNTIME DESTINATION aether
+        LIBRARY DESTINATION aether)
+
 # The binding modules were, until now, only ever *compiled* -- CI installs
 # pybind11 precisely so they get built, but nothing imported them. That
 # catches a signature error and nothing else: a binding can compile and still

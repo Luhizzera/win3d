@@ -956,6 +956,17 @@ Itens independentes entre si, ordenáveis conforme a necessidade:
 
 ## Explicitamente adiado, não esquecido
 
+- ~~**Wheel/`pip install`**~~ — FEITO em 2026-08-27: `pyproject.toml` +
+  scikit-build-core orquestrando o `CMakeLists.txt` existente (nenhuma
+  duplicação de lógica de build). `pip wheel .` produz uma wheel real com
+  os 11 módulos compilados dentro do pacote `aether`; verificado instalando
+  numa venv nova, fora do repositório, e rodando um solver de verdade a
+  partir dela. Duas opções de CMake novas (`AETHER_BUILD_APPS`, junto da
+  `AETHER_BUILD_TESTS` já existente) deixam a wheel pular o visualizador
+  desktop e a suíte C++ — ambas `ON` por padrão, então nenhum build local
+  ou de CI existente muda. O que ainda falta é distribuição, não
+  empacotamento: publicar no PyPI e gerar wheels por plataforma/versão de
+  Python via CI é trabalho separado.
 - **DNS**: computacionalmente impraticável nas escalas de malha atuais.
   Reavaliar só depois da Fase 4 (GPU) e com malhas muito maiores.
 - **Backend Vulkan** (Módulo 8): esforço grande e isolado; o pipeline GL 3.3

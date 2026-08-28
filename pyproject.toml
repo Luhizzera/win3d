@@ -1,0 +1,39 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=3.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "aether-cfd"
+version = "0.1.0"
+description = "Aether: a hybrid C++/Python computational fluid dynamics engine"
+readme = "docs/getting-started.md"
+# Only what this project has actually built and tested against -- every
+# CI run and every local build in this repository uses 3.12. Loosening
+# this to a wider range is real, separate work (multi-version testing),
+# not a default to assume.
+requires-python = ">=3.12"
+# No LICENSE file exists in this repository yet -- that is a choice for
+# the project owner to make explicitly, not one to default silently here.
+# Add a `license = {file = "LICENSE"}` (or an SPDX `license = "..."`) once
+# one is chosen; PyPI will reject an upload without it regardless.
+
+[tool.scikit-build]
+# python/aether already matches scikit-build-core's own
+# "python/<package>" auto-discovery convention, but named explicitly here
+# rather than relied on implicitly, since silent auto-discovery is exactly
+# the kind of thing this project has already been burned by once
+# (DIVIDA_TECNICA.md 5.1's own root cause).
+wheel.packages = ["python/aether"]
+
+[tool.scikit-build.cmake.define]
+# The wheel needs only the compiled extensions and the pure-Python
+# orchestration layer -- not the C++ test suites or the Win32/OpenGL
+# desktop viewer, both irrelevant to `pip install`ing the package and
+# real added build time (and, for the viewer, a real dependency this
+# build has no reason to need). See CMakeLists.txt's own comments on
+# AETHER_BUILD_TESTS / AETHER_BUILD_APPS for why turning these off here
+# is safe: every other build in this repository (build.py, CI, plain
+# `cmake -S . -B build`) leaves both at their ON default and is
+# unaffected by this file.
+AETHER_BUILD_TESTS = "OFF"
+AETHER_BUILD_APPS = "OFF"

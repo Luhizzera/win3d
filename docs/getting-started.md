@@ -11,30 +11,49 @@ contrário.
 
 ## 1. Instalar
 
-Precisa de CMake ≥ 3.20, um compilador C++20 (MSVC, GCC ou Clang) e, para a
-camada Python, `pip install pybind11` no ambiente que vai configurar o
-build.
+Duas formas, dependendo do que você quer.
+
+**Só usar o pacote Python**: `pip install .` (ou, para gerar o arquivo e
+guardar/distribuir, `pip wheel . -w dist`) na raiz do repositório. Precisa
+de CMake ≥ 3.20 e um compilador C++20 (MSVC, GCC ou Clang) — `pip` cuida de
+buscar `scikit-build-core` e `pybind11` sozinho, num ambiente de build
+isolado. Compila o motor, empacota as extensões dentro do próprio pacote
+`aether`, e o resultado importa em qualquer venv, sem o repositório
+clonado:
+
+```
+pip install .
+python -c "import aether; print(aether.Vector3(1, 1, 1).norm())"
+```
+
+Verificado de ponta a ponta (não só "deveria funcionar"): wheel construída,
+instalada numa venv nova sem nenhuma relação com este repositório, e um
+solver rodado a partir dela sem erro. `requires-python = ">=3.12"` em
+`pyproject.toml` é literal — é a única versão com a qual este projeto
+realmente testou, não uma suposição de compatibilidade mais ampla.
+
+**Desenvolver o motor** (rodar a suíte C++, editar `engine/`): `pip
+install .` recompila do zero a cada chamada, o que é lento para iteração.
+Use o fluxo de sempre em vez disso —
 
 ```
 python build.py
 ```
 
-Isso configura, compila em Release e roda as 13 suítes de teste. Se as
-suítes passam, a instalação está boa — não há verificação melhor a fazer
-depois.
-
-Para usar o pacote, basta `python/` no `PYTHONPATH`; os módulos compilados
-são encontrados sozinhos dentro do `build/` deste repositório:
+— que configura, compila em Release e roda as 13 suítes de teste
+incrementalmente. `python/` no `PYTHONPATH` encontra os módulos compilados
+sozinho dentro do `build/` deste repositório, sem precisar instalar nada:
 
 ```python
+import sys; sys.path.insert(0, "python")
 import aether
 print(aether.Vector3(1, 1, 1).norm())
 ```
 
-**Não existe `pip install aether`.** As extensões C++ precisam ser
-compiladas por plataforma e por versão de Python, o que exige wheels por
-alvo — trabalho real e ainda não feito, registrado como tal em
-`ROADMAP.md`.
+Os dois caminhos coexistem sem conflito: `python/aether/__init__.py`
+procura as extensões primeiro dentro de si mesmo (o layout que uma
+instalação via `pip` produz), depois em `build/` (o layout de
+desenvolvimento) — o que for encontrado primeiro vence.
 
 ---
 
@@ -292,7 +311,10 @@ Registrado aqui para não ser descoberto no meio de um projeto:
 - **AMR** (refinamento adaptativo) — não existe.
 - **GPU** — há um kernel CUDA validado, mas não um solver residente na GPU;
   não acelera nada de verdade ainda.
-- **Wheel/`pip install`** — veja a seção 1.
+- **Wheel publicada (PyPI)** — `pip install .`/`pip wheel .` funciona (veja
+  a seção 1) e produz uma wheel real e instalável, mas ela só existe depois
+  de você mesmo construí-la; publicá-la (e gerar wheels por plataforma via
+  CI) é trabalho separado, ainda não feito.
 
 E uma limitação de escala que vale saber de antemão: a tetraedralização é
 **O(N²)** no número de pontos. Alguns milhares de pontos rodam em segundos;

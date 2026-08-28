@@ -2449,6 +2449,59 @@ automática por diretório (hoje é carregamento por caminho explícito).
 **Com isso os 14 módulos do roadmap original têm uma primeira etapa
 implementada e validada.**
 
+## Empacotamento: `pip install .` funciona
+
+Fecha o item mais alto da linha de trabalho para uma "beta palpável": até
+aqui, usar o pacote Python exigia clonar o repositório e apontar
+`PYTHONPATH` para dentro do próprio `build/` gerado pelo CMake — nada
+instalável, nada que funcionasse fora deste checkout.
+
+`pyproject.toml` novo, com `scikit-build-core` como build backend
+orquestrando o `CMakeLists.txt` já existente (nenhuma duplicação de lógica
+de build: é o mesmo CMake, só chamado por um caminho diferente).
+`bindings/python/CMakeLists.txt` ganhou uma regra `install()` por extensão,
+colocando os 11 módulos `.pyd`/`.so` dentro do próprio diretório de pacote
+`aether/` — o mesmo diretório de onde `python/aether/*.py` é empacotado —
+então os dois se fundem num só pacote instalável. Duas opções de CMake
+novas (`AETHER_BUILD_APPS`, complementando a `AETHER_BUILD_TESTS` que já
+existia) deixam a wheel pular o visualizador desktop (Win32/OpenGL,
+irrelevante para o pacote Python) e a suíte de testes C++ — ambas default
+`ON`, então nenhum build local ou de CI existente muda de comportamento.
+
+**Uma armadilha real, verificada antes de confiar nela**: no Windows, o
+artefato executável de uma biblioteca `MODULE` (o `.pyd`) é classificado
+como alvo `RUNTIME`, não `LIBRARY`, ao contrário do `.so` no Linux/macOS —
+`install(TARGETS x LIBRARY DESTINATION y)` sozinho instalaria silenciosamente
+nada no Windows. As regras usam `RUNTIME DESTINATION` e `LIBRARY
+DESTINATION` juntas, correto nas duas plataformas.
+
+`python/aether/__init__.py` ganhou uma segunda forma de achar as extensões
+compiladas: primeiro procura dentro do próprio diretório do pacote (o
+layout que uma instalação via `pip` produz), e só então cai no comportamento
+antigo (procurar dentro de `build/`, o layout de desenvolvimento). As duas
+formas coexistem sem `try/except` nem bandeira de configuração — é uma
+cadeia de "o que for encontrado primeiro, vence", a mesma lógica que já
+existia, só com mais um lugar para procurar.
+
+**Verificado de ponta a ponta, não só "a wheel foi criada"**: `pip wheel .`
+na raiz do repositório produziu `aether_cfd-0.1.0-cp312-cp312-win_amd64.whl`
+com os 11 módulos dentro. Instalada numa venv **nova, fora deste
+repositório, sem nenhum arquivo do projeto por perto** (`pip install
+--no-index arquivo.whl`), `import aether` funcionou, e um
+`LidDrivenCavitySolver2D` rodou 50 passos reais e devolveu um campo de
+velocidade fisicamente sensato — não apenas "importou sem erro". Depois
+disso, a suíte de desenvolvimento local (`python build.py`, 13/13 suítes)
+rodou de novo sem nenhuma mudança de comportamento, confirmando que os dois
+caminhos (`pip install .` e o fluxo de desenvolvimento de sempre) coexistem
+sem conflito.
+
+**O que isto não é**: uma wheel publicada. `pip install .`/`pip wheel .`
+funciona a partir de um checkout local; publicar no PyPI e gerar wheels por
+plataforma/versão de Python via CI é trabalho de distribuição separado,
+ainda não feito. Também não há `LICENSE` neste repositório — `pyproject.toml`
+deixa o campo de licença deliberadamente vazio (comentado, com a razão) em
+vez de presumir uma escolha que só ao dono do projeto cabe fazer.
+
 ## Build (C++ core + bindings)
 
 Requer CMake >= 3.20, um compilador C++20 (MSVC, GCC ou Clang) e, para os
@@ -2493,10 +2546,12 @@ Definir `PYTHONPATH` apontando para o diretório do `.pyd`/`.so` continua
 funcionando e tem precedência: se os módulos já forem importáveis, o pacote
 não mexe no `sys.path`.
 
-**Não há wheel nem `pip install aether`**, e isso é uma lacuna registrada,
-não um esquecimento: exige as extensões C++ compiladas por plataforma e por
-versão de Python, o que precisa de scikit-build-core na cadeia de build ou
-de CI produzindo wheels por alvo.
+**`pip install .` funciona** (`pyproject.toml` + scikit-build-core, ver a
+seção "Empacotamento" mais abaixo): compila o motor e produz uma wheel
+instalável em qualquer venv, sem o repositório clonado. O que ainda não
+existe é uma wheel *publicada* (PyPI) e CI produzindo wheels por
+plataforma/versão de Python — isso é trabalho de distribuição separado do
+empacotamento em si, que já está feito.
 
 ## Visualizador
 
