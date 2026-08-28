@@ -1914,14 +1914,25 @@ assumida a partir do sucesso de `makeTetrahedron()`.
   técnica; geometria realista tem estrutura local mais densa e raramente
   cai nele.
 
-**O que isso muda na frase "único bloqueio restante do cilindro"**: deixa
+**O que isso mudou na frase "único bloqueio restante do cilindro"**: deixou
 de ser verdade no nível da tetraedralização — medido, com um cilindro de
 verdade, não um substituto escolhido para evitar o problema (como o
-icosaedro que fechou o portão da Fase 3). **Ainda não testado**: o pipeline
-completo (`mesh_flow_around_object`, malha de fundo, `remove_region`,
-solver) com um cilindro de verdade importado como STL — isso valida a
-integração ponta a ponta, não só a tetraedralização isolada, e é o próximo
-passo natural, não uma alegação já coberta aqui.
+icosaedro que fechou o portão da Fase 3).
+
+**Atualização 2026-08-28: o pipeline completo fecha também, não só a
+tetraedralização isolada.** `mesh_flow_around_object` +
+`freestream_boundary` + `UnstructuredCavitySolver3D` rodados de ponta a
+ponta sobre um cilindro (prisma de 12 lados, 48 triângulos) **importado
+via round-trip real por arquivo STL binário** (`save_stl_binary` +
+`load_stl`, não mantido em memória) — o gap nomeado explicitamente na
+atualização anterior. Medido, registrado em
+`python/tests/test_pipeline.py::test_cylinder_from_stl_recovers_every_facet_and_conserves_mass`
+(ctest, roda a cada build): **0 de 48 facetas perdidas** (recuperação
+inteira via `tryFlipCoplanarQuadDiagonal`, nenhum ponto de Steiner),
+volume esculpido exato (erro relativo 1,6e-15), escoamento passante com
+desbalanço de massa de 0,0014% da vazão de entrada, sem NaN, velocidade
+máxima limitada. Essa é a prova de integração ponta a ponta que faltava —
+não mais "o próximo passo natural", já fechado.
 
 ---
 

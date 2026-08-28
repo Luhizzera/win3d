@@ -978,9 +978,13 @@ Itens independentes entre si, ordenáveis conforme a necessidade:
   cilindro aproximado por prisma poligonal (10/24/60 lados), sem nenhum
   ponto de Steiner. O caso Schönhardt-difícil (contorno genuinamente
   não-convexo) continua em aberto — nunca construído neste código, citado
-  como teto teórico. Ainda falta validar o pipeline completo
-  (`mesh_flow_around_object` + solver) com um cilindro de verdade
-  importado como STL, não só a tetraedralização isolada.
+  como teto teórico. ~~Ainda falta validar o pipeline completo~~ — FEITO
+  em 2026-08-28: `mesh_flow_around_object` + `freestream_boundary` +
+  `UnstructuredCavitySolver3D` sobre um cilindro real importado via
+  round-trip STL binário (não mantido em memória), registrado como teste
+  permanente em `test_pipeline.py` (roda no ctest a cada build) — 0 de 48
+  facetas perdidas, volume exato, desbalanço de massa de 0,0014% da
+  entrada.
 - **Validação contra benchmarks de literatura** (Ghia et al. e afins): o
   projeto evitou isso por princípio, porque recordar tabelas de memória é
   risco real de imprecisão. Continua correto. Quando credibilidade externa

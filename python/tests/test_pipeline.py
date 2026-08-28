@@ -53,6 +53,106 @@ def build_icosahedron(triangle_mesh_cls, vector3_cls):
     return mesh
 
 
+def build_cylinder(triangle_mesh_cls, vector3_cls, sides=12, radius=1.0, height=2.0):
+    """A polygonal-prism approximation of a cylinder: fan-triangulated caps
+    plus rectangular side faces, each split into 2 triangles by hand -- the
+    exact shape whose flat facets are ambiguous between two diagonals in an
+    *unconstrained* Delaunay tetrahedralization (DIVIDA_TECNICA.md 6's
+    "quadrilátero coplano" case), unlike build_icosahedron() above, which
+    was deliberately chosen to avoid that ambiguity entirely.
+
+    Chosen deliberately, now that it is not just theory: this is literally
+    "the cylinder" DIVIDA_TECNICA.md 6 and ROADMAP.md's Fase 3 gate named
+    as the standing example of import geometry this pipeline had never
+    actually been run against (only the tetrahedralization layer in
+    isolation, in engine/mesh/tests/mesh_tests.cpp).
+    """
+    mesh = triangle_mesh_cls()
+    bottom_rim = []
+    top_rim = []
+    for i in range(sides):
+        angle = 2.0 * math.pi * i / sides
+        x, y = radius * math.cos(angle), radius * math.sin(angle)
+        bottom_rim.append(mesh.add_vertex(vector3_cls(x, y, 0.0)))
+        top_rim.append(mesh.add_vertex(vector3_cls(x, y, height)))
+    bottom_center = mesh.add_vertex(vector3_cls(0.0, 0.0, 0.0))
+    top_center = mesh.add_vertex(vector3_cls(0.0, 0.0, height))
+    for i in range(sides):
+        j = (i + 1) % sides
+        mesh.add_triangle(bottom_center, bottom_rim[j], bottom_rim[i])
+        mesh.add_triangle(top_center, top_rim[i], top_rim[j])
+        mesh.add_triangle(bottom_rim[i], bottom_rim[j], top_rim[j])
+        mesh.add_triangle(bottom_rim[i], top_rim[j], top_rim[i])
+    return mesh
+
+
+def test_cylinder_from_stl_recovers_every_facet_and_conserves_mass(aether):
+    """The proof that was still missing after DIVIDA_TECNICA.md 6 closed:
+    not just that `DelaunayTetrahedralization3D.recover_facets()` can
+    recover a cylinder's facets in isolation (engine/mesh/tests/mesh_tests.cpp
+    already measures that at 10/24/60 sides), but that the *whole pipeline*
+    -- `mesh_flow_around_object`, a real STL round trip, and the solver --
+    does the same external-aerodynamics job on this shape that
+    test_freestream_sends_flow_through_and_conserves_mass above already
+    does on the icosahedron.
+
+    Round-tripped through an actual binary STL file rather than kept
+    in-memory, unlike build_icosahedron()'s own mesh: "importado como STL"
+    is the exact gap this test closes, not just "a shape with the same
+    facet-recovery difficulty".
+    """
+    print("cilindro via STL: pipeline completo, nao so a tetraedralizacao isolada")
+    import os
+    import tempfile
+
+    built = build_cylinder(aether.TriangleMesh, aether.Vector3, sides=12)
+    check(built.is_watertight(), f"o cilindro construido e estanque ({built.triangle_count()} triangulos)")
+
+    path = os.path.join(tempfile.gettempdir(), "aether_pipeline_cylinder.stl")
+    aether.save_stl_binary(built, path)
+    solid = aether.load_stl(path)  # load_stl welds -- STL has no shared vertex list of its own
+    os.remove(path)
+    check(solid.is_watertight(), "o cilindro sobrevive ao round-trip STL (solda automatica)")
+    check(solid.triangle_count() == built.triangle_count(),
+          f"nenhum triangulo perdido no round-trip ({solid.triangle_count()})")
+
+    # background_coarsening=3.0 for the same reason test_mesh_generation_is_
+    # geometrically_exact uses it above: tetrahedralize() is O(N^2), and
+    # this test's claims do not need resolution, only correct recovery.
+    domain = aether.mesh_flow_around_object(solid, margin=2.5, background_coarsening=3.0)
+    check(domain.unrecovered_facet_count == 0,
+          f"toda faceta do cilindro foi recuperada, so por troca de diagonal "
+          f"({domain.unrecovered_facet_count} perdidas de {solid.triangle_count()})")
+    relative = abs(domain.carved_volume - domain.expected_volume) / domain.expected_volume
+    check(relative < 1e-9, f"volume esculpido = caixa - cilindro (erro relativo {relative:.2e})")
+
+    wall_velocity, is_outlet = aether.freestream_boundary(
+        domain, inlet_face="x_min", outlet_face="x_max", velocity=(1.0, 0.0, 0.0))
+    solver = aether.UnstructuredCavitySolver3D(domain.mesh, 0.5, wall_velocity, is_outlet, 0.0)
+    dt = solver.stable_time_step()
+    for _ in range(300):
+        solver.step(dt)
+
+    inflow = 0.0
+    for f in range(domain.mesh.face_count()):
+        if not domain.mesh.is_boundary_face(f):
+            continue
+        face = domain.mesh.face(f)
+        if aether.classify_boundary_face(face.centroid, domain) == "x_min":
+            inflow += abs(face.area_vector.x)
+    check(inflow > 0.0, f"a entrada tem area ({inflow:.3f})")
+
+    imbalance = abs(solver.net_boundary_flux()) / inflow
+    print(f"       entrada={inflow:.4f}, desbalanco={imbalance*100:.4f}% da entrada, "
+          f"divergencia={solver.max_face_divergence():.3e}")
+    check(imbalance < 1e-3, f"o que entra no cilindro sai ({imbalance*100:.4f}% de desbalanco)")
+
+    speeds = [(solver.velocity(c).x ** 2 + solver.velocity(c).y ** 2 +
+               solver.velocity(c).z ** 2) ** 0.5 for c in range(domain.mesh.cell_count())]
+    check(max(speeds) < 5.0, f"velocidade maxima limitada ({max(speeds):.4f})")
+    check(all(s == s for s in speeds), "nenhum NaN no campo")
+
+
 def test_mesh_generation_is_geometrically_exact(aether, solid):
     """The fluid domain is the box minus the object, and that is an identity
     rather than an approximation: every tetrahedron's volume is exact (the
@@ -307,6 +407,7 @@ def main():
     solver = test_probe_predicts_the_run_and_the_run_shows_a_vortex(aether, domain)
     test_vtk_export_carries_the_result(aether, domain, solver)
     test_freestream_sends_flow_through_and_conserves_mass(aether, domain)
+    test_cylinder_from_stl_recovers_every_facet_and_conserves_mass(aether)
 
     if failures:
         print(f"\nFALHOU: {len(failures)} verificacao(oes)")
