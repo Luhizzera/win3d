@@ -3059,6 +3059,38 @@ void testLidDrivenCavityPrimaryVortexTopology() {
     AETHER_CHECK(bottomRowMeanU < 0.0); // forced to reverse by mass conservation
 }
 
+// LidDrivenCavitySolver2D's `taperLid` construction parameter (added
+// alongside python/research/ghia_1982_validation.py's ablation): with it
+// false, the lid holds lidVelocity uniformly right up to both top corners
+// instead of tapering to zero there -- Ghia, Ghia & Shin (1982)'s own
+// posed problem, not this class's regularized one. Checked the cheap,
+// direct way: near a top corner (i=0, n=32) a tapered lid's own boundary
+// value is lidVelocity*sin^2(pi*0.5/32) ~ 0.0024*lidVelocity, while a
+// uniform lid's is exactly lidVelocity there -- a ~400x difference at the
+// boundary itself, which must already show up in the solver's own
+// near-wall field after only a handful of steps (a boundary-condition
+// difference, not something that needs time to develop into a difference).
+void testLidDrivenCavityTaperLidOptionActuallyChangesTheBoundaryCondition() {
+    const std::size_t n = 32;
+    LidDrivenCavitySolver2D tapered(n, n, 1.0, 1.0, 0.1, 1.0);
+    LidDrivenCavitySolver2D uniform(n, n, 1.0, 1.0, 0.1, 1.0,
+                                     LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind,
+                                     /*taperLid=*/false);
+    const double dt = tapered.stableTimeStep();
+    for (int s = 0; s < 5; ++s) {
+        tapered.step(dt);
+        uniform.step(dt);
+    }
+    AETHER_CHECK(tapered.u(0, n - 1) > 0.0);                    // still positive, just much smaller
+    AETHER_CHECK(uniform.u(0, n - 1) > 3.0 * tapered.u(0, n - 1));
+
+    // Away from the corners the taper is close to 1.0 either way (sin^2 of
+    // an angle near pi/2), so the two must agree closely at the lid's own
+    // center column -- confirming the difference above is really about the
+    // corner treatment, not a wholesale change to the lid speed everywhere.
+    AETHER_CHECK(nearlyEqual(uniform.u(n / 2, n - 1), tapered.u(n / 2, n - 1), 0.05));
+}
+
 // Module 6 (turbulence), first pass: fully-developed turbulent channel
 // flow closed with Prandtl's mixing length model. u_tau is obtained from
 // the *exact* integral momentum balance (source * height/2, under the
@@ -3516,6 +3548,7 @@ int main() {
     testLidDrivenCavityMassConservation();
     testLidDrivenCavityFaceDivergenceIsAtSolverTolerance();
     testLidDrivenCavityPrimaryVortexTopology();
+    testLidDrivenCavityTaperLidOptionActuallyChangesTheBoundaryCondition();
     testMixingLengthChannelFlowMatchesLogLawSlope();
     testKEpsilonChannelFlowMatchesLogLawSlopeAndIsSymmetric();
     testKOmegaSSTChannelFlowMatchesLogLawSlopeAndIsSymmetric();

@@ -11,10 +11,10 @@ namespace aether::solver {
 
 LidDrivenCavitySolver2D::LidDrivenCavitySolver2D(std::size_t nx, std::size_t ny, double lengthX,
                                                    double lengthY, double viscosity, double lidVelocity,
-                                                   ConvectionScheme convection)
+                                                   ConvectionScheme convection, bool taperLid)
     : nx_(nx), ny_(ny), dx_(lengthX / static_cast<double>(nx)), dy_(lengthY / static_cast<double>(ny)),
       viscosity_(viscosity), lidVelocity_(lidVelocity), u_(nx * ny, 0.0), v_(nx * ny, 0.0),
-      p_(nx * ny, 0.0), convection_(convection) {}
+      p_(nx * ny, 0.0), convection_(convection), taperLid_(taperLid) {}
 
 double LidDrivenCavitySolver2D::schemeFaceValue(double upwind, double downwind, double farUpwind) const {
     if (convection_ == ConvectionScheme::FirstOrderUpwind) {
@@ -84,6 +84,9 @@ double LidDrivenCavitySolver2D::v(std::size_t i, std::size_t j) const { return v
 double LidDrivenCavitySolver2D::pressure(std::size_t i, std::size_t j) const { return p_[index(i, j)]; }
 
 double LidDrivenCavitySolver2D::lidVelocityAt(std::size_t i) const {
+    if (!taperLid_) {
+        return lidVelocity_;
+    }
     constexpr double kPi = 3.14159265358979323846;
     const double lengthX = dx_ * static_cast<double>(nx_);
     const double x = (static_cast<double>(i) + 0.5) * dx_;

@@ -88,11 +88,12 @@ PYBIND11_MODULE(aether_solver_py, m) {
                LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind);
     lidCavity2D
         .def(py::init<std::size_t, std::size_t, double, double, double, double,
-                      LidDrivenCavitySolver2D::ConvectionScheme>(), py::arg("nx"),
+                      LidDrivenCavitySolver2D::ConvectionScheme, bool>(), py::arg("nx"),
              py::arg("ny"), py::arg("length_x"), py::arg("length_y"), py::arg("viscosity"),
              py::arg("lid_velocity"),
              py::arg("convection") =
-                 LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind)
+                 LidDrivenCavitySolver2D::ConvectionScheme::LimitedLinearUpwind,
+             py::arg("taper_lid") = true)
         .def("stable_time_step", &LidDrivenCavitySolver2D::stableTimeStep)
         .def("step", &LidDrivenCavitySolver2D::step, py::arg("dt"))
         .def("u", &LidDrivenCavitySolver2D::u)

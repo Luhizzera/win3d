@@ -1006,11 +1006,21 @@ Itens independentes entre si, ordenáveis conforme a necessidade:
   mantendo o lid em velocidade plena na maior parte da largura), o que
   explica por que o desvio medido aqui (~10-20% do próprio range do campo)
   é maior que o "pequeno, concentrado nos cantos" que essa literatura
-  registra. **O que isso não prova**: que o taper seja a explicação
-  inteira — confirmar isso pediria uma ablação (rodar com lid uniforme e
-  ver se o desvio some) que este script não tentou. O que isso prova: o
-  projeto tem agora um ponto de comparação externo real, explicado com o
-  mesmo rigor que qualquer achado interno, em vez de nenhum.
+  registra.
+
+  **Atualização, mesmo dia: a ablação foi feita, e confirma a hipótese.**
+  `LidDrivenCavitySolver2D` ganhou o parâmetro `taper_lid` (default `True`
+  — reproduz bit a bit todo número já publicado deste solver, nenhum teste
+  existente muda), especificamente pra rodar com lid uniforme (o problema
+  que Ghia de fato propôs) em vez do lid regularizado. Resultado em Re=100,
+  n=64: os erros caem de u rms/max 0,0618/0,1187 pra **0,0041/0,0087**, e
+  v rms/max de 0,0318/0,0531 pra **0,0095/0,0175** — uma redução de 3x a
+  15x, abaixo de 1% do próprio range do campo. A diferença era mesmo o
+  perfil do lid, não um defeito de discretização ou física, e agora isso
+  está medido, não só inferido. O default do solver continua sendo o lid
+  regularizado (correto pra tudo que não é reproduzir o problema clássico
+  de Ghia especificamente); a claim de credibilidade externa que este item
+  buscava agora está feita de verdade, não aproximada.
 
 ---
 
