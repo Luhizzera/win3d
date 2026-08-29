@@ -2739,6 +2739,25 @@ int run() {
         return 1;
     }
 
+    // **A click is only honored once this window has actually been on
+    // screen a moment, not on the very first frames after it is created.**
+    // Measured directly, not guessed at: opening the hub landed a phantom
+    // click on button 0 (heatmap) with no real interaction, launching it
+    // unattended. A new top-level window can appear wherever the desktop's
+    // cascade placement (CW_USEDEFAULT) happens to put it -- often close to
+    // or exactly where the previous window (or its close button) just was
+    // -- and a WM_LBUTTONDOWN already queued for whatever now occupies that
+    // screen position at that instant can land on this window's very first
+    // rendered frame before a user has even seen the menu. A short warm-up
+    // (discard press/release edges for the first few frames, still track
+    // hover/position normally) costs nothing perceptible and removes the
+    // window for a leftover or coincidental click to be mistaken for a
+    // deliberate one -- applied both at initial launch and every time the
+    // hub is rebuilt after a mode closes, since returning here is exactly
+    // the same "brand new window, unknown prior input state" situation.
+    constexpr int kInputWarmupFrames = 15;
+    int framesSinceOpen = 0;
+
     MSG message{};
     bool quit = false;
     while (!quit) {
@@ -2753,8 +2772,10 @@ int run() {
             break;
         }
 
-        g_input.mousePressed = g_pendingPress;
-        g_input.mouseReleased = g_pendingRelease;
+        ++framesSinceOpen;
+        const bool warmedUp = framesSinceOpen > kInputWarmupFrames;
+        g_input.mousePressed = warmedUp && g_pendingPress;
+        g_input.mouseReleased = warmedUp && g_pendingRelease;
         g_pendingPress = false;
         g_pendingRelease = false;
 
@@ -2802,6 +2823,12 @@ int run() {
             if (!createHubWindow(hdc, context, ui)) {
                 return 1;
             }
+            // Same reasoning as the initial launch's own warm-up: this is a
+            // brand new window and its input state is unknown until it has
+            // rendered a few frames.
+            framesSinceOpen = 0;
+            g_pendingPress = false;
+            g_pendingRelease = false;
         }
 
         Sleep(1);
