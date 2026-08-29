@@ -44,11 +44,14 @@ os quatro itens que fecham a linha de trabalho para uma beta "palpável".
   perdidas, volume exato, desbalanço de massa de 0,0014% da entrada.
   Registrado como teste permanente em `python/tests/test_pipeline.py`.
 - **Primeira comparação contra um benchmark publicado** (Ghia, Ghia & Shin,
-  1982), com dados obtidos de fontes reais e cruzados, não de memória. O
-  resultado é reportado com honestidade, não maquiado: o solver não
-  reproduz a tabela diretamente, e a causa provável (o lid regularizado por
-  `sin²`, uma decisão deliberada já existente, não um bug) é quantificada,
-  não só sugerida. Ver `python/research/ghia_1982_validation.py`.
+  1982), com dados obtidos de fontes reais e cruzados, não de memória, e
+  confirmada por ablação, não só sugerida: com o lid regularizado por
+  `sin²` (o default de `LidDrivenCavitySolver2D`, uma decisão deliberada
+  já existente, não um bug), o solver não reproduz a tabela diretamente;
+  com `taper_lid=False` (parâmetro novo, default `true` preserva todo
+  número já publicado) — o lid uniforme que Ghia de fato propôs — os
+  erros caem de 3x a 15x e passam a bater a menos de 1% do range do campo.
+  Ver `python/research/ghia_1982_validation.py`.
 - **CI corrigido e verificado passando pela primeira vez na história do
   projeto** — a causa raiz era um `.gitignore` que mantinha
   `engine/testing/` inteiramente fora do controle de versão desde o
