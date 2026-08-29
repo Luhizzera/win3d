@@ -2619,21 +2619,217 @@ int run() {
 
 } // namespace sim3d_mode
 
+// A start screen so a user does not need to already know a mode's name and
+// type it on the command line: opened whenever the app is launched with no
+// mode argument (see main() below), or explicitly via the "hub"/"launcher"
+// mode names.
+//
+// Deliberately thin. Every mode below already has its own window, its own
+// GL context and its own blocking run() loop that returns cleanly when its
+// window closes (verified: each WndProc falls through to DefWindowProc for
+// WM_CLOSE, whose default handling calls DestroyWindow(), which is what
+// sends the WM_DESTROY each of them handles by calling PostQuitMessage(0)
+// -- so by the time any run() returns, its window and GL context are
+// already gone). The hub adds a menu that calls the same run() functions a
+// command-line launch would, one at a time, and rebuilds its own window
+// between them -- it does not attempt to host multiple modes inside one
+// shared window or GL context, which every existing mode's self-contained
+// design does not support and was never asked to.
+namespace launcher_mode {
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "uso: aether_unified_viewer <modo> [args]\n");
-        std::fprintf(stderr, "  modos disponiveis:\n");
-        std::fprintf(stderr, "    mesh <arquivo.stl>   visualizador de malha STL (Modulo 8)\n");
-        std::fprintf(stderr, "    heatmap              conducao de calor 2D (Modulo 5/7)\n");
-        std::fprintf(stderr, "    cavity                cavidade com tampa deslizante + streamlines (Modulo 4/7)\n");
-        std::fprintf(stderr, "    cavity3d              cavidade 3D staggered, campo de vetores (Modulo 4/8)\n");
-        std::fprintf(stderr, "    isosurface            iso-superficie de nu_t, k-omega SST 3D (Modulo 6/7/8)\n");
-        std::fprintf(stderr, "    turbulence            u+ vs ln(y+) dos fechamentos de turbulencia (Modulo 6/7)\n");
+HWND g_window = nullptr;
+int g_width = 480;
+int g_height = 460;
+gl33::UiInput g_input;
+bool g_pendingPress = false;
+bool g_pendingRelease = false;
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_SIZE:
+        g_width = LOWORD(lParam);
+        g_height = HIWORD(lParam);
+        if (wglGetCurrentContext()) {
+            glViewport(0, 0, g_width, g_height);
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        g_input.mouseX = GET_X_LPARAM(lParam);
+        g_input.mouseY = GET_Y_LPARAM(lParam);
+        return 0;
+    case WM_LBUTTONDOWN:
+        g_input.mouseDown = true;
+        g_pendingPress = true;
+        SetCapture(hwnd);
+        return 0;
+    case WM_LBUTTONUP:
+        g_input.mouseDown = false;
+        g_pendingRelease = true;
+        ReleaseCapture();
+        return 0;
+    default:
+        return DefWindowProc(hwnd, message, wParam, lParam);
+    }
+}
+
+// One entry per launchable mode: the button label and the same run()
+// every mode already exposes for direct command-line launch. "mesh" is
+// deliberately not in this table -- it takes a file path, and Ui.hpp is a
+// from-scratch immediate-mode toolkit with no text/file-picker widget
+// (see its own header comment on why nothing richer than sliders and
+// numeric fields exists yet), so there is no way for this table to collect
+// one. Noted for the user in the panel itself rather than silently
+// dropped.
+struct ModeEntry {
+    const char* label;
+    int (*run)();
+};
+
+const ModeEntry kModes[] = {
+    {"CONDUCAO DE CALOR  (heatmap)", []() { return heatmap_mode::run(); }},
+    {"CAVIDADE 2D  (cavity)", []() { return cavity_mode::run(); }},
+    {"CAVIDADE 3D  (cavity3d)", []() { return cavity3d_mode::run(); }},
+    {"ISO-SUPERFICIE  (isosurface)", []() { return isosurface_mode::run(); }},
+    {"TURBULENCIA  (turbulence)", []() { return turbulence_mode::run(); }},
+    {"PAINEL: CAVIDADE 2D  (sim)", []() { return sim_mode::run(); }},
+    {"PAINEL: CAVIDADE 3D  (sim3d)", []() { return sim3d_mode::run(); }},
+};
+constexpr int kModeCount = sizeof(kModes) / sizeof(kModes[0]);
+
+bool createHubWindow(HDC& hdc, HGLRC& context, gl33::Ui& ui) {
+    g_window = gl33::createSimpleWindow(L"AetherLauncher", L"Aether - Hub", g_width, g_height, WndProc);
+    if (!g_window) {
+        std::fprintf(stderr, "erro ao criar janela\n");
+        return false;
+    }
+    context = gl33::createGl33Context(g_window, hdc);
+    if (!context) {
+        return false;
+    }
+    if (!ui.initialize()) {
+        std::fprintf(stderr, "erro ao inicializar a UI\n");
+        return false;
+    }
+    ShowWindow(g_window, SW_SHOW);
+    UpdateWindow(g_window);
+    return true;
+}
+
+void destroyHubWindow(HDC hdc, HGLRC context, gl33::Ui& ui) {
+    ui.shutdown();
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(context);
+    ReleaseDC(g_window, hdc);
+    DestroyWindow(g_window);
+    g_window = nullptr;
+}
+
+int run() {
+    std::printf("Aether Unified Viewer - hub\n");
+    std::printf("  escolha um modo na janela; fechar um modo volta pro hub\n\n");
+    std::fflush(stdout);
+
+    HDC hdc = nullptr;
+    HGLRC context = nullptr;
+    gl33::Ui ui;
+    if (!createHubWindow(hdc, context, ui)) {
         return 1;
     }
 
+    MSG message{};
+    bool quit = false;
+    while (!quit) {
+        while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                quit = true;
+            }
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
+        if (quit) {
+            break;
+        }
+
+        g_input.mousePressed = g_pendingPress;
+        g_input.mouseReleased = g_pendingRelease;
+        g_pendingPress = false;
+        g_pendingRelease = false;
+
+        glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        ui.begin(g_width, g_height, g_input);
+        ui.beginPanel(24, 24, g_width - 48, "AETHER - HUB");
+        ui.label("Escolha um modo:");
+        ui.separator();
+
+        int chosen = -1;
+        for (int i = 0; i < kModeCount; ++i) {
+            if (ui.button(kModes[i].label)) {
+                chosen = i;
+            }
+        }
+
+        ui.separator();
+        ui.label("MALHA (STL/OBJ): pelo terminal --");
+        ui.label("  aether_unified_viewer mesh <arquivo>");
+        ui.separator();
+        const bool exitClicked = ui.button("SAIR");
+        ui.endPanel();
+        ui.end();
+
+        SwapBuffers(hdc);
+
+        if (exitClicked) {
+            break;
+        }
+
+        if (chosen >= 0) {
+            // Tear down the hub's own window and GL context completely
+            // before handing control to the chosen mode: every mode
+            // creates and owns its own window and context exactly as it
+            // does when launched directly from the command line, and this
+            // process should never hold two GL contexts at once.
+            destroyHubWindow(hdc, context, ui);
+            kModes[chosen].run();
+            // Back from the mode: rebuild the hub fresh rather than
+            // resuming with potentially-stale globals -- the simplest way
+            // to guarantee no leftover GL/window state from whichever mode
+            // just ran carries into the hub.
+            if (!createHubWindow(hdc, context, ui)) {
+                return 1;
+            }
+        }
+
+        Sleep(1);
+    }
+
+    if (g_window) {
+        destroyHubWindow(hdc, context, ui);
+    }
+    return 0;
+}
+
+} // namespace launcher_mode
+
+
+int main(int argc, char** argv) {
+    // No mode named: open the hub instead of just printing usage and
+    // exiting -- see launcher_mode's own comment for what it does and does
+    // not do. Explicit mode names (including "mesh <arquivo>", which the
+    // hub cannot offer a button for) keep working exactly as before for
+    // scripting or muscle memory.
+    if (argc < 2) {
+        return launcher_mode::run();
+    }
+
     const char* mode = argv[1];
+    if (std::strcmp(mode, "hub") == 0 || std::strcmp(mode, "launcher") == 0) {
+        return launcher_mode::run();
+    }
     if (std::strcmp(mode, "mesh") == 0) {
         return mesh_mode::run(argc, argv);
     }
@@ -2660,6 +2856,8 @@ int main(int argc, char** argv) {
     }
 
     std::fprintf(stderr, "modo desconhecido: %s\n", mode);
-    std::fprintf(stderr, "modos disponiveis: mesh, heatmap, cavity, cavity3d, isosurface, turbulence\n");
+    std::fprintf(stderr, "modos disponiveis: hub, mesh, heatmap, cavity, cavity3d, isosurface, "
+                          "turbulence, sim, sim3d\n");
+    std::fprintf(stderr, "sem argumento nenhum abre o hub (menu com todos os modos exceto mesh)\n");
     return 1;
 }
