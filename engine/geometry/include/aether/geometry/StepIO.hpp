@@ -7,46 +7,62 @@
 
 namespace aether::geometry {
 
-// STEP (ISO 10303-21) import -- **the planar-faceted solid representation
-// only**, not general CAD.
+// STEP (ISO 10303-21) import.
 //
-// **Why this scope, and why it is a real boundary rather than a
-// placeholder.** A STEP file's geometry divides cleanly into two kinds,
-// verified against ISO 10303-42's own published EXPRESS schema (steptools.com's
-// hosted SMRL documentation) before writing a line of extraction code here,
-// rather than assumed from memory the way this project avoids everywhere
-// else:
+// **Two build configurations, one contract.** `loadStep()`'s signature and
+// `StepLoadResult` never change -- what changes is which implementation
+// answers them, selected entirely at compile time (see StepIO.cpp; the
+// macro that picks between them, AETHER_HAVE_OPENCASCADE, never appears in
+// this header, the same ABI-stability rule engine/solver's own
+// AETHER_HAVE_GPU already follows, so no caller of this header can ever
+// observe a difference in this class's *shape*, only in its *capability*):
 //
-//   - A **faceted boundary representation**: every face is planar and every
-//     loop is a POLY_LOOP -- literally a flat ordered list of
-//     CARTESIAN_POINTs, with no curve or surface entity involved at all.
-//     FACETED_BREP is defined in the standard as exactly the restriction of
-//     MANIFOLD_SOLID_BREP to this case. This is already triangulable
-//     geometry; loading it needs a text-format parser and a planar
-//     triangulator, both of which this engine already has.
+//   - **Without OpenCASCADE** (no external dependency): **the
+//     planar-faceted solid representation only**. A STEP file's geometry
+//     divides cleanly into two kinds, verified against ISO 10303-42's own
+//     published EXPRESS schema (steptools.com's hosted SMRL documentation)
+//     before writing a line of extraction code here, rather than assumed
+//     from memory the way this project avoids everywhere else:
 //
-//   - Everything else -- a curved surface (cylindrical, B-spline, toroidal,
-//     ...), a trimmed/advanced face, or a tessellated (AP242) shape
-//     representation -- needs an actual CAD kernel to evaluate. This loader
-//     does not attempt any of it, and **says so explicitly** rather than
-//     silently returning an empty or partial mesh: see
-//     `StepLoadResult::unsupportedFeatures`. Building that path is a real,
-//     separate decision (OpenCASCADE is the realistic option, and it is a
-//     second heavy external dependency after CUDA), left open in
-//     ROADMAP.md's own Fase 5 rather than guessed at here.
+//       - A **faceted boundary representation**: every face is planar and
+//         every loop is a POLY_LOOP -- literally a flat ordered list of
+//         CARTESIAN_POINTs, with no curve or surface entity involved at
+//         all. FACETED_BREP is defined in the standard as exactly the
+//         restriction of MANIFOLD_SOLID_BREP to this case. This is already
+//         triangulable geometry; loading it needs a text-format parser and
+//         a planar triangulator, both of which this engine already has.
 //
-// Verified during development, not assumed: POLY_LOOP, FACE_BOUND /
-// FACE_OUTER_BOUND, FACE, CLOSED_SHELL and (FACETED_)MANIFOLD_SOLID_BREP's
-// exact attribute lists and order were each checked against the published
-// schema. The one representation that was *not* verified closely enough to
-// implement with the same confidence -- AP242's tessellated
-// TRIANGULATED_SURFACE_SET, which STEP instantiates via Part 21's complex-
-// entity syntax rather than a single simple entity -- is deliberately left
-// as a detected-but-unsupported case instead of a guessed implementation.
+//       - Everything else -- a curved surface (cylindrical, B-spline,
+//         toroidal, ...), a trimmed/advanced face, or a tessellated
+//         (AP242) shape representation -- is reported as unsupported
+//         rather than silently producing an empty or partial mesh: see
+//         `StepLoadResult::unsupportedFeatures`.
 //
-// A face bound with more than one loop (an inner loop, i.e. a hole) is
-// also reported as unsupported: PolygonTriangulation2D, reused here for
-// each planar face, does not yet triangulate polygons with holes.
+//     Verified during development, not assumed: POLY_LOOP, FACE_BOUND /
+//     FACE_OUTER_BOUND, FACE, CLOSED_SHELL and (FACETED_)MANIFOLD_SOLID_BREP's
+//     exact attribute lists and order were each checked against the
+//     published schema. The one representation that was *not* verified
+//     closely enough to implement with the same confidence -- AP242's
+//     tessellated TRIANGULATED_SURFACE_SET, which STEP instantiates via
+//     Part 21's complex-entity syntax rather than a single simple entity --
+//     is deliberately left as a detected-but-unsupported case instead of a
+//     guessed implementation. A face bound with more than one loop (an
+//     inner loop, i.e. a hole) is also reported as unsupported:
+//     PolygonTriangulation2D, reused here for each planar face, does not
+//     yet triangulate polygons with holes.
+//
+//   - **With OpenCASCADE** (ROADMAP Fase 5, `AETHER_ENABLE_OPENCASCADE` in
+//     the root CMakeLists.txt, detected via vcpkg the same "opt-in, not
+//     required" way `AETHER_ENABLE_CUDA` already is): a real CAD kernel
+//     reads the *entire* file -- curved and trimmed faces included -- and
+//     tessellates it (`BRepMesh_IncrementalMesh`). There is no longer a
+//     category of "valid geometry this loader cannot interpret", so a file
+//     the kernel genuinely cannot resolve throws rather than populating
+//     `unsupportedFeatures`. `loadIges()` (below) only exists in this
+//     configuration in spirit -- it is declared unconditionally, for the
+//     ABI reason above, but throws `std::runtime_error` when called in a
+//     build without OpenCASCADE, since there is no partial/faceted-only
+//     fallback for IGES the way there is for STEP.
 struct StepLoadResult {
     TriangleMesh mesh;
 
@@ -58,6 +74,15 @@ struct StepLoadResult {
     // with entries means some faces loaded and others did not.
     std::vector<std::string> unsupportedFeatures;
 };
+
+// True when this library was built with OpenCASCADE support (Fase 5) --
+// the runtime-queryable form of AETHER_HAVE_OPENCASCADE for a caller (a
+// Python test, above all, which has no access to a compile-time macro)
+// that needs to know which of loadStep()'s two implementations is active
+// before choosing what to expect from it. Always declared, same ABI
+// reasoning as loadIges() below and as StaggeredCavityBase3D::gpuActive()
+// elsewhere in this project.
+bool stepIoHasOpenCascade();
 
 // Parses `path` as an ISO 10303-21 (Part 21) file and extracts every
 // FACETED_BREP / MANIFOLD_SOLID_BREP it can fully interpret under the
@@ -76,5 +101,12 @@ struct StepLoadResult {
 // structurally valid file whose *geometry* this loader cannot interpret is
 // not an error -- that is what `unsupportedFeatures` is for.
 StepLoadResult loadStep(const std::string& path);
+
+// Parses `path` as an IGES file via OpenCASCADE (ROADMAP Fase 5). Always
+// declared regardless of build configuration -- see this header's own
+// class comment above for why -- but throws std::runtime_error in a build
+// without OpenCASCADE, since IGES has no faceted-only fallback the way
+// loadStep() does.
+StepLoadResult loadIges(const std::string& path);
 
 } // namespace aether::geometry

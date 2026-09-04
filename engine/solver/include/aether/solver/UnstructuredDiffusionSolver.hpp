@@ -98,6 +98,30 @@ public:
     // Pass {} to clear it and return to Laplace's equation.
     void setSourceTerm(std::function<double(const core::Vector3&)> source);
 
+    // Per-cell thermal conductivity, evaluated once at each cell centroid --
+    // same convention as setSourceTerm. Default: uniform 1.0, which
+    // reproduces solveConjugateGradient() bit-for-bit and is what makes this
+    // opt-in. A "solid" region and a "fluid" region are just two different
+    // values of k selected by position, the same convention wallVelocity/
+    // isOutlet/setDirichletBoundary already use.
+    //
+    // **This is ROADMAP Fase 6.1 (conjugate heat transfer) in its literal
+    // scope: solid and fluid regions with different conductivities, coupled
+    // at their shared interface.** The interior face conductivity is the
+    // distance-weighted harmonic mean of the two neighbouring cells' values
+    // -- the two-point-equivalent coefficient that continuity of flux across
+    // the interface implies, derived in updateConductivity()'s own comment.
+    // A boundary face uses its owning cell's conductivity, since a
+    // prescribed value sits exactly at the face with nothing on the other
+    // side. Deliberately conduction only, no velocity anywhere: this isolates
+    // the one thing that is new (the interface coupling) from advection,
+    // which UnstructuredCavitySolver3D's EnergyModel already covers.
+    // Integrating this into a real flow around a solid obstacle is a
+    // separate, natural extension, not required by this scope.
+    //
+    // Pass {} to clear it and return to uniform conductivity 1.0.
+    void setConductivity(std::function<double(const core::Vector3&)> conductivity);
+
     // Outer deferred-correction sweeps, each an inner matrix-free CG solve
     // (same pattern as SteadyDiffusionSolver). Returns the number of outer
     // sweeps actually run; sweeps stop early once the solution stops moving
@@ -128,6 +152,11 @@ public:
 private:
     void rebuildCoefficients();
 
+    // Rebuilds interiorFaceWeight_/boundaryFaceWeight_ from cellConductivity_
+    // -- see setConductivity()'s declaration for the physics. Called from the
+    // constructor (uniform 1.0) and from setConductivity().
+    void updateConductivity();
+
     // Per-boundary-face prescribed value, or "no value" when insulated.
     // Indexed by *mesh* face, since that is what a selector resolves to and
     // what the base hands back in BoundaryFace::meshFace.
@@ -139,6 +168,15 @@ private:
     std::vector<double> integratedSource_;
     std::vector<double> phi_;
     double lastOuterChange_ = 0.0;
+
+    // Only true after setConductivity() is called with a non-empty function:
+    // while false, solveConjugateGradient() runs the original unweighted
+    // path (applyLaplacian/solveDeferredCorrection) exactly as before this
+    // capability existed, so no existing caller's result changes at all.
+    bool hasConductivity_ = false;
+    std::vector<double> cellConductivity_;      // one per cell; uniform 1.0 by default
+    std::vector<double> interiorFaceWeight_;    // parallel to interiorFaces_
+    std::vector<double> boundaryFaceWeight_;    // parallel to boundaryFaces_
 };
 
 } // namespace aether::solver

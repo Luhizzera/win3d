@@ -80,7 +80,27 @@ public:
     // resulting cavity by connecting the new point to each boundary face.
     // A large enclosing "super tetrahedron" seeds the process and is
     // discarded at the end.
+    //
+    // Implemented via point location (a walk across face adjacency toward
+    // the new point) plus cavity expansion (a bounded BFS from the located
+    // tetrahedron, following adjacency, instead of testing every
+    // tetrahedron's circumsphere) -- O(cavity size) per inserted point
+    // instead of O(current tetrahedron count). See
+    // tetrahedralizeReference() for the straightforward O(N * tetrahedron
+    // count) version this replaces, kept as a cross-validation oracle.
     void tetrahedralize();
+
+    // Reference implementation of tetrahedralize(): the same Bowyer-Watson
+    // algorithm, but finding each new point's cavity by testing every
+    // current tetrahedron's circumsphere (via the private findCavity()),
+    // exactly as tetrahedralize() itself did before it was rewritten to use
+    // point location + adjacency. O(N * tetrahedronCount) -- impractical
+    // much past a few thousand points -- kept deliberately, not deleted,
+    // the same way RobustPredicates.hpp keeps orientation3DExact()/
+    // inSphere3DExact() next to their filtered-fast counterparts: an
+    // independently-implemented oracle to cross-validate the fast path
+    // against, not a fallback for production use.
+    void tetrahedralizeReference();
 
     // Inserts one additional point into an already-computed
     // tetrahedralization (call after tetrahedralize()), updating the mesh

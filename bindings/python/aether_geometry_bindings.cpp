@@ -59,4 +59,10 @@ PYBIND11_MODULE(aether_geometry_py, m) {
         .def_readonly("mesh", &StepLoadResult::mesh)
         .def_readonly("unsupported_features", &StepLoadResult::unsupportedFeatures);
     m.def("load_step", &loadStep, py::arg("path"));
+    m.def("load_iges", &loadIges, py::arg("path"));
+    // Runtime-queryable capability flag (Fase 5) -- lets a Python test
+    // choose expectations that match which of load_step()'s two
+    // implementations is actually active, since a compile-time macro is
+    // not visible from Python. See StepIO.hpp's own comment.
+    m.def("step_io_has_opencascade", &stepIoHasOpenCascade);
 }

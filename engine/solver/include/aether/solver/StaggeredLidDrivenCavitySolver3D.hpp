@@ -57,9 +57,14 @@ public:
     // not yet on the five turbulence closures) because this is the class
     // the Re=400 measurement that would justify changing the default runs
     // against -- the same one 2D's own port was measured on.
+    // useGpu: opt-in (Fase 4 of ROADMAP.md) -- see
+    // StaggeredCavityBase3D's own constructor comment for the fallback
+    // semantics when GPU is requested but unavailable. Exposed on this
+    // class specifically for the same reason `convection` already is: this
+    // is the one the GPU speedup was measured against.
     StaggeredLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY, double lengthZ,
            double viscosity, double lidVelocity,
-           ConvectionScheme convection = ConvectionScheme::Central);
+           ConvectionScheme convection = ConvectionScheme::Central, bool useGpu = false);
 
     void step(double dt);
 

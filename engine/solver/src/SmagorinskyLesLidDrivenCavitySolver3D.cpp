@@ -13,8 +13,9 @@ constexpr double kKarman = 0.41;
 } // namespace
 
 SmagorinskyLesLidDrivenCavitySolver3D::SmagorinskyLesLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
-             double lengthZ, double viscosity, double lidVelocity, double smagorinskyConstant)
-    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity),
+             double lengthZ, double viscosity, double lidVelocity, double smagorinskyConstant, bool useGpu)
+    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity,
+                            ConvectionScheme::Central, useGpu),
       smagorinskyConstant_(smagorinskyConstant), nut_(nx * ny * nz, 0.0) {
     setEddyViscosityField(&nut_);
 }

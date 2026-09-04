@@ -3,8 +3,8 @@
 namespace aether::solver {
 
 StaggeredLidDrivenCavitySolver3D::StaggeredLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
-             double lengthZ, double viscosity, double lidVelocity, ConvectionScheme convection)
-    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity, convection) {}
+             double lengthZ, double viscosity, double lidVelocity, ConvectionScheme convection, bool useGpu)
+    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity, convection, useGpu) {}
 
 void StaggeredLidDrivenCavitySolver3D::step(double dt) {
     std::vector<double> uStar = u_;

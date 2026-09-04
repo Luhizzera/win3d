@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace aether::solver {
@@ -85,6 +86,18 @@ public:
     // one of these solvers' tests checks every step.
     double maxDivergence() const;
 
+    // True iff the GPU path (Fase 4 of ROADMAP.md) is actually live for
+    // this instance: `useGpu=true` was requested at construction AND a
+    // CUDA-capable device was found AND the device buffers it needs were
+    // successfully allocated. False whenever any of those isn't true --
+    // including a build compiled without CUDA support at all -- so a
+    // caller never needs to know about AETHER_HAVE_GPU to use this
+    // correctly; it behaves identically regardless of build configuration.
+    // Public (not protected) for the same reason u()/v()/w()/... are:
+    // automatically inherited as public by every derived class with no
+    // `using` declaration needed, unlike loadState().
+    bool gpuActive() const { return gpuActive_; }
+
 protected:
     // Overwrites u/v/w/p and the simulated time with externally supplied
     // data -- the counterpart to reading them out to save a checkpoint (see
@@ -98,10 +111,23 @@ protected:
     void loadState(std::vector<double> u, std::vector<double> v, std::vector<double> w, std::vector<double> p,
                    double time);
 
+    // useGpu: opt-in (Fase 4 of ROADMAP.md), defaults to false -- every
+    // existing derived-class constructor passes its base-constructor
+    // arguments positionally, never by name, so this new trailing
+    // parameter cannot change behavior for any of them. When true but the
+    // GPU path can't actually be brought up (no CUDA support compiled in,
+    // no device found at runtime, or device allocation failed), the
+    // constructor falls back to the CPU path silently except for a
+    // diagnostic on stderr -- see the .cpp for why that's a fallback
+    // rather than a thrown exception (an unavailable GPU is a runtime
+    // resource condition, not a caller mistake, unlike this class's other
+    // validation throws).
     StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
                            double lengthZ, double viscosity, double lidVelocity,
-                           ConvectionScheme convection = ConvectionScheme::Central);
-    ~StaggeredCavityBase3D() = default;
+                           ConvectionScheme convection = ConvectionScheme::Central, bool useGpu = false);
+    // Declaration only -- GpuState (below) is incomplete here. Defined in
+    // the .cpp, the one file that ever needs it complete.
+    ~StaggeredCavityBase3D();
 
     std::size_t indexU(std::size_t i, std::size_t j, std::size_t k) const {
         return i + j * (nx_ + 1) + k * (nx_ + 1) * ny_;
@@ -196,6 +222,19 @@ protected:
 
 private:
     const std::vector<double>* eddyViscosity_ = nullptr;
+
+    // Forward-declared, incomplete here -- the same pImpl idiom
+    // aether::gpu::ConjugateGradientSolverCuda/MomentumPredictorCuda's own
+    // headers already use for their own `Impl`. The header's declared
+    // layout is therefore a single pointer, byte-identical in every
+    // translation unit regardless of whether AETHER_HAVE_GPU is ever
+    // defined anywhere -- no translation unit can ever disagree about
+    // sizeof(StaggeredCavityBase3D). GpuState's real definition (or an
+    // empty stand-in when compiled without CUDA support) lives entirely in
+    // StaggeredCavityBase3D.cpp, the only file that needs to know which.
+    struct GpuState;
+    std::unique_ptr<GpuState> gpuState_;
+    bool gpuActive_ = false;
 };
 
 } // namespace aether::solver

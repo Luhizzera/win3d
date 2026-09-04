@@ -11,8 +11,9 @@ constexpr double kEscudierFactor = 0.09;
 } // namespace
 
 MixingLengthLidDrivenCavitySolver3D::MixingLengthLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX, double lengthY,
-             double lengthZ, double viscosity, double lidVelocity)
-    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity),
+             double lengthZ, double viscosity, double lidVelocity, bool useGpu)
+    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity,
+                            ConvectionScheme::Central, useGpu),
       nut_(nx * ny * nz, 0.0) {
     // Lets the base's momentum predictor and time-step limit see this
     // closure's nu_t without a virtual call in the inner loop.

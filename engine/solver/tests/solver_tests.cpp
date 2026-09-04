@@ -3,6 +3,8 @@
 #include "aether/mesh/TetrahedralMesh.hpp"
 #include "aether/core/VectorField.hpp"
 #include "aether/core/ScalarField.hpp"
+#include "aether/solver/CompressibleEulerSolver1D.hpp"
+#include "aether/solver/LevelSetAdvectionSolver2D.hpp"
 #include "aether/solver/UnstructuredCavitySolver3D.hpp"
 #include "aether/solver/UnstructuredDiffusionSolver.hpp"
 #include "aether/solver/UnstructuredScalarTransportSolver.hpp"
@@ -1238,6 +1240,450 @@ void testManufacturedSolutionReachesSecondOrder() {
     AETHER_CHECK(finestError < 8e-3);
 }
 
+// **ROADMAP Fase 6.1 in its literal scope: conjugate heat transfer.**
+// setConductivity() couples two materials of different thermal
+// conductivity at their shared interface -- the one thing this project's
+// own text names as missing (diffusion and Navier-Stokes both already
+// existed; the interface coupling did not). Validated against the classic
+// composite-wall exact solution: two slabs of conductivity k1, k2 in
+// series, steady state, no source. Nothing generates or absorbs heat, so
+// the flux is the same constant through both slabs:
+//
+//   q = (Tleft - Tright) / (L1/k1 + L2/k2)
+//
+// and each slab is linear with slope -q/k -- continuous temperature,
+// discontinuous slope at the interface by exactly the ratio k2/k1.
+// Derived from a first-principles flux balance, not read from a table,
+// the same validation rule every solver in this project follows.
+//
+// No velocity anywhere: this class is pure diffusion, which isolates the
+// interface coupling from advection -- UnstructuredCavitySolver3D's
+// EnergyModel already covers that separately. See setConductivity()'s
+// declaration for why the split is deliberate.
+void testConjugateHeatTransferMatchesCompositeWallSolution() {
+    std::printf("  [solver_tests] parede composta, duas condutividades:\n");
+    std::fflush(stdout);
+
+    constexpr double kOnPlane = 1e-9;
+    constexpr double kSolid = 1.0;  // conductivity for x < kInterface
+    constexpr double kFluid = 4.0;  // conductivity for x >= kInterface
+    constexpr double kInterface = 0.5;
+    constexpr double tLeft = 100.0;
+    constexpr double tRight = 20.0;
+
+    const double flux = (tLeft - tRight) / (kInterface / kSolid + (1.0 - kInterface) / kFluid);
+    const double tInterface = tLeft - flux * kInterface / kSolid;
+    const auto exact = [&](const Vector3& p) {
+        if (p.x < kInterface) {
+            return tLeft - flux * p.x / kSolid;
+        }
+        return tInterface - flux * (p.x - kInterface) / kFluid;
+    };
+
+    const std::size_t n = 8;
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+
+    aether::solver::UnstructuredDiffusionSolver solver(mesh);
+    solver.setConductivity([&](const Vector3& p) { return p.x < kInterface ? kSolid : kFluid; });
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.x < kOnPlane; }, tLeft);
+    solver.setDirichletBoundary([&](const Vector3& c) { return c.x > 1.0 - kOnPlane; }, tRight);
+    const std::size_t sweeps = solver.solveConjugateGradient(60000, 1e-11, 200);
+
+    // Volume-weighted RMS, not a raw max -- the same choice
+    // testManufacturedSolutionReachesSecondOrder makes and for the same
+    // reason (this comment block's own note, above): tetrahedra vary
+    // sharply in size on this jittered lattice, and a handful of slivers
+    // right where the interface happens to cut a cell awkwardly would
+    // otherwise dominate a max-norm reading that says nothing about the
+    // solution everywhere else.
+    double maxError = 0.0;
+    double weightedSquaredError = 0.0;
+    double totalVolume = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        const double error = solver.value(cell) - exact(mesh.cellCentroid(cell));
+        const double volume = mesh.cellVolume(cell);
+        maxError = std::max(maxError, std::fabs(error));
+        weightedSquaredError += volume * error * error;
+        totalVolume += volume;
+    }
+    const double rmsError = std::sqrt(weightedSquaredError / totalVolume);
+    std::printf("    n=%zu  celulas=%5zu  rmsErro=%.6e  erroMax=%.6e  varreduras=%zu  Tinterface=%.4f\n", n,
+                mesh.cellCount(), rmsError, maxError, sweeps, tInterface);
+    std::fflush(stdout);
+    AETHER_CHECK(sweeps < 200);
+    // Thresholds set from measurement, below -- both wildly looser than
+    // the manufactured-solution second-order RMS error at the same n
+    // (Fase 2.2, ~6e-3): a genuinely discontinuous coefficient assigned by
+    // cell centroid rather than a mesh-conforming interface leaves the
+    // least-squares gradient blending across the jump, which the
+    // non-orthogonal correction then amplifies at exactly the faces where
+    // this jittered lattice is least orthogonal (~1.5-1.75 elsewhere in
+    // this project). That is a real, explained cost of the simplest
+    // possible interface treatment, not a defect in the coupling itself --
+    // see the max/RMS gap: a handful of cells the interface cuts awkwardly
+    // dominate the max, while the RMS (the same metric
+    // testManufacturedSolutionReachesSecondOrder uses, for the same
+    // sliver-cell reason) shows the solution is close almost everywhere.
+    // Measured 5.092e-01 (rms) and 4.179 (max) at n=8 -- rms is 0.64% of
+    // the 80-degree span end to end, despite the interface cutting cells
+    // by up to a full conductivity ratio's worth of local error. Set with
+    // headroom above both.
+    AETHER_CHECK(rmsError < 0.6);
+    AETHER_CHECK(maxError < 4.5);
+}
+
+// Confirms the new weighted machinery does not perturb the existing path:
+// a uniform conductivity of 1.0 must reproduce solveConjugateGradient()
+// with no conductivity set at all, since k_face = 1/((1-w)/1 + w/1) = 1 for
+// every face regardless of w -- the algebra that keeps setConductivity()
+// opt-in (see updateConductivity()'s comment).
+void testConjugateHeatTransferUniformConductivityMatchesUnweightedSolve() {
+    std::printf("  [solver_tests] condutividade uniforme reproduz o caminho sem peso:\n");
+    std::fflush(stdout);
+
+    constexpr double kOnPlane = 1e-9;
+    const std::size_t n = 6;
+    const aether::mesh::TetrahedralMesh& mesh = cubeLatticeMesh(n);
+
+    aether::solver::UnstructuredDiffusionSolver plain(mesh);
+    plain.setDirichletBoundary([&](const Vector3& c) { return c.x < kOnPlane; }, 100.0);
+    plain.setDirichletBoundary([&](const Vector3& c) { return c.x > 1.0 - kOnPlane; }, 20.0);
+    plain.solveConjugateGradient(60000, 1e-11, 200);
+
+    aether::solver::UnstructuredDiffusionSolver weighted(mesh);
+    weighted.setConductivity([](const Vector3&) { return 1.0; });
+    weighted.setDirichletBoundary([&](const Vector3& c) { return c.x < kOnPlane; }, 100.0);
+    weighted.setDirichletBoundary([&](const Vector3& c) { return c.x > 1.0 - kOnPlane; }, 20.0);
+    weighted.solveConjugateGradient(60000, 1e-11, 200);
+
+    double maxDiff = 0.0;
+    for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+        maxDiff = std::max(maxDiff, std::fabs(plain.value(cell) - weighted.value(cell)));
+    }
+    std::printf("    n=%zu  celulas=%5zu  maxDiff=%.3e\n", n, mesh.cellCount(), maxDiff);
+    std::fflush(stdout);
+
+    AETHER_CHECK(maxDiff < 1e-8);
+}
+
+// The exact solution to a Riemann problem for the 1D Euler equations
+// (Toro, "Riemann Solvers and Numerical Methods for Fluid Dynamics") --
+// derived from first principles (the isentropic relation across a
+// rarefaction, the Rankine-Hugoniot jump conditions across a shock, and a
+// Newton iteration for the one nonlinear scalar equation that couples
+// them), not a table of results. Used only by the Sod shock-tube test
+// below as ground truth; CompressibleEulerSolver1D itself never needs an
+// exact Riemann solve.
+struct RiemannPrimitiveState {
+    double rho;
+    double u;
+    double p;
+};
+
+RiemannPrimitiveState exactRiemannSample(double x, double t, double x0, double gamma, double rhoL,
+                                          double uL, double pL, double rhoR, double uR, double pR) {
+    const double cL = std::sqrt(gamma * pL / rhoL);
+    const double cR = std::sqrt(gamma * pR / rhoR);
+
+    const auto fSide = [gamma](double p, double rho, double pSide, double c) {
+        if (p > pSide) {
+            const double a = 2.0 / ((gamma + 1.0) * rho);
+            const double b = (gamma - 1.0) / (gamma + 1.0) * pSide;
+            return (p - pSide) * std::sqrt(a / (p + b));
+        }
+        return (2.0 * c / (gamma - 1.0)) * (std::pow(p / pSide, (gamma - 1.0) / (2.0 * gamma)) - 1.0);
+    };
+    const auto fSideDeriv = [gamma](double p, double rho, double pSide, double c) {
+        if (p > pSide) {
+            const double a = 2.0 / ((gamma + 1.0) * rho);
+            const double b = (gamma - 1.0) / (gamma + 1.0) * pSide;
+            return std::sqrt(a / (b + p)) * (1.0 - (p - pSide) / (2.0 * (b + p)));
+        }
+        return (1.0 / (rho * c)) * std::pow(p / pSide, -(gamma + 1.0) / (2.0 * gamma));
+    };
+    const auto f = [&](double p) { return fSide(p, rhoL, pL, cL) + fSide(p, rhoR, pR, cR) + (uR - uL); };
+    const auto fDeriv = [&](double p) {
+        return fSideDeriv(p, rhoL, pL, cL) + fSideDeriv(p, rhoR, pR, cR);
+    };
+
+    // Toro's primitive-variable initial guess (Eq. 4.47): a robust starting
+    // point for the Newton iteration below, clamped positive.
+    double p = std::max(1e-6, 0.5 * (pL + pR) - 0.125 * (uR - uL) * (rhoL + rhoR) * (cL + cR));
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        const double delta = f(p) / fDeriv(p);
+        const double next = p - delta;
+        p = (next > 0.0) ? next : 0.5 * p;
+        if (std::fabs(delta) / p < 1e-12) {
+            break;
+        }
+    }
+    const double pStar = p;
+    const double uStar = 0.5 * (uL + uR) + 0.5 * (fSide(pStar, rhoR, pR, cR) - fSide(pStar, rhoL, pL, cL));
+    const double s = (x - x0) / t;
+
+    if (s <= uStar) {
+        if (pStar <= pL) { // left rarefaction
+            const double headSpeed = uL - cL;
+            if (s <= headSpeed) {
+                return {rhoL, uL, pL};
+            }
+            const double cStarL = cL * std::pow(pStar / pL, (gamma - 1.0) / (2.0 * gamma));
+            const double tailSpeed = uStar - cStarL;
+            if (s > tailSpeed) {
+                return {rhoL * std::pow(pStar / pL, 1.0 / gamma), uStar, pStar};
+            }
+            const double u = (2.0 / (gamma + 1.0)) * (cL + 0.5 * (gamma - 1.0) * uL + s);
+            const double c = (2.0 / (gamma + 1.0)) * (cL + 0.5 * (gamma - 1.0) * (uL - s));
+            return {rhoL * std::pow(c / cL, 2.0 / (gamma - 1.0)), u,
+                    pL * std::pow(c / cL, 2.0 * gamma / (gamma - 1.0))};
+        }
+        // left shock
+        const double ratio = pStar / pL;
+        const double shockSpeed =
+            uL - cL * std::sqrt((gamma + 1.0) / (2.0 * gamma) * ratio + (gamma - 1.0) / (2.0 * gamma));
+        if (s <= shockSpeed) {
+            return {rhoL, uL, pL};
+        }
+        return {rhoL * (ratio + (gamma - 1.0) / (gamma + 1.0)) / ((gamma - 1.0) / (gamma + 1.0) * ratio + 1.0),
+                uStar, pStar};
+    }
+    if (pStar > pR) { // right shock
+        const double ratio = pStar / pR;
+        const double shockSpeed =
+            uR + cR * std::sqrt((gamma + 1.0) / (2.0 * gamma) * ratio + (gamma - 1.0) / (2.0 * gamma));
+        if (s >= shockSpeed) {
+            return {rhoR, uR, pR};
+        }
+        return {rhoR * (ratio + (gamma - 1.0) / (gamma + 1.0)) / ((gamma - 1.0) / (gamma + 1.0) * ratio + 1.0),
+                uStar, pStar};
+    }
+    // right rarefaction
+    const double headSpeed = uR + cR;
+    if (s >= headSpeed) {
+        return {rhoR, uR, pR};
+    }
+    const double cStarR = cR * std::pow(pStar / pR, (gamma - 1.0) / (2.0 * gamma));
+    const double tailSpeed = uStar + cStarR;
+    if (s <= tailSpeed) {
+        return {rhoR * std::pow(pStar / pR, 1.0 / gamma), uStar, pStar};
+    }
+    const double u = (2.0 / (gamma + 1.0)) * (-cR + 0.5 * (gamma - 1.0) * uR + s);
+    const double c = (2.0 / (gamma + 1.0)) * (cR - 0.5 * (gamma - 1.0) * (uR - s));
+    return {rhoR * std::pow(c / cR, 2.0 / (gamma - 1.0)), u, pR * std::pow(c / cR, 2.0 * gamma / (gamma - 1.0))};
+}
+
+// **ROADMAP Fase 6.2, unconditional half of the gate.** With a reflecting
+// wall at both ends, the mass and energy flux there is exactly zero for
+// any initial condition -- u=0 at the wall by construction, and mass flux
+// rho*u and energy flux u*(E+p) both vanish with it. No symmetry is
+// needed, unlike momentum (a wall exerts a real net force whenever the two
+// ends' pressures differ, which this initial condition's do).
+void testCompressibleEulerConservesMassAndEnergyWithReflectingWalls() {
+    std::printf("  [solver_tests] Euler compressivel: conservacao com paredes refletoras:\n");
+    std::fflush(stdout);
+
+    aether::solver::CompressibleEulerSolver1D solver(
+        200, 1.0, 1.4, aether::solver::CompressibleEulerSolver1D::BoundaryCondition::Reflecting);
+    solver.initialize([](double x, double& rho, double& u, double& p) {
+        if (x < 0.5) {
+            rho = 1.0;
+            u = 0.0;
+            p = 1.0;
+        } else {
+            rho = 0.125;
+            u = 0.0;
+            p = 0.1;
+        }
+    });
+
+    const double massBefore = solver.totalMass();
+    const double energyBefore = solver.totalEnergy();
+
+    const double tFinal = 1.0; // long enough for waves to bounce off both walls repeatedly
+    while (solver.time() < tFinal - 1e-12) {
+        const double dt = std::min(solver.stableTimeStep(), tFinal - solver.time());
+        solver.step(dt);
+    }
+
+    const double massAfter = solver.totalMass();
+    const double energyAfter = solver.totalEnergy();
+    const double massDrift = std::fabs(massAfter - massBefore);
+    const double energyDrift = std::fabs(energyAfter - energyBefore);
+    std::printf("    t=%.3f  derivaMassa=%.3e  derivaEnergia=%.3e\n", solver.time(), massDrift, energyDrift);
+    std::fflush(stdout);
+
+    AETHER_CHECK(massDrift < 1e-12);
+    AETHER_CHECK(energyDrift < 1e-10);
+}
+
+// **ROADMAP Fase 6.2, the analytical half of the gate: the Sod shock
+// tube.** Classic Riemann-problem inputs (parameters, not a memorised
+// result) -- left rho=1,u=0,p=1; right rho=0.125,u=0,p=0.1, discontinuity
+// at x=0.5, gamma=1.4, run to t=0.2, well before either wave reaches a
+// domain boundary at [0,1]. Compared against exactRiemannSample() above.
+//
+// RMS, not max, and for the reason this file already established for the
+// composite wall and the manufactured solution: the Rusanov+forward-Euler
+// pair is first order and smears the shock and the contact discontinuity
+// over several cells, so a pointwise max sitting exactly on either
+// discontinuity says nothing about the rest of the domain, where the
+// scheme is much closer to exact.
+//
+// **Measured order 0.42 (density) between n=100 and n=200, not the ~1 a
+// textbook first-order scheme's smooth-region error alone would suggest.**
+// That is not a defect to chase: an RMS/L2 norm taken over the *whole*
+// domain mixes a smooth-region error that does shrink at first order with
+// a shock/contact error whose *magnitude* stays roughly constant while
+// only its *width* shrinks as O(h) -- a well-documented property of
+// Godunov-type methods on genuinely discontinuous data, not something
+// this specific implementation should be expected to beat. Reported
+// honestly rather than assumed; see ROADMAP.md for the full measurement.
+void testCompressibleEulerMatchesSodShockTubeExactSolution() {
+    std::printf("  [solver_tests] Euler compressivel: tubo de choque de Sod:\n");
+    std::fflush(stdout);
+
+    constexpr double kGamma = 1.4;
+    constexpr double kInterfaceX = 0.5;
+    constexpr double kTFinal = 0.2;
+    const auto sodProfile = [](double x, double& rho, double& u, double& p) {
+        if (x < kInterfaceX) {
+            rho = 1.0;
+            u = 0.0;
+            p = 1.0;
+        } else {
+            rho = 0.125;
+            u = 0.0;
+            p = 0.1;
+        }
+    };
+
+    double previousRmsDensity = 0.0;
+    double previousH = 0.0;
+    for (std::size_t n : {100u, 200u}) {
+        aether::solver::CompressibleEulerSolver1D solver(
+            n, 1.0, kGamma, aether::solver::CompressibleEulerSolver1D::BoundaryCondition::Transmissive);
+        solver.initialize(sodProfile);
+
+        while (solver.time() < kTFinal - 1e-12) {
+            const double dt = std::min(solver.stableTimeStep(), kTFinal - solver.time());
+            solver.step(dt);
+        }
+
+        double squaredErrorDensity = 0.0;
+        double squaredErrorPressure = 0.0;
+        for (std::size_t cell = 0; cell < n; ++cell) {
+            const double x = solver.cellCenter(cell);
+            const RiemannPrimitiveState exact =
+                exactRiemannSample(x, kTFinal, kInterfaceX, kGamma, 1.0, 0.0, 1.0, 0.125, 0.0, 0.1);
+            const double densityError = solver.density(cell) - exact.rho;
+            const double pressureError = solver.pressure(cell) - exact.p;
+            squaredErrorDensity += densityError * densityError;
+            squaredErrorPressure += pressureError * pressureError;
+        }
+        const double rmsDensity = std::sqrt(squaredErrorDensity / static_cast<double>(n));
+        const double rmsPressure = std::sqrt(squaredErrorPressure / static_cast<double>(n));
+        const double h = 1.0 / static_cast<double>(n);
+
+        double order = 0.0;
+        if (previousRmsDensity > 0.0) {
+            order = std::log(previousRmsDensity / rmsDensity) / std::log(previousH / h);
+        }
+        std::printf("    n=%3zu  rmsDensidade=%.6e  rmsPressao=%.6e  ordem=%5.3f\n", n, rmsDensity,
+                    rmsPressure, order);
+        std::fflush(stdout);
+
+        previousRmsDensity = rmsDensity;
+        previousH = h;
+
+        // Measured (n=100, n=200): rms density 3.556e-02 / 2.662e-02, rms
+        // pressure 3.732e-02 / 2.576e-02. Set with headroom above the
+        // worse (coarser) case.
+        AETHER_CHECK(rmsDensity < 0.05);
+        AETHER_CHECK(rmsPressure < 0.05);
+    }
+}
+
+// **ROADMAP Fase 6.3, both halves of the gate from one experiment: solid-
+// body rotation of a circle.** u=-omega*(y-yc), v=omega*(x-xc) is
+// divergence-free by construction (du/dx=0, dv/dy=0 identically), so it
+// is the standard benchmark for an interface-tracking scheme: after
+// exactly one full period the rigid rotation is the identity map, so the
+// exact solution at t=T is phi0 again, and the enclosed area is exactly
+// conserved throughout by the Reynolds transport theorem. Neither
+// property is demonstrated by ordinary passive-scalar advection tests
+// elsewhere in this project (they check a field settles into some
+// profile, never that a recognisable shape returns to itself) -- which is
+// the point: labelling plain advection as interface tracking would repeat
+// exactly the mistake the Fase 6.1 correction found and fixed.
+void testLevelSetSolidBodyRotationReturnsToInitialCircle() {
+    std::printf("  [solver_tests] level set: rotacao de corpo solido de um circulo:\n");
+    std::fflush(stdout);
+
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kOmega = 2.0 * kPi; // period T = 1.0
+    constexpr double kCenterX = 0.5;
+    constexpr double kCenterY = 0.5;
+    constexpr double kCircleX = 0.65;
+    constexpr double kCircleY = 0.5;
+    constexpr double kRadius = 0.15;
+    constexpr double kTFinal = 1.0; // exactly one period
+
+    const auto initialCondition = [](double x, double y) {
+        return kRadius - std::sqrt((x - kCircleX) * (x - kCircleX) + (y - kCircleY) * (y - kCircleY));
+    };
+
+    const std::size_t n = 128;
+    aether::solver::LevelSetAdvectionSolver2D solver(n, n, 1.0, 1.0);
+    solver.initialize(initialCondition);
+    solver.setVelocityField([](double x, double y, double& u, double& v) {
+        u = -kOmega * (y - kCenterY);
+        v = kOmega * (x - kCenterX);
+    });
+
+    const double areaBefore = solver.insideArea();
+    const double exactArea = kPi * kRadius * kRadius;
+
+    while (solver.time() < kTFinal - 1e-12) {
+        const double dt = std::min(solver.stableTimeStep(), kTFinal - solver.time());
+        solver.step(dt);
+    }
+
+    const double areaAfter = solver.insideArea();
+
+    double squaredError = 0.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const double exact = initialCondition(solver.cellCenterX(i), solver.cellCenterY(j));
+            const double error = solver.value(i, j) - exact;
+            squaredError += error * error;
+        }
+    }
+    const double rmsError = std::sqrt(squaredError / static_cast<double>(n * n));
+
+    std::printf("    n=%zu  areaExata=%.6f  areaAntes=%.6f  areaDepois=%.6f  rmsErro=%.6e\n", n, exactArea,
+                areaBefore, areaAfter, rmsError);
+    std::fflush(stdout);
+
+    AETHER_CHECK(std::fabs(areaBefore - exactArea) < 1e-3);
+    // **Measured, and larger than a first guess would suggest: 29% of the
+    // circle's area (0.0707 -> 0.0502) is lost to numerical diffusion over
+    // one full rotation at n=128.** Not a bug -- confirmed by halving the
+    // cell size (n=256), where the loss roughly halves too (14%, 0.0707 ->
+    // 0.0607), the O(h) signature of a genuinely first-order scheme, not a
+    // stalled or diverging one. First-order upwind is known to be
+    // particularly diffusive for solid-body rotation specifically: the
+    // flow direction relative to the grid axes sweeps through all angles
+    // over one period, so cross-wind numerical diffusion (the classic
+    // weakness of this scheme family away from grid-aligned flow) is
+    // maximal here, not a corner case. This is exactly why ENO/WENO or a
+    // geometric (PLIC) reconstruction is the natural next step for
+    // anything beyond validating that the interface tracks a prescribed
+    // flow at all -- not part of this class's own scope. Thresholds below
+    // set with headroom above the n=128 measurement.
+    AETHER_CHECK(std::fabs(areaAfter - exactArea) < 0.03);
+    AETHER_CHECK(rmsError < 0.08);
+}
+
 // **The gate for ROADMAP Fase 2.** Two things are checked, and the second
 // matters more than the first: that the unstructured solution agrees with an
 // independent closed-form answer, and that refining the mesh *reduces* the
@@ -1737,6 +2183,481 @@ void testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology() {
     bottomMeanU /= static_cast<double>(count);
     AETHER_CHECK(topMeanU > 0.1);     // dragged in the lid's direction, measured ~0.175
     AETHER_CHECK(bottomMeanU < 0.0);  // reversed by mass conservation, measured ~-0.0036
+}
+
+// ---------------------------------------------------------------------------
+// Fase 4 do ROADMAP (GPU): useGpu=true opt-in em StaggeredCavityBase3D,
+// exposto por enquanto só em StaggeredLidDrivenCavitySolver3D. Todo teste
+// abaixo checa gpuActive() logo apos construir e pula com uma mensagem se
+// for false -- verdadeiro tanto num build sem CUDA quanto numa maquina sem
+// GPU em tempo de execucao, sem nenhum #ifdef neste arquivo (gpuActive()
+// se comporta identicamente nos dois casos).
+// ---------------------------------------------------------------------------
+
+// Mesmo caso de testStaggeredLidDrivenCavity3DStaysAtRestWhenLidStationary,
+// agora com useGpu=true: com a tampa parada e o campo inicial em zero, nao
+// ha nada a somar em lugar nenhum (toda entrada de todo kernel e' 0.0), entao
+// o resultado continua exatamente zero independente da ordem de soma da
+// reducao paralela -- a mesma checagem bit-a-bit da versao de CPU serve
+// tambem aqui.
+void testStaggeredLidDrivenCavity3DGpuStaysAtRestWhenLidStationary() {
+    const std::size_t n = 6;
+    StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 0.0,
+                                             StaggeredCavityBase3D::ConvectionScheme::Central,
+                                             /*useGpu=*/true);
+    if (!solver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel (sem CUDA no build ou sem dispositivo em tempo de "
+                     "execucao) -- pulando a variante GPU do teste de repouso.\n");
+        return;
+    }
+    const double dt = solver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        solver.step(dt);
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                AETHER_CHECK(solver.u(i, j, k) == 0.0);
+            }
+        }
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                AETHER_CHECK(solver.v(i, j, k) == 0.0);
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                AETHER_CHECK(solver.w(i, j, k) == 0.0);
+            }
+        }
+    }
+}
+
+// Mesmo caso de
+// testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology, agora
+// com useGpu=true: os mesmos limiares fisicos ja medidos (~0,175 topo /
+// ~-0,0036 fundo) valem aqui tambem, ja que sao sobre o regime fisico
+// (arraste pela tampa, retorno por conservacao de massa), nao sobre detalhe
+// de ponto flutuante GPU-vs-CPU.
+void testStaggeredLidDrivenCavity3DGpuMassConservationAndVortexTopology() {
+    const std::size_t n = 16;
+    StaggeredLidDrivenCavitySolver3D solver(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0, // Re = 10
+                                             StaggeredCavityBase3D::ConvectionScheme::Central,
+                                             /*useGpu=*/true);
+    if (!solver.gpuActive()) {
+        return; // ja reportado acima
+    }
+    const double dt = solver.stableTimeStep();
+
+    for (int s = 0; s < 400; ++s) {
+        solver.step(dt);
+        AETHER_CHECK(solver.maxDivergence() < 1e-9);
+    }
+
+    double topMeanU = 0.0;
+    double bottomMeanU = 0.0;
+    std::size_t count = 0;
+    for (std::size_t j = 0; j < n; ++j) {
+        for (std::size_t i = 0; i <= n; ++i) {
+            topMeanU += solver.u(i, j, n - 1);
+            bottomMeanU += solver.u(i, j, 0);
+            ++count;
+        }
+    }
+    topMeanU /= static_cast<double>(count);
+    bottomMeanU /= static_cast<double>(count);
+    AETHER_CHECK(topMeanU > 0.1);
+    AETHER_CHECK(bottomMeanU < 0.0);
+}
+
+// A checagem que de fato fecha o portao da Fase 4 ("resultado numericamente
+// equivalente ao da CPU"): duas instancias com condicoes iniciais identicas
+// (ambas comecam em zero, mesmos parametros), uma useGpu=false outra true,
+// mesmo numero de passos -- maxDiff impresso antes de qualquer AETHER_CHECK,
+// limiar so entrando depois de ver o numero real (mesma disciplina das
+// Fases 4.1/4.2). A unica fonte de divergencia esperada e' a ordem de soma
+// do produto interno paralelo do CG residente (Fase 4.1) composta ao longo
+// dos passos -- o preditor de momento (Fase 4.2) e' bit-a-bit identico.
+void testStaggeredLidDrivenCavity3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    StaggeredLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0);
+    StaggeredLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.1, 1.0,
+                                                StaggeredCavityBase3D::ConvectionScheme::Central,
+                                                /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando a comparacao direta GPU vs CPU.\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep(); // mesma grade/parametros -> mesmo dt nos dois lados
+    const int steps = 20;
+    for (int s = 0; s < steps; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    double maxDiffV = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    double maxDiffW = 0.0;
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    double maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU apos %d passos (n=%zu): maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                steps, n, maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout); // sobrevive a um AETHER_CHECK abortando logo em seguida
+
+    // Medido, nao suposto: com 20 passos, maxDiff u=7,120e-04 v=2,555e-04
+    // w=4,062e-04 p=9,979e-03. Medido tambem com 100 passos (so pra
+    // caracterizar a tendencia, nao e' o que este teste roda):
+    // u=3,453e-03 v=8,491e-04 w=4,503e-03 p=2,643e-02 -- um aumento de
+    // ~4,85x pra 5x mais passos, ou seja, crescimento aproximadamente
+    // LINEAR no numero de passos (nao exponencial), consistente com cada
+    // passo injetando um vies sistematico pequeno e constante (a ordem de
+    // soma da reducao paralela do CG residente) que se acumula
+    // aditivamente, nao com uma instabilidade numerica amplificando uma
+    // unica perturbacao. Os dois testes de repouso/conservacao-de-massa
+    // acima ja confirmam que as duas trajetorias sao fisicamente validas
+    // de forma independente -- isto mede a diferenca *entre* elas, nao a
+    // validade de nenhuma das duas. Limiares abaixo com folga de ~2x sobre
+    // o valor medido em 20 passos.
+    AETHER_CHECK(maxDiffU < 1.5e-3);
+    AETHER_CHECK(maxDiffV < 6e-4);
+    AETHER_CHECK(maxDiffW < 9e-4);
+    AETHER_CHECK(maxDiffP < 2e-2);
+}
+
+// **useGpu extended to the five turbulent closures**, mechanical once
+// StaggeredLidDrivenCavitySolver3D's own GPU integration existed: the
+// base's momentum predictor already forwards whatever
+// setEddyViscosityField() registered to the GPU path (StaggeredCavityBase3D.cpp),
+// so no closure needed its own GPU-specific code, only a trailing useGpu
+// parameter threaded to the base constructor. What genuinely needs
+// checking per closure is the wiring -- that each one's own nu_t field
+// really does reach the GPU path and produce a physically consistent
+// result -- not the mechanism itself (already validated on the laminar
+// class above). Same pattern as that test: identical CPU/GPU instances,
+// same steps, measured max-diff on u/v/w/p, printed before any
+// AETHER_CHECK. nu_t itself is not compared directly: it is a CPU-side
+// function of u/v/w recomputed every step by each closure's own
+// updateEddyViscosity(), so agreement there follows from agreement on
+// velocity, and is not an independent thing to check for the GPU path
+// specifically.
+void testMixingLengthCavity3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    MixingLengthLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0);
+    MixingLengthLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0, /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando comparacao GPU vs CPU (mixing length).\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0, maxDiffV = 0.0, maxDiffW = 0.0, maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU (mixing length) apos 20 passos: maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout);
+
+    // Measured: u=1.011e-02 v=2.063e-03 w=6.819e-03 p=1.347e-02 -- larger
+    // than the laminar class's (nu_t feeds back into the momentum
+    // diffusion this closure adds on top), set with ~1.5x headroom.
+    AETHER_CHECK(maxDiffU < 1.5e-2);
+    AETHER_CHECK(maxDiffV < 4e-3);
+    AETHER_CHECK(maxDiffW < 1e-2);
+    AETHER_CHECK(maxDiffP < 2e-2);
+}
+
+void testKEpsilonCavity3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    KEpsilonLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0);
+    KEpsilonLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0, /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando comparacao GPU vs CPU (k-epsilon).\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0, maxDiffV = 0.0, maxDiffW = 0.0, maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU (k-epsilon) apos 20 passos: maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout);
+
+    // Measured: u=4.042e-02 v=1.768e-02 w=6.207e-02 p=4.052e-02 -- larger
+    // still than the algebraic closures above: k and epsilon are
+    // transported fields that feed nu_t back into momentum every step, so
+    // a tiny CPU/GPU divergence in velocity compounds through that
+    // feedback loop rather than staying a one-shot difference. Set with
+    // ~1.5x headroom.
+    AETHER_CHECK(maxDiffU < 6e-2);
+    AETHER_CHECK(maxDiffV < 3e-2);
+    AETHER_CHECK(maxDiffW < 9e-2);
+    AETHER_CHECK(maxDiffP < 6e-2);
+}
+
+void testKOmegaSSTCavity3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    KOmegaSSTLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0);
+    KOmegaSSTLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0, /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando comparacao GPU vs CPU (k-omega SST).\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0, maxDiffV = 0.0, maxDiffW = 0.0, maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU (k-omega SST) apos 20 passos: maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout);
+
+    // Measured: u=4.077e-02 v=1.848e-02 w=6.720e-02 p=4.145e-02 -- same
+    // transported-field feedback reasoning as k-epsilon above (k and
+    // omega feed nu_t back into momentum every step). Set with ~1.5x
+    // headroom.
+    AETHER_CHECK(maxDiffU < 6e-2);
+    AETHER_CHECK(maxDiffV < 3e-2);
+    AETHER_CHECK(maxDiffW < 9e-2);
+    AETHER_CHECK(maxDiffP < 6e-2);
+}
+
+void testSmagorinskyLes3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    SmagorinskyLesLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0);
+    SmagorinskyLesLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0, 0.17, /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando comparacao GPU vs CPU (Smagorinsky LES).\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0, maxDiffV = 0.0, maxDiffW = 0.0, maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU (Smagorinsky LES) apos 20 passos: maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout);
+
+    // Measured: u=9.466e-03 v=1.795e-03 w=6.370e-03 p=1.246e-02 -- an
+    // algebraic closure like mixing length (nu_sgs has no transport
+    // equation of its own), and the numbers land in the same range. Set
+    // with ~1.5x headroom.
+    AETHER_CHECK(maxDiffU < 1.5e-2);
+    AETHER_CHECK(maxDiffV < 3e-3);
+    AETHER_CHECK(maxDiffW < 1e-2);
+    AETHER_CHECK(maxDiffP < 2e-2);
+}
+
+void testDesSst3DGpuMatchesCpuWithinMeasuredTolerance() {
+    const std::size_t n = 16;
+    DesSstLidDrivenCavitySolver3D cpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0);
+    DesSstLidDrivenCavitySolver3D gpuSolver(n, n, n, 1.0, 1.0, 1.0, 0.01, 1.0, 0.61, /*useGpu=*/true);
+    if (!gpuSolver.gpuActive()) {
+        std::printf("  [solver_tests] GPU indisponivel -- pulando comparacao GPU vs CPU (DES-SST).\n");
+        return;
+    }
+
+    const double dt = cpuSolver.stableTimeStep();
+    for (int s = 0; s < 20; ++s) {
+        cpuSolver.step(dt);
+        gpuSolver.step(dt);
+    }
+
+    double maxDiffU = 0.0, maxDiffV = 0.0, maxDiffW = 0.0, maxDiffP = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i <= n; ++i) {
+                maxDiffU = std::max(maxDiffU, std::fabs(cpuSolver.u(i, j, k) - gpuSolver.u(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j <= n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffV = std::max(maxDiffV, std::fabs(cpuSolver.v(i, j, k) - gpuSolver.v(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k <= n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffW = std::max(maxDiffW, std::fabs(cpuSolver.w(i, j, k) - gpuSolver.w(i, j, k)));
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t j = 0; j < n; ++j) {
+            for (std::size_t i = 0; i < n; ++i) {
+                maxDiffP = std::max(maxDiffP, std::fabs(cpuSolver.pressure(i, j, k) - gpuSolver.pressure(i, j, k)));
+            }
+        }
+    }
+    std::printf("  [solver_tests] GPU vs CPU (DES-SST) apos 20 passos: maxDiff u=%.3e v=%.3e w=%.3e p=%.3e\n",
+                maxDiffU, maxDiffV, maxDiffW, maxDiffP);
+    std::fflush(stdout);
+
+    // Measured: u=4.105e-02 v=1.855e-02 w=6.853e-02 p=4.181e-02 -- built on
+    // k-omega SST's own transport equations (same feedback reasoning),
+    // and the numbers track that class closely. Set with ~1.5x headroom.
+    AETHER_CHECK(maxDiffU < 6e-2);
+    AETHER_CHECK(maxDiffV < 3e-2);
+    AETHER_CHECK(maxDiffW < 9e-2);
+    AETHER_CHECK(maxDiffP < 6e-2);
 }
 
 // DIVIDA_TECNICA.md 4.4 (restante): FirstOrderUpwind and LimitedLinearUpwind
@@ -3510,6 +4431,14 @@ int main() {
     testStaggeredNavierStokes3DMatchesBeltramiDecay();
     testStaggeredLidDrivenCavity3DStaysAtRestWhenLidStationary();
     testStaggeredLidDrivenCavity3DMassConservationAndVortexTopology();
+    testStaggeredLidDrivenCavity3DGpuStaysAtRestWhenLidStationary();
+    testStaggeredLidDrivenCavity3DGpuMassConservationAndVortexTopology();
+    testStaggeredLidDrivenCavity3DGpuMatchesCpuWithinMeasuredTolerance();
+    testMixingLengthCavity3DGpuMatchesCpuWithinMeasuredTolerance();
+    testKEpsilonCavity3DGpuMatchesCpuWithinMeasuredTolerance();
+    testKOmegaSSTCavity3DGpuMatchesCpuWithinMeasuredTolerance();
+    testSmagorinskyLes3DGpuMatchesCpuWithinMeasuredTolerance();
+    testDesSst3DGpuMatchesCpuWithinMeasuredTolerance();
     testStaggeredLidDrivenCavity3DConvectionSchemesStayAtRestWhenLidStationary();
     testStaggeredLidDrivenCavity3DConvectionSchemesStayBoundedAndConserveMass();
     testStaggeredLidDrivenCavity3DDefaultConvectionSchemeIsCentral();
@@ -3538,6 +4467,11 @@ int main() {
     testLidDrivenCavityStaysAtRestWhenLidStationary();
     testUnstructuredPlateMatchesFourierSeriesAndConverges();
     testManufacturedSolutionReachesSecondOrder();
+    testConjugateHeatTransferMatchesCompositeWallSolution();
+    testConjugateHeatTransferUniformConductivityMatchesUnweightedSolve();
+    testCompressibleEulerConservesMassAndEnergyWithReflectingWalls();
+    testCompressibleEulerMatchesSodShockTubeExactSolution();
+    testLevelSetSolidBodyRotationReturnsToInitialCircle();
     testConvectionSchemeOrder();
     testConvectionSchemesAgainstCellPeclet();
     testTetrahedralMeshCarriesEngineFields();

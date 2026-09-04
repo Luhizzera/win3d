@@ -75,11 +75,13 @@ try:
     from aether_geometry_py import (
         StepLoadResult,
         TriangleMesh,
+        load_iges,
         load_obj,
         load_step,
         load_stl,
         save_obj,
         save_stl_binary,
+        step_io_has_opencascade,
     )
     from aether_mesh_py import (
         DelaunayTetrahedralization3D,
@@ -186,6 +188,8 @@ __all__ = [
     "load_obj",
     "save_obj",
     "load_step",
+    "load_iges",
+    "step_io_has_opencascade",
     "StepLoadResult",
     "StructuredGrid3D",
     "DelaunayTriangulation2D",

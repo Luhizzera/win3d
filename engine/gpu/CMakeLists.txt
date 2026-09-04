@@ -1,5 +1,7 @@
 add_library(aether_gpu STATIC
     src/PoissonOperatorCuda.cu
+    src/ConjugateGradientSolverCuda.cu
+    src/MomentumPredictorCuda.cu
 )
 
 target_include_directories(aether_gpu PUBLIC

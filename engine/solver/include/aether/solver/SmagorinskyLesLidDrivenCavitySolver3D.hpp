@@ -84,9 +84,15 @@ public:
     // smagorinskyConstant defaults to the commonly quoted 0.17; see the
     // class comment on why it is a parameter rather than a hardcoded
     // constant.
+    // useGpu: opt-in (Fase 4 of ROADMAP.md) -- see StaggeredCavityBase3D's
+    // own constructor comment for the fallback semantics when GPU is
+    // requested but unavailable. The base's momentum predictor already
+    // forwards whatever setEddyViscosityField() registered to the GPU
+    // path, so this closure's nu_sgs is honored identically to the CPU one.
     SmagorinskyLesLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX,
                                            double lengthY, double lengthZ, double viscosity,
-                                           double lidVelocity, double smagorinskyConstant = 0.17);
+                                           double lidVelocity, double smagorinskyConstant = 0.17,
+                                           bool useGpu = false);
 
     void step(double dt);
 

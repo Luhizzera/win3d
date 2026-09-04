@@ -10,7 +10,116 @@
 #include <sstream>
 #include <stdexcept>
 
+#ifdef AETHER_HAVE_OPENCASCADE
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Tool.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <IGESControl_Reader.hxx>
+#include <Poly_Triangulation.hxx>
+#include <STEPControl_Reader.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Shape.hxx>
+#endif
+
 namespace aether::geometry {
+
+bool stepIoHasOpenCascade() {
+#ifdef AETHER_HAVE_OPENCASCADE
+    return true;
+#else
+    return false;
+#endif
+}
+
+#ifdef AETHER_HAVE_OPENCASCADE
+
+using core::Vector3;
+
+namespace {
+
+// Tessellates every face of `shape` (BRepMesh_IncrementalMesh handles a
+// planar and a curved face identically -- the whole reason this path
+// exists over the tokenizer below) and packs the result into a
+// TriangleMesh. A face's own TopLoc_Location carries whatever assembly-
+// level placement was applied above it; applying that transform to each
+// node is what makes the triangulation correct in the shape's own
+// coordinate system rather than the face's local one. TopAbs_REVERSED
+// flips a face's sense relative to its underlying surface's natural
+// normal, so triangle winding is flipped here to keep every triangle's
+// normal pointing outward -- the curved-geometry equivalent of the
+// tokenizer's own care for FACE_OUTER_BOUND's .T./.F. sense flag.
+StepLoadResult tessellateShape(const TopoDS_Shape& shape) {
+    StepLoadResult result;
+    if (shape.IsNull()) {
+        result.unsupportedFeatures.push_back("file transferred no shape");
+        return result;
+    }
+
+    BRepMesh_IncrementalMesh mesh(shape, /*theLinDeflection=*/1e-3, /*isRelative=*/true,
+                                  /*theAngDeflection=*/0.3);
+    (void)mesh; // constructor performs the meshing; the object itself is not queried again
+
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(explorer.Current());
+        TopLoc_Location location;
+        const occ::handle<Poly_Triangulation>& triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) {
+            result.unsupportedFeatures.push_back("a face produced no triangulation");
+            continue;
+        }
+        const gp_Trsf& transform = location.Transformation();
+        const bool reversed = face.Orientation() == TopAbs_REVERSED;
+
+        const std::size_t firstVertex = result.mesh.vertexCount();
+        for (int i = 1; i <= triangulation->NbNodes(); ++i) {
+            const gp_Pnt p = triangulation->Node(i).Transformed(transform);
+            result.mesh.addVertex(Vector3(p.X(), p.Y(), p.Z()));
+        }
+        for (int i = 1; i <= triangulation->NbTriangles(); ++i) {
+            int n1 = 0, n2 = 0, n3 = 0;
+            triangulation->Triangle(i).Get(n1, n2, n3);
+            const std::size_t a = firstVertex + static_cast<std::size_t>(n1 - 1);
+            const std::size_t b = firstVertex + static_cast<std::size_t>(n2 - 1);
+            const std::size_t c = firstVertex + static_cast<std::size_t>(n3 - 1);
+            if (reversed) {
+                result.mesh.addTriangle(a, c, b);
+            } else {
+                result.mesh.addTriangle(a, b, c);
+            }
+        }
+    }
+
+    if (result.mesh.triangleCount() == 0) {
+        result.unsupportedFeatures.push_back("no triangulated face found in this file's shape");
+    }
+    return result;
+}
+
+} // namespace
+
+StepLoadResult loadStep(const std::string& path) {
+    STEPControl_Reader reader;
+    if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
+        throw std::runtime_error("loadStep: cannot open or parse '" + path + "' as a STEP file");
+    }
+    reader.TransferRoots();
+    return tessellateShape(reader.OneShape());
+}
+
+StepLoadResult loadIges(const std::string& path) {
+    IGESControl_Reader reader;
+    if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
+        throw std::runtime_error("loadIges: cannot open or parse '" + path + "' as an IGES file");
+    }
+    reader.TransferRoots();
+    return tessellateShape(reader.OneShape());
+}
+
+#else // !AETHER_HAVE_OPENCASCADE
 
 namespace {
 
@@ -579,5 +688,20 @@ StepLoadResult loadStep(const std::string& path) {
 
     return result;
 }
+
+StepLoadResult loadIges(const std::string&) {
+    // No fallback exists for IGES the way the tokenizer above is one for
+    // STEP's faceted subset -- IGES's entity format is different enough
+    // from Part 21 that nothing here would be reusable, so this build
+    // configuration has no partial capability to offer. An honest runtime
+    // error, not a silently empty mesh or a missing symbol at link time
+    // (this function always exists -- see StepIO.hpp's own comment on why
+    // AETHER_HAVE_OPENCASCADE never appears there).
+    throw std::runtime_error(
+        "loadIges: built without OpenCASCADE support -- configure with "
+        "-DCMAKE_TOOLCHAIN_FILE=<vcpkg-clone>/scripts/buildsystems/vcpkg.cmake to enable it");
+}
+
+#endif // AETHER_HAVE_OPENCASCADE
 
 } // namespace aether::geometry

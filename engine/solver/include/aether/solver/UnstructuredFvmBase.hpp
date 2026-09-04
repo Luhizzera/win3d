@@ -368,6 +368,42 @@ protected:
                                          double tolerance, std::size_t maxOuterSweeps,
                                          double& lastOuterChange, double& relaxation) const;
 
+    // -- Weighted variants, for a spatially varying diffusion coefficient ---
+    //
+    // The three methods above assume a coefficient of exactly 1 baked into
+    // laplacianDiagonal_/face.coefficient. That is the right assumption for
+    // every caller so far (plain diffusion, the pressure Poisson equation),
+    // but a caller whose physical diffusivity genuinely varies by cell --
+    // conjugate heat transfer across a material interface, the reason these
+    // exist -- needs the coefficient itself to enter the operator. These are
+    // new, parallel methods rather than added parameters to the three above:
+    // the existing callers (UnstructuredScalarTransportSolver, the pressure
+    // solve in UnstructuredCavitySolver3D) keep calling exactly what they
+    // already call, so this is purely additive and changes nothing for them.
+    //
+    // `interiorFaceWeight`/`boundaryFaceWeight` replace the implicit 1 with
+    // an explicit per-face value, parallel to interiorFaces_/boundaryFaces_.
+    // The diagonal is rebuilt from them on every call rather than cached,
+    // since the weight tracks a field that can change (a conductivity), not
+    // the mesh geometry -- the same asymptotic cost as the face loop already
+    // here, so this is not a new complexity class, just not memoized.
+
+    std::vector<double> applyWeightedLaplacian(const std::vector<double>& x,
+                                                const std::vector<double>& interiorFaceWeight,
+                                                const std::vector<double>& boundaryFaceWeight,
+                                                std::size_t pinnedCell = kNoPinnedCell) const;
+
+    std::vector<double> weightedNonOrthogonalCorrection(
+        const std::vector<double>& field, const std::vector<double>& interiorFaceWeight,
+        const std::vector<double>& boundaryFaceWeight) const;
+
+    std::size_t solveWeightedDeferredCorrection(std::vector<double>& x, const std::vector<double>& baseRhs,
+                                                 const std::vector<double>& interiorFaceWeight,
+                                                 const std::vector<double>& boundaryFaceWeight,
+                                                 std::size_t pinnedCell, std::size_t maxIterations,
+                                                 double tolerance, std::size_t maxOuterSweeps,
+                                                 double& lastOuterChange, double& relaxation) const;
+
     // Matrix-free Conjugate Gradient. `apply(v)` returns A v; `x` is both the
     // initial guess and the result, which matters -- the pressure Poisson
     // solve starts from the previous step's pressure and converges in a

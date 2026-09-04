@@ -9,6 +9,13 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef AETHER_HAVE_OPENCASCADE
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <STEPControl_StepModelType.hxx>
+#include <STEPControl_Writer.hxx>
+#include <TopoDS_Shape.hxx>
+#endif
+
 using namespace aether::core;
 using namespace aether::geometry;
 
@@ -158,6 +165,26 @@ void testObjQuadFaceIsFanTriangulated() {
     std::filesystem::remove(path);
 }
 
+// **Both tests below exercise the tokenizer's own leniency, not a
+// property of STEP itself.** They hand-write only the entities StepIO.hpp
+// says were checked against the schema -- no PRODUCT/PRODUCT_DEFINITION/
+// SHAPE_DEFINITION_REPRESENTATION/GEOMETRIC_REPRESENTATION_CONTEXT
+// boilerplate a real CAD export always carries -- because the tokenizer
+// looks for a FACETED_BREP by type name directly and does not need any of
+// it. A real CAD kernel does: measured directly, OpenCASCADE's
+// STEPControl_Reader transfers *no shape at all* from this same minimal
+// tetrahedron file ("file transferred no shape"), because it has no root
+// entity of the kind its transfer mechanism looks for. That is not a
+// defect in either implementation -- the tokenizer's whole point is
+// accepting exactly the restricted grammar it documents, and a real
+// kernel's insistence on a complete, standards-shaped file is what makes
+// it trustworthy on real-world input. So both tests compile only in the
+// no-OpenCASCADE configuration; testStepLoadsCurvedCylinderThroughOpenCascade
+// below is the equivalent gate for the OpenCASCADE path, using a file
+// OpenCASCADE's own writer produced rather than one hand-authored to the
+// tokenizer's minimal grammar.
+#ifndef AETHER_HAVE_OPENCASCADE
+
 // A hand-written, minimal ISO-10303-21 file describing the same unit
 // tetrahedron as buildUnitTetrahedron() above, as a FACETED_BREP: four
 // CARTESIAN_POINTs, four POLY_LOOPs, four FACE_OUTER_BOUNDs, four FACEs, one
@@ -238,6 +265,15 @@ void testStepLoadsFacetedTetrahedron() {
 // loader must name it in unsupportedFeatures rather than silently produce
 // an empty or wrong mesh -- StepLoadResult's whole reason to carry that
 // field rather than just throwing or returning nothing.
+// Tests the *tokenizer's own* unsupported-feature-reporting contract
+// (StepIO.cpp's no-OpenCASCADE path): a structurally-parseable-but-
+// dangling-reference face is recognized as not faceted and reported by
+// name rather than crashing or silently producing an empty/wrong mesh.
+// Compiled only in this build configuration because the function under
+// test -- the tokenizer -- is not the one loadStep() calls once
+// AETHER_HAVE_OPENCASCADE is defined (a real CAD kernel reads the file
+// then, and has no equivalent "valid syntax, unsupported geometry"
+// category to report the same way -- see StepIO.hpp's own comment).
 void testStepReportsNonFacetedBoundaryAsUnsupported() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "aether_geometry_test_curved.step";
@@ -276,6 +312,54 @@ void testStepReportsNonFacetedBoundaryAsUnsupported() {
 
     std::filesystem::remove(path);
 }
+#endif // !AETHER_HAVE_OPENCASCADE
+
+#ifdef AETHER_HAVE_OPENCASCADE
+// **The gate for ROADMAP Fase 5's curved-surface case.** A hand-authored
+// Part 21 file cannot practically express a curved face the way
+// testStepLoadsFacetedTetrahedron does for a planar one, so this builds
+// the reference solid *with OpenCASCADE itself* -- a real cylinder,
+// genuinely curved -- writes it to a real STEP file, and reads it back
+// through loadStep()'s own public API exactly as any caller would: a
+// real round trip through curved-surface STEP, still self-contained (no
+// external fixture file).
+void testStepLoadsCurvedCylinderThroughOpenCascade() {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kRadius = 2.0;
+    constexpr double kHeight = 5.0;
+    const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(kRadius, kHeight).Shape();
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "aether_geometry_test_cylinder.step";
+    {
+        STEPControl_Writer writer;
+        writer.Transfer(cylinder, STEPControl_AsIs);
+        writer.Write(path.string().c_str());
+    }
+
+    const StepLoadResult loaded = loadStep(path.string());
+    std::filesystem::remove(path);
+
+    AETHER_CHECK(loaded.unsupportedFeatures.empty());
+    AETHER_CHECK(loaded.mesh.triangleCount() > 0);
+
+    const double exactVolume = kPi * kRadius * kRadius * kHeight;
+    const double measuredVolume = loaded.mesh.volume();
+    const double relativeError = std::fabs(measuredVolume - exactVolume) / exactVolume;
+    std::printf("  [geometry_tests] cilindro curvo via OpenCASCADE: volume exato=%.6f medido=%.6f "
+                "erro relativo=%.6e (%zu triangulos)\n",
+                exactVolume, measuredVolume, relativeError, loaded.mesh.triangleCount());
+    std::fflush(stdout);
+
+    // Tessellation of a curved surface is inherently approximate.
+    // Measured 8.30e-04 against the deflection tessellateShape()
+    // (StepIO.cpp) actually uses (1e-3 relative linear, 0.3 rad angular) --
+    // not assumed tight, the same distinction the Sod shock tube and
+    // composite-wall tests draw elsewhere in this project. Set with
+    // headroom above the measured value.
+    AETHER_CHECK(relativeError < 2e-3);
+}
+#endif // AETHER_HAVE_OPENCASCADE
 
 } // namespace
 
@@ -287,8 +371,13 @@ int main() {
     testStlRoundTrip();
     testObjRoundTrip();
     testObjQuadFaceIsFanTriangulated();
+#ifndef AETHER_HAVE_OPENCASCADE
     testStepLoadsFacetedTetrahedron();
     testStepReportsNonFacetedBoundaryAsUnsupported();
+#endif
+#ifdef AETHER_HAVE_OPENCASCADE
+    testStepLoadsCurvedCylinderThroughOpenCascade();
+#endif
     std::puts("aether_geometry_tests: all tests passed");
     return 0;
 }

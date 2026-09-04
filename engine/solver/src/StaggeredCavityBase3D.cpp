@@ -3,20 +3,76 @@
 
 #include "aether/solver/ConvectionLimiter.hpp"
 
+#ifdef AETHER_HAVE_GPU
+#include "aether/gpu/ConjugateGradientSolverCuda.hpp"
+#include "aether/gpu/MomentumPredictorCuda.hpp"
+#endif
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 
 namespace aether::solver {
 
+// Real definition lives entirely here -- the only file that needs to know
+// which branch is real (see the header's own comment on GpuState). Both
+// branches keep the struct's role identical: a place to hold the two GPU
+// classes when they exist, empty otherwise.
+#ifdef AETHER_HAVE_GPU
+struct StaggeredCavityBase3D::GpuState {
+    std::unique_ptr<aether::gpu::ConjugateGradientSolverCuda> cg;
+    std::unique_ptr<aether::gpu::MomentumPredictorCuda> momentum;
+};
+#else
+struct StaggeredCavityBase3D::GpuState {};
+#endif
+
 StaggeredCavityBase3D::StaggeredCavityBase3D(std::size_t nx, std::size_t ny, std::size_t nz, double lengthX,
                                                double lengthY, double lengthZ, double viscosity,
-                                               double lidVelocity, ConvectionScheme convection)
+                                               double lidVelocity, ConvectionScheme convection, bool useGpu)
     : nx_(nx), ny_(ny), nz_(nz), lengthX_(lengthX), lengthY_(lengthY), lengthZ_(lengthZ),
       dx_(lengthX / static_cast<double>(nx)), dy_(lengthY / static_cast<double>(ny)),
       dz_(lengthZ / static_cast<double>(nz)), viscosity_(viscosity), lidVelocity_(lidVelocity),
       u_((nx + 1) * ny * nz, 0.0), v_(nx * (ny + 1) * nz, 0.0), w_(nx * ny * (nz + 1), 0.0),
-      p_(nx * ny * nz, 0.0), convection_(convection) {}
+      p_(nx * ny * nz, 0.0), convection_(convection) {
+    // gpuState_/gpuActive_ deliberately handled here in the body, not the
+    // initializer list: every other member is already fully constructed
+    // by this point, so there is no ordering constraint to reason about.
+    if (useGpu) {
+#ifdef AETHER_HAVE_GPU
+        try {
+            auto state = std::make_unique<GpuState>();
+            state->cg =
+                std::make_unique<aether::gpu::ConjugateGradientSolverCuda>(nx_, ny_, nz_, dx_, dy_, dz_);
+            state->momentum = std::make_unique<aether::gpu::MomentumPredictorCuda>(
+                nx_, ny_, nz_, lengthX_, lengthY_, lengthZ_, viscosity_, lidVelocity_);
+            if (state->cg->available() && state->momentum->available()) {
+                gpuState_ = std::move(state);
+                gpuActive_ = true;
+            } else {
+                std::fprintf(stderr,
+                              "StaggeredCavityBase3D: useGpu=true but no CUDA-capable device is available "
+                              "at runtime -- falling back to the CPU path.\n");
+            }
+        } catch (const std::exception& e) {
+            // The only way either GPU class's constructor throws is a
+            // cudaMalloc failure (e.g. grid too large for VRAM) -- "no
+            // device at all" sets available()==false and returns without
+            // throwing, handled by the branch above instead.
+            std::fprintf(stderr,
+                          "StaggeredCavityBase3D: useGpu=true but GPU initialization failed (%s) -- "
+                          "falling back to the CPU path.\n",
+                          e.what());
+        }
+#else
+        std::fprintf(stderr, "StaggeredCavityBase3D: useGpu=true but this build was compiled without CUDA "
+                              "support (AETHER_HAVE_GPU not defined) -- falling back to the CPU path.\n");
+#endif
+    }
+}
+
+StaggeredCavityBase3D::~StaggeredCavityBase3D() = default;
 
 double StaggeredCavityBase3D::schemeTransportValue(double centralValue, double convectingVelocity,
                                                     double near0, double near1, double far0,
@@ -172,6 +228,20 @@ double StaggeredCavityBase3D::maxDivergence() const {
 
 void StaggeredCavityBase3D::computeMomentumPredictor(std::vector<double>& uStar, std::vector<double>& vStar,
                                                        std::vector<double>& wStar, double dt) const {
+#ifdef AETHER_HAVE_GPU
+    if (gpuActive_) {
+        // eddyViscosity_ ? *eddyViscosity_ : {} matches
+        // MomentumPredictorCuda's own laminar convention exactly (empty ==
+        // nutAt() identically zero, the same "no field registered" case
+        // this class's own nutAt() already implements on the CPU side).
+        auto gpuResult = gpuState_->momentum->predict(
+            u_, v_, w_, eddyViscosity_ ? *eddyViscosity_ : std::vector<double>{}, dt);
+        uStar = std::move(gpuResult.uStar);
+        vStar = std::move(gpuResult.vStar);
+        wStar = std::move(gpuResult.wStar);
+        return;
+    }
+#endif
     // --- u-momentum: interior x-faces only (i in [1, nx-1]) ---
     for (std::size_t k = 0; k < nz_; ++k) {
         for (std::size_t j = 0; j < ny_; ++j) {
@@ -421,42 +491,54 @@ void StaggeredCavityBase3D::projectToDivergenceFree(std::vector<double>& uStar, 
         }
     }
 
-    std::vector<double> residual(n);
+#ifdef AETHER_HAVE_GPU
+    if (gpuActive_) {
+        // p_ is the warm start (previous step's converged pressure --
+        // exactly what the CPU path below also warm-starts from).
+        // Tolerance/iteration cap mirror the CPU loop's own hardcoded
+        // 1e-10 and `iteration < n` exactly.
+        auto gpuResult = gpuState_->cg->solve(rhs, p_, 1e-10, n);
+        p_ = std::move(gpuResult.pressure);
+    } else
+#endif
     {
-        const std::vector<double> operatorAppliedToP = applyLaplacian(p_);
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            residual[idx] = idx == 0 ? 0.0 : rhs[idx] - operatorAppliedToP[idx];
-        }
-    }
-    std::vector<double> direction = residual;
-    double residualDotResidual = dot(residual, residual);
-
-    for (std::size_t iteration = 0; iteration < n; ++iteration) {
-        if (std::sqrt(residualDotResidual) < 1e-10) {
-            break;
-        }
-        const std::vector<double> operatorAppliedToDirection = applyLaplacian(direction);
-        const double directionDotOperatorDirection = dot(direction, operatorAppliedToDirection);
-        if (directionDotOperatorDirection == 0.0) {
-            break;
-        }
-        const double alpha = residualDotResidual / directionDotOperatorDirection;
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            if (idx != 0) {
-                p_[idx] += alpha * direction[idx];
+        std::vector<double> residual(n);
+        {
+            const std::vector<double> operatorAppliedToP = applyLaplacian(p_);
+            for (std::size_t idx = 0; idx < n; ++idx) {
+                residual[idx] = idx == 0 ? 0.0 : rhs[idx] - operatorAppliedToP[idx];
             }
         }
-        std::vector<double> newResidual(n);
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            newResidual[idx] = idx == 0 ? 0.0 : residual[idx] - alpha * operatorAppliedToDirection[idx];
+        std::vector<double> direction = residual;
+        double residualDotResidual = dot(residual, residual);
+
+        for (std::size_t iteration = 0; iteration < n; ++iteration) {
+            if (std::sqrt(residualDotResidual) < 1e-10) {
+                break;
+            }
+            const std::vector<double> operatorAppliedToDirection = applyLaplacian(direction);
+            const double directionDotOperatorDirection = dot(direction, operatorAppliedToDirection);
+            if (directionDotOperatorDirection == 0.0) {
+                break;
+            }
+            const double alpha = residualDotResidual / directionDotOperatorDirection;
+            for (std::size_t idx = 0; idx < n; ++idx) {
+                if (idx != 0) {
+                    p_[idx] += alpha * direction[idx];
+                }
+            }
+            std::vector<double> newResidual(n);
+            for (std::size_t idx = 0; idx < n; ++idx) {
+                newResidual[idx] = idx == 0 ? 0.0 : residual[idx] - alpha * operatorAppliedToDirection[idx];
+            }
+            const double newResidualDotResidual = dot(newResidual, newResidual);
+            const double beta = newResidualDotResidual / residualDotResidual;
+            for (std::size_t idx = 0; idx < n; ++idx) {
+                direction[idx] = idx == 0 ? 0.0 : newResidual[idx] + beta * direction[idx];
+            }
+            residual = std::move(newResidual);
+            residualDotResidual = newResidualDotResidual;
         }
-        const double newResidualDotResidual = dot(newResidual, newResidual);
-        const double beta = newResidualDotResidual / residualDotResidual;
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            direction[idx] = idx == 0 ? 0.0 : newResidual[idx] + beta * direction[idx];
-        }
-        residual = std::move(newResidual);
-        residualDotResidual = newResidualDotResidual;
     }
 
     for (std::size_t k = 0; k < nz_; ++k) {

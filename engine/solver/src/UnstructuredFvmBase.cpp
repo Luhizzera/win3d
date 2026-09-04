@@ -484,6 +484,138 @@ std::size_t UnstructuredFvmBase::solveDeferredCorrection(std::vector<double>& x,
     return sweep;
 }
 
+std::vector<double> UnstructuredFvmBase::applyWeightedLaplacian(
+    const std::vector<double>& x, const std::vector<double>& interiorFaceWeight,
+    const std::vector<double>& boundaryFaceWeight, std::size_t pinnedCell) const {
+    // Unlike applyLaplacian's laplacianDiagonal_, the diagonal here depends
+    // on a weight that can change between calls (a conductivity field, not
+    // the mesh), so it is rebuilt every call rather than cached.
+    std::vector<double> diagonal(x.size(), 0.0);
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const double weighted = interiorFaceWeight[i] * face.coefficient;
+        diagonal[face.owner] += weighted;
+        diagonal[face.neighbour] += weighted;
+    }
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        if (!boundaryFaces_[i].entersOperator) {
+            continue;
+        }
+        diagonal[boundaryFaces_[i].cell] += boundaryFaceWeight[i] * boundaryFaces_[i].coefficient;
+    }
+
+    std::vector<double> result(x.size());
+    for (std::size_t cell = 0; cell < x.size(); ++cell) {
+        result[cell] = (cell == pinnedCell) ? x[cell] : diagonal[cell] * x[cell];
+    }
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const double weighted = interiorFaceWeight[i] * face.coefficient;
+        if (face.owner != pinnedCell) {
+            result[face.owner] -= weighted * x[face.neighbour];
+        }
+        if (face.neighbour != pinnedCell) {
+            result[face.neighbour] -= weighted * x[face.owner];
+        }
+    }
+    return result;
+}
+
+std::vector<double> UnstructuredFvmBase::weightedNonOrthogonalCorrection(
+    const std::vector<double>& field, const std::vector<double>& interiorFaceWeight,
+    const std::vector<double>& boundaryFaceWeight) const {
+    // Same construction as nonOrthogonalCorrection, with each face's flux
+    // scaled by its weight -- the non-orthogonal part of a diffusive flux
+    // obeys the same coefficient as the compact part it complements.
+    const std::vector<Vector3> gradients = computeCellGradients(field);
+
+    std::vector<double> correction(field.size(), 0.0);
+    for (std::size_t i = 0; i < interiorFaces_.size(); ++i) {
+        const InteriorFace& face = interiorFaces_[i];
+        const Vector3 averaged = averagedFaceGradient(face, gradients);
+        const double compactNormalDerivative = (field[face.neighbour] - field[face.owner]) / face.distance;
+        const Vector3 faceGradient =
+            averaged + face.unitD * (compactNormalDerivative - averaged.dot(face.unitD));
+        const double flux = interiorFaceWeight[i] * faceGradient.dot(face.nonOrthogonalArea);
+        correction[face.owner] += flux;
+        correction[face.neighbour] -= flux;
+    }
+    for (std::size_t i = 0; i < boundaryFaces_.size(); ++i) {
+        const BoundaryFace& face = boundaryFaces_[i];
+        if (!face.entersOperator) {
+            continue;
+        }
+        if (boundaryHasValue_[face.meshFace] == 0) {
+            continue;
+        }
+        const double prescribed = boundaryValueCache_[face.meshFace];
+        const Vector3& cellGradient = gradients[face.cell];
+        const double compactNormalDerivative = (prescribed - field[face.cell]) / face.distance;
+        const Vector3 faceGradient =
+            cellGradient + face.unitD * (compactNormalDerivative - cellGradient.dot(face.unitD));
+        correction[face.cell] += boundaryFaceWeight[i] * faceGradient.dot(face.nonOrthogonalArea);
+    }
+    return correction;
+}
+
+std::size_t UnstructuredFvmBase::solveWeightedDeferredCorrection(
+    std::vector<double>& x, const std::vector<double>& baseRhs,
+    const std::vector<double>& interiorFaceWeight, const std::vector<double>& boundaryFaceWeight,
+    std::size_t pinnedCell, std::size_t maxIterations, double tolerance, std::size_t maxOuterSweeps,
+    double& lastOuterChange, double& relaxation) const {
+    // Identical structure to solveDeferredCorrection -- same adaptive
+    // under-relaxation and divergence guard, see it for the reasoning --
+    // with the two calls it wraps swapped for their weighted counterparts.
+    const std::size_t n = x.size();
+    double bestChange = std::numeric_limits<double>::infinity();
+    constexpr double kMinimumRelaxation = 1.0 / 64.0;
+    std::size_t sweep = 0;
+    for (; sweep < maxOuterSweeps; ++sweep) {
+        const std::vector<double> correction =
+            weightedNonOrthogonalCorrection(x, interiorFaceWeight, boundaryFaceWeight);
+        std::vector<double> rhs(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            rhs[i] = baseRhs[i] + relaxation * correction[i];
+        }
+        if (pinnedCell != kNoPinnedCell) {
+            rhs[pinnedCell] = 0.0;
+        }
+
+        const std::vector<double> previous = x;
+
+        conjugateGradient(
+            [this, &interiorFaceWeight, &boundaryFaceWeight, pinnedCell](const std::vector<double>& v) {
+                return applyWeightedLaplacian(v, interiorFaceWeight, boundaryFaceWeight, pinnedCell);
+            },
+            rhs, x, maxIterations, tolerance);
+
+        double maxChange = 0.0;
+        double scale = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            maxChange = std::max(maxChange, std::fabs(x[i] - previous[i]));
+            scale = std::max(scale, std::fabs(x[i]));
+        }
+        lastOuterChange = maxChange;
+        if (maxChange < tolerance || maxChange < tolerance * scale) {
+            break;
+        }
+        bestChange = std::min(bestChange, maxChange);
+        if (!std::isfinite(maxChange) || maxChange > 10.0 * bestChange) {
+            if (relaxation > kMinimumRelaxation) {
+                relaxation *= 0.5;
+                bestChange = std::numeric_limits<double>::infinity();
+                continue;
+            }
+            throw std::runtime_error(
+                "UnstructuredFvmBase: the non-orthogonal deferred correction is diverging even "
+                "under-relaxed to 1/64 -- the per-sweep change keeps growing past ten times its "
+                "best value at every damping level tried. This is a property of the mesh, not of "
+                "the sweep cap: raising the cap makes it worse. See DIVIDA_TECNICA.md 3.3.");
+        }
+    }
+    return sweep;
+}
+
 double UnstructuredFvmBase::maxNonOrthogonality() const {
     double worst = 0.0;
     for (const InteriorFace& face : interiorFaces_) {

@@ -28,8 +28,10 @@ constexpr double kFloor = 1e-10;
 KOmegaSSTLidDrivenCavitySolver3D::KOmegaSSTLidDrivenCavitySolver3D(std::size_t nx, std::size_t ny,
                                                                      std::size_t nz, double lengthX,
                                                                      double lengthY, double lengthZ,
-                                                                     double viscosity, double lidVelocity)
-    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity),
+                                                                     double viscosity, double lidVelocity,
+                                                                     bool useGpu)
+    : StaggeredCavityBase3D(nx, ny, nz, lengthX, lengthY, lengthZ, viscosity, lidVelocity,
+                            ConvectionScheme::Central, useGpu),
       k_(nx * ny * nz, 0.0), omega_(nx * ny * nz, 0.0), nut_(nx * ny * nz, 0.0),
       production_(nx * ny * nz, 0.0), crossDiffusion_(nx * ny * nz, 0.0), sigmaK_(nx * ny * nz, kSigmaK2),
       sigmaOmega_(nx * ny * nz, kSigmaW2), beta_(nx * ny * nz, kBeta2), gamma_(nx * ny * nz, kGamma2) {

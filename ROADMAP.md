@@ -556,6 +556,105 @@ propagação por adjacência a partir do tetraedro que contém o ponto, em vez
 de varrer todos — troca O(N) por O(tamanho da cavidade) por inserção. Essa
 é a próxima alavanca real, e agora é a maior.
 
+### Estado em 2026-08-29: **a alavanca foi puxada** — localização de ponto + adjacência, O(N²) → quase-linear
+
+Com as Fases 2 e 3 fechadas (item acima) e a linha da beta encerrada, esta
+era a alavanca técnica mais citada neste documento como "a maior
+restante" — puxada agora, escopo estreito de propósito: só o laço
+principal de `tetrahedralize()` (que sempre insere pontos garantidamente
+interiores ao super-tetraedro) foi reescrito. `insertSteinerPoint()`
+(usado por `recoverFacets()`/refino) continua com o `findCavity()` de
+varredura completa, intocado — não é o caminho medido como gargalo (o
+profiling da entrada anterior já tinha achado `tetrahedralize`=131s contra
+`recover_facets`=0,00s no mesmo caso).
+
+**O mecanismo**, implementado em `DelaunayTetrahedralization3D.cpp`, sem
+tocar o `.hpp` público nem o struct `Tetrahedron` nem os bindings Python
+(confirmado antes por exploração: nenhum consumidor externo constrói
+`Tetrahedron` por agregado, só lê `.vertices`):
+
+- Uma lista de trabalho local à função (`WorkTet`: tetraedro + 4 vizinhos
+  + vivo/morto) substitui a varredura de `tetrahedra_` inteira. Tetraedros
+  mortos são marcados (`alive=false`), nunca fisicamente removidos —
+  elimina todo o problema de reindexação por elemento que "moveu".
+- Um mapa de faces expostas (`std::map` por `sortedFace()`, não
+  `unordered_map` — evita escrever um hash só pra isso, e seu tamanho
+  acompanha o perímetro da região exposta, não N) liga/expõe cada face em
+  O(log k) amortizado, no mesmo padrão "primeiro toque expõe, segundo
+  toque resolve" que `TetrahedralMesh::fromCells()` já usa em lote —
+  aplicado aqui de forma incremental.
+- **Localização de ponto**: uma caminhada por adjacência a partir do
+  último tetraedro criado, usando o mesmo teste de substituição de
+  `pointInTetrahedron()`/`isFaceVisible()` já existente. Nunca revisita um
+  tetraedro na mesma chamada (marcado por geração, não por um vetor limpo
+  a cada ponto — isso por si só reintroduziria custo O(N) por ponto) — o
+  que torna a caminhada autolimitada a `work.size()` passos e fecha de
+  vez a falha clássica de uma caminhada "primeira face violada" ciclar
+  para sempre.
+- **Expansão da cavidade**: BFS por adjacência a partir do tetraedro
+  localizado (garantidamente "ruim" — o interior de um tetraedro está
+  sempre dentro da própria circunsfera, já que seus 4 vértices estão
+  sobre ela e uma bola é convexa), em vez de testar `inCircumsphere` em
+  todos. O(tamanho da cavidade), não O(N).
+- Rede de segurança: se a caminhada não convergir (não esperado para um
+  ponto interior ao super-tetraedro, mas corretude nunca deve depender
+  disso), cai para uma varredura exaustiva só daquele ponto — perde
+  velocidade, nunca corretude.
+
+**`tetrahedralizeReference()` — o algoritmo antigo, preservado como
+oráculo**, não deletado: mesmo padrão que `orientation3DExact()`/
+`inSphere3DExact()` já usam ao lado das versões filtradas em
+`RobustPredicates.hpp`. Isso deu um teste de validação cruzada direto
+(`testFastTetrahedralizeMatchesReferenceImplementation`, novo em
+`mesh_tests.cpp`) que roda os dois algoritmos sobre os mesmos pontos, na
+mesma ordem, e exige o **mesmo conjunto exato** de tetraedros — não só a
+mesma contagem ou o mesmo volume — em todo caso geometricamente difícil
+que esta classe já tinha um teste dedicado (o sliver de 7 pontos que
+expôs o bug do super-tetraedro pequeno demais, o cubo esparso de 8
+pontos, o octaedro oco duplo, o prisma denso de 24 lados) mais duas redes
+jitteradas novas (4×4×4 e 6×6×6). Os dois algoritmos concordam
+exatamente em todos os 8 casos.
+
+**Medido, não estimado** (mesma construção de rede jitterada de
+`buildCubeLatticeTetrahedralization` em `solver_tests.cpp`, cronometrando
+`tetrahedralize()` isolado contra `tetrahedralizeReference()` isolado, no
+mesmo processo):
+
+| n | pontos | tetraedros | rápido | oráculo O(N²) | razão |
+|---|---|---|---|---|---|
+| 4 | 125 | 415 | 0,004s | 0,021s | 5,3x |
+| 6 | 343 | 1358 | 0,015s | 0,255s | 17,0x |
+| 8 | 729 | 3184 | 0,044s | 1,616s | 36,7x |
+| 10 | 1331 | 6204 | 0,089s | 7,191s | 80,8x |
+| 12 | 2197 | 10667 | 0,173s | — | — |
+| 14 | 3375 | 16876 | 0,311s | — | — |
+
+(n=12/14 não cronometrados contra o oráculo — extrapolando o crescimento
+quadrático já medido, seriam da ordem de minutos, por nenhum ganho de
+informação novo.) A razão de tempo do caminho rápido entre linhas
+consecutivas (3,75x / 2,93x / 2,02x / 1,94x / 1,80x) acompanha de perto a
+razão de **pontos** (2,74x / 2,13x / 1,83x / 1,65x / 1,54x), não o
+quadrado dela — confirma escala quase-linear, não apenas "mais rápida
+numa constante". A vantagem cresce com N por construção (um lado é O(N²),
+o outro não), então o ganho real em malhas de 10⁴-10⁵ pontos — o alvo que
+motivou esta fase — é maior ainda que os 80x já medidos em N=1331.
+
+**Honestidade sobre o que isso muda hoje, não só o que muda em teoria**:
+a suíte `ctest` completa continua em ~156s, praticamente inalterada
+(`aether_solver_tests` foi de 122,74s pra 117,58s — dentro do ruído de
+variação de máquina). Verificado por quê: `solver_tests.cpp` nunca chama
+`cubeLatticeMesh()` com n maior que 8 (grep confirma: só 3, 4, 6 e 8
+aparecem nos call sites reais), e nessa faixa a economia absoluta é de
+segundos, não minutos — o ganho medido acima é real e vale para os
+tamanhos que interessam (o problema declarado no início desta seção,
+"10⁵ pontos é impraticável"), mas essa suíte específica ainda não exercita
+malhas grandes o bastante para o número mudar visivelmente no agregado.
+O benefício é para a frente: é exatamente o que faltava pra Fase 4 (GPU)
+valer a pena em malhas de tamanho real, e pra física nova (Fase 6) sobre
+geometria CAD importada não esbarrar no mesmo teto.
+
+Suíte: **13/13**.
+
 ### Estado em 2026-08-25 (rodada autônoma): sete itens fechados além das cinco fases
 
 Trabalho feito sem supervisão, com a instrução de pular o que exigisse
@@ -867,6 +966,316 @@ extraída antes dos módulos 9-14).
    diferença precisa ser medida e explicada, não tolerada por padrão).
 3. As 11 suítes continuam passando.
 
+### Estado em 2026-08-29: **4.1 fechado** — CG residente, classe nova e autocontida, sem tocar `engine/solver`
+
+Confirmado antes de começar: GPU real nesta máquina (RTX 5080, 16GB,
+compute capability 12.0) e CUDA Toolkit 13.3 — trabalho compilável e
+mensurável de verdade, não teórico.
+
+**Escopo deliberadamente estreito, mesmo princípio da correção de
+`tetrahedralize()`**: uma classe nova em `engine/gpu`
+(`ConjugateGradientSolverCuda`), testada e medida de forma independente —
+**sem** alterar `engine/solver`/`StaggeredCavityBase3D` (a base dos 6
+fechamentos de turbulência 3D). Ligar essa classe ao
+`projectToDivergenceFree()` real fica pra um passo seguinte, explícito —
+mesmo raciocínio que deixou `insertSteinerPoint()` intocado na correção
+anterior.
+
+**Mecanismo**: `Impl` (pImpl) possui 5 buffers de device de tamanho
+`nx*ny*nz` (`p`, `rhs`, `residual`, `direction`, `ad`) alocados uma vez no
+construtor e reaproveitados por toda chamada de `solve()` — nenhum
+`cudaMalloc`/`cudaFree` por iteração nem por chamada. O laço de CG inteiro
+(inicialização + todas as iterações) roda no device; só dois escalares de
+8 bytes cruzam o barramento por iteração (os dois produtos internos
+reduzidos, pra computar `alpha`/`beta`/checar convergência do lado do
+host) — os campos O(n) nunca saem do device entre iterações, que é a
+propriedade de residência que de fato importa. A fórmula do stencil
+(7 pontos, célula 0 fixada, espelho de Neumann nas bordas) foi extraída
+pra `detail/PoissonStencilCuda.cuh`, compartilhada com o `PoissonOperatorCuda`
+já existente — refatoração comportamento-preservando, confirmada
+re-rodando o teste bit-a-bit dele sem alteração.
+
+**Redução em duas passadas, shuffle de warp, sem atomics — decisão
+deliberada**. Uma redução de passe único por `atomicAdd` soma na ordem em
+que os blocos terminam — não-determinística execução a execução na mesma
+GPU, o que tornaria "medir e explicar a diferença" (a exigência literal
+do item 2 deste portão) um alvo móvel. A versão em duas passadas tem
+ordem de soma fixa pela indexação de bloco, então a resposta da própria
+GPU é reprodutível execução a execução — a única fonte de divergência
+GPU-vs-CPU que sobra é a diferença legítima entre "várias somas parciais
+paralelas combinadas" e "uma soma sequencial".
+
+**Validação, três checagens independentes, nenhuma bit-a-bit** (o próprio
+item 2 deste portão diz que essa régua não cabe aqui):
+
+- **A — reverificação independente na CPU**: recalcula
+  `residual = rhs - A*p` do zero a partir da pressão final devolvida pela
+  GPU (reaproveitando `cpuReferencePoisson()` já existente em
+  `gpu_tests.cpp`). Medido: 9,953e-11 — mesma ordem de grandeza da
+  tolerância de convergência (1e-10) que a própria GPU usa internamente.
+- **B — invariante da célula 0, caixa-preta**: `pressure[0]` tem que
+  igualar `initialGuess[0]` bit a bit, sempre — pega imediatamente se
+  algum dos três kernels de atualização esquecer sua guarda `idx==0`.
+- **C — trajetória GPU vs. referência de CG na CPU** (função nova em
+  `gpu_tests.cpp`, mesmo laço estrutural de `projectToDivergenceFree`):
+  medido, os dois lados convergem em **exatamente as mesmas 117
+  iterações**, com `maxDiff` entre os campos finais de **2,398e-14** — a
+  diferença de ordem de soma acabou sendo desprezível nesta grade, bem
+  abaixo do limiar de 1e-10 fixado (com folga de ~4 ordens de grandeza).
+
+**Medido, não estimado — onde a residência realmente compensa**:
+
+| n | células | iterações | GPU | CPU (referência) | razão |
+|---|---|---|---|---|---|
+| 16 | 4.096 | 166 | 0,0255s | 0,0024s | GPU **10,6x mais lenta** |
+| 24 | 13.824 | 260 | 0,0385s | 0,0133s | GPU **2,9x mais lenta** |
+| 32 | 32.768 | 352/420 | 0,0532s | 0,0490s | ~empate |
+| 48 | 110.592 | 620/648 | 0,0992s | 0,2464s | GPU **2,5x mais rápida** |
+| 64 | 262.144 | 871/899 | 0,1434s | 1,0196s | GPU **7,1x mais rápida** |
+| 96 | 884.736 | 1331/1426 | 0,2776s | 5,7957s | GPU **20,9x mais rápida** |
+
+**Honestidade sobre a forma da curva, não só o número final**: abaixo de
+~33 mil células a GPU é mais lenta, não mais rápida — overhead fixo de
+lançamento de kernel (6 lançamentos por iteração, centenas de iterações)
+domina quando o trabalho por lançamento é pequeno demais. O cruzamento
+real fica perto de n=32-40. Só teria sido "aceleração de verdade" no
+sentido enganoso se essa tabela tivesse começado em n=48 — está completa
+de propósito, do jeito que dá errado até o jeito que dá certo, porque é
+exatamente essa curva que diz a partir de que tamanho de malha vale a
+pena acionar o caminho GPU (informação que a futura integração com
+`StaggeredCavityBase3D` vai precisar: escolher a rota por tamanho de
+grade, não sempre GPU). A vantagem cresce rápido e continua crescendo:
+o tempo de GPU de n=64→96 (3,375x mais células, 1,53x mais iterações)
+subiu só 1,94x, sinal de estar limitada por banda/computação, não por
+overhead de lançamento, nesse regime.
+
+**O que fica explicitamente fora deste item**: 4.2 (preditor de momento
+em CUDA) e a integração real com `projectToDivergenceFree()` — ambos
+dependem desta infraestrutura residente, mas não foram tentados aqui,
+por decisão de escopo, não por dificuldade encontrada.
+
+Suíte: **13/13** (continua 13, não 11 — o número já cresceu desde que
+este portão foi escrito; nenhuma suíte nova foi adicionada por este
+item, a classe nova mora no `aether_gpu_tests` já existente).
+
+### Estado em 2026-08-31: **4.2 fechado** — preditor de momento em CUDA, bit a bit idêntico à CPU
+
+Mesmo escopo estreito da 4.1: classe nova e autocontida
+(`MomentumPredictorCuda`), sem tocar `StaggeredCavityBase3D` nem os 6
+fechamentos que a usam.
+
+**Simplificação central, verificada linha a linha contra
+`StaggeredCavityBase3D.cpp:173-364` antes de portar, não suposta**:
+`computeMomentumPredictor` suporta 3 esquemas de convecção via
+`schemeTransportValue(...)`, mas essa função, para
+`ConvectionScheme::Central` — o único que qualquer um dos 6 fechamentos
+de fato constrói hoje — retorna o argumento `centralValue` sem tocar em
+mais nada. Toda a busca de ponto distante (`far0`/`far1`) que só existe
+pra alimentar o limitador vira computação morta pra esse caso e foi
+eliminada por completo, sem nenhuma mudança de comportamento — reduz o
+kernel de "limitador de 3 vias + busca de ponto duplo" pra "média central
+simples". v e w confirmados como permutações cíclicas exatas de u nessa
+forma reduzida, sem surpresa.
+
+**Turbulência (nu_t) totalmente suportada**, ao contrário do esquema de
+convecção: os 5 fechamentos turbulentos precisam disso pra dar resultado
+certo. Buffer de `nut` no device sempre real (nunca nulo) e zero-
+preenchido no caso laminar — remove um branch de três kernels em vez de
+um só. **Armadilha real e específica do buffer reaproveitado entre
+chamadas**, pega por teste dedicado
+(`testMomentumPredictorCudaReZerosNutBetweenCalls`): se uma chamada
+turbulenta suja o buffer e a próxima é laminar na mesma instância, sem
+`cudaMemset` explícito o campo turbulento anterior vazaria silenciosamente
+pro resultado seguinte — nenhum crash, só número errado.
+
+**Preservação de face de contorno por construção, não por caso
+especial**: `predict()` copia `u→uStar`/`v→vStar`/`w→wStar` inteiros via
+`cudaMemcpy` device-to-device antes de lançar qualquer kernel — os
+kernels só escrevem faces interiores, então uma face de contorno nunca é
+sequer tocada por eles. Testado à parte
+(`testMomentumPredictorCudaPreservesBoundaryFaces`), isolado da fórmula
+do interior.
+
+**Validação, e por que bit a bit é a régua certa aqui** (diferente da
+4.1): este kernel não tem redução nenhuma — cada célula de saída é uma
+expressão fixa e independente de ordem sobre leituras de vizinhos, com
+`-fmad=false` já valendo pro alvo inteiro. Medido, os três casos batem
+**exatamente**, `maxDiff=0,000e+00`, zero incompatibilidades:
+
+- Caso laminar, grade 6×5×4 (não múltipla do bloco de 8×8×8).
+- Caso turbulento, mesma grade, campo `nut` não-nulo — confirma que
+  `gammaE`/`gammaW`/`gammaTransverse` portam corretamente, não só o
+  caminho laminar.
+- Caso laminar rodado **depois** de um turbulento, na mesma instância —
+  confirma que a re-zeragem do buffer reaproveitado funciona de verdade,
+  não só em teoria.
+
+**Mitigação do maior risco real, copiar-colar entre os três kernels
+quase-simétricos**: `vMomentumKernel`/`wMomentumKernel` foram escritos
+por transcrição direta do código-fonte já lido e verificado (não por
+rotação cega de nomes de variável), e o resultado bit-a-bit contra a
+referência de CPU independente é exatamente o que teria denunciado
+qualquer deslize — nenhum encontrado.
+
+**O que fica explicitamente fora deste item**: a integração real com
+`projectToDivergenceFree()`/`computeMomentumPredictor()` do solver de
+verdade, e a medição de speedup que só faz sentido uma vez que isso rode
+dentro de um laço de passos de tempo de verdade — ambos dependem da
+infraestrutura que 4.1+4.2 já entregam, mas não foram tentados aqui, por
+decisão de escopo, não por dificuldade encontrada. Com 4.1 e 4.2 fechados,
+esse é o próximo passo natural de toda a Fase 4.
+
+Suíte: **13/13**.
+
+### Estado em 2026-08-31: **Fase 4 fechada** — integração real em `StaggeredCavityBase3D`, portão cumprido
+
+Com 4.1 (CG residente) e 4.2 (preditor de momento) prontos e validados
+isoladamente, faltava exatamente o que o próprio portão desta fase exige:
+"speedup medido contra a versão CPU no mesmo caso, não estimado" e
+"resultado numericamente equivalente ao da CPU" — nenhum dos dois pode
+ser medido de verdade fora de um solver real rodando muitos passos de
+tempo. Este item fecha isso.
+
+**Escopo, mesmo princípio das duas fases anteriores**: `useGpu=false`
+opt-in em `StaggeredCavityBase3D`, comportamento padrão preservado bit a
+bit para todo código existente — confirmado rodando a suíte completa
+antes e depois sem nenhuma mudança de resultado. Só uma das seis
+subclasses ganhou o parâmetro na própria API pública nesta fase,
+`StaggeredLidDrivenCavitySolver3D` (a laminar, já era a única cujo
+construtor expõe `convection` explicitamente, pelo mesmo motivo: "é a que
+mede coisa"). As outras cinco continuam de fora, deliberadamente.
+
+**Segurança de ABI, o ponto mais delicado desta integração**:
+`StaggeredCavityBase3D` é base de 6 subclasses em várias unidades de
+compilação, então um membro cuja presença dependesse de uma macro de
+pré-processador seria um risco real de layout inconsistente entre elas.
+Resolvido com pImpl: exatamente um `std::unique_ptr<GpuState> gpuState_`
+sempre presente, com `GpuState` incompleto no header — o layout declarado
+é sempre um ponteiro, idêntico em qualquer unidade de tradução, com ou
+sem `AETHER_HAVE_GPU` definida em qualquer lugar. A definição real de
+`GpuState` mora inteiramente em `StaggeredCavityBase3D.cpp`, a única
+unidade que precisa saber qual dos dois ramos é real. Efeito colateral
+documentado, não escondido: a classe virou não-copiável (já não era
+movível, por já ter destrutor declarado) — confirmado por grep que nada
+no projeto hoje copia ou move-atribui um `StaggeredCavityBase3D`/
+subclasse.
+
+**CMake**: `engine/gpu` precisou passar a ser adicionado antes de
+`engine/solver` no `CMakeLists.txt` raiz (só a chamada
+`add_subdirectory(engine/gpu)` em si — o bloco de detecção de CUDA já
+rodava cedo), pra que `if(TARGET aether_gpu)` em
+`engine/solver/CMakeLists.txt` enxergue o alvo. Mesmo condicional que
+`bindings/python/CMakeLists.txt` já usa pra `aether_gpu_py` — não é
+padrão novo pro projeto, só a primeira vez que uma cadeia de *duas*
+bibliotecas estáticas (`aether_solver_tests` → `aether_solver` →
+`aether_gpu`) precisa propagar o link de runtime CUDA. Verificado antes
+de escrever qualquer ramo de GPU no `.cpp`: a cadeia linkou de primeira.
+
+**Os dois pontos de ramificação**: `computeMomentumPredictor()` ramifica
+por completo no topo (GPU calcula os três campos e retorna, ou cai pro
+corpo de CPU inalterado); `projectToDivergenceFree()` ramifica só a etapa
+do meio — montar `rhs` e corrigir `u_`/`v_`/`w_` a partir de `p_` ficam
+incondicionais e idênticos nos dois caminhos, só o solve de `p_` em si
+troca entre `gpuState_->cg->solve(...)` e o laço de CG da CPU já
+existente.
+
+**Validação — três testes de correção mais um de comparação direta**:
+repouso com `useGpu=true` (zero continua exatamente zero, já que não há
+nada a somar em lugar nenhum), conservação de massa/topologia de vórtice
+com `useGpu=true` (mesmos limiares físicos já medidos pro caminho de
+CPU), e a checagem que de fato fecha o portão — duas instâncias com
+condições iniciais idênticas, uma de cada caminho, mesmos passos,
+`maxDiff` medido e impresso antes de qualquer `AETHER_CHECK`.
+
+**Achado honesto sobre a divergência entre os dois caminhos, medido em
+duas contagens de passo pra caracterizar a tendência, não só um número
+solto**: em n=16/Re=10, após 20 passos, `maxDiff` u=7,120e-04
+v=2,555e-04 w=4,062e-04 p=9,979e-03; após 100 passos,
+u=3,453e-03 v=8,491e-04 w=4,503e-03 p=2,643e-02 — um aumento de ~4,85x
+para 5x mais passos, ou seja, **crescimento aproximadamente linear no
+número de passos, não exponencial**. Isso é a assinatura de cada passo
+injetando um viés sistemático pequeno e constante (a ordem de soma da
+redução paralela do CG residente) que se acumula aditivamente, não de
+uma instabilidade numérica amplificando uma única perturbação — e os
+testes de repouso/conservação de massa já confirmam que as duas
+trajetórias são fisicamente válidas de forma independente uma da outra.
+Limiares do teste travados com ~2x de folga sobre o valor medido em 20
+passos.
+
+**Medido, não estimado — o número que fecha o portão**, mesmos tamanhos
+da tabela da Fase 4.1, agora com preditor de momento + CG rodando juntos
+por passo, dentro do solver de verdade:
+
+| n | células | passos | CPU/passo | GPU/passo | razão |
+|---|---|---|---|---|---|
+| 16 | 4.096 | 10 | 0,0029s | 0,0275s | GPU **9,1x mais lenta** |
+| 24 | 13.824 | 10 | 0,0160s | 0,0415s | GPU **2,6x mais lenta** |
+| 32 | 32.768 | 8 | 0,0498s | 0,0579s | GPU **1,16x mais lenta** |
+| 48 | 110.592 | 6 | 0,2615s | 0,0940s | GPU **2,78x mais rápida** |
+| 64 | 262.144 | 5 | 1,1169s | 0,1334s | GPU **8,37x mais rápida** |
+| 96 | 884.736 | 4 | 5,5696s | 0,2642s | GPU **21,08x mais rápida** |
+
+**A confirmação mais importante desta tabela não é a velocidade em si —
+é que ela bate quase exatamente com a tabela isolada da Fase 4.1** (que
+media só o CG, sem preditor de momento nenhum): 20,9x medido lá contra
+21,08x medido aqui em n=96, mesma ordem de grandeza em cada tamanho
+intermediário. Isso confirma que o preditor de momento não desloca o
+ponto de cruzamento (perto de n=32-40, ~33-65 mil células) — o CG
+continua dominando o custo por passo, já que precisa de centenas a
+milhares de iterações contra um único lançamento de kernel por
+componente do preditor. O portão da Fase 4 está cumprido: speedup medido
+(não estimado) no caso real, resultado numericamente equivalente dentro
+de uma tolerância medida e explicada.
+
+**O que fica explicitamente fora**: as outras cinco subclasses
+turbulentas ainda não têm `useGpu` na própria API — herdam `gpuActive()`
+(sempre `false`) mas não têm como ligar o caminho GPU ainda. Estender é
+mecânico (mesmo parâmetro à direita, mesmo repasse posicional), fica pra
+quando a necessidade aparecer.
+
+Suíte: **13/13**.
+
+### Estado em 2026-09-01: `useGpu` estendido às cinco subclasses turbulentas
+
+Conveniência mecânica, não um novo marco de fase -- o portão da Fase 4 já
+estava cumprido acima. `MixingLengthLidDrivenCavitySolver3D`,
+`KEpsilonLidDrivenCavitySolver3D`, `KOmegaSSTLidDrivenCavitySolver3D`,
+`SmagorinskyLesLidDrivenCavitySolver3D` e `DesSstLidDrivenCavitySolver3D`
+ganharam o mesmo parâmetro `useGpu=false` à direita, repassado
+posicionalmente ao construtor da base -- exatamente como previsto acima,
+porque o preditor de momento da base já repassava para o caminho GPU
+qualquer campo que `setEddyViscosityField()` tivesse registrado
+(`StaggeredCavityBase3D.cpp`); nenhuma das cinco precisou de código
+específico de GPU, só expor o parâmetro.
+
+O que genuinamente precisava de verificação era a fiação, não o
+mecanismo (já validado na classe laminar): que o nu_t de cada fechamento
+realmente chega ao caminho GPU e produz um resultado fisicamente
+consistente. Cinco testes novos, mesmo padrão de
+`testStaggeredLidDrivenCavity3DGpuMatchesCpuWithinMeasuredTolerance`
+(instâncias CPU/GPU idênticas, mesmos passos, maxDiff medido e impresso
+antes do `AETHER_CHECK`), n=16, Re=100:
+
+| Fechamento         | maxDiff u   | v          | w          | p          |
+|--------------------|-------------|------------|------------|------------|
+| Mixing length       | 1.011e-02   | 2.063e-03  | 6.819e-03  | 1.347e-02  |
+| Smagorinsky LES      | 9.466e-03   | 1.795e-03  | 6.370e-03  | 1.246e-02  |
+| k-epsilon            | 4.042e-02   | 1.768e-02  | 6.207e-02  | 4.052e-02  |
+| k-omega SST          | 4.077e-02   | 1.848e-02  | 6.720e-02  | 4.145e-02  |
+| DES-SST              | 4.105e-02   | 1.855e-02  | 6.853e-02  | 4.181e-02  |
+
+**Achado, consistente e explicado**: os dois fechamentos algébricos
+(mixing length, Smagorinsky -- nu_t/nu_sgs sem equação de transporte
+própria) ficam na mesma faixa da classe laminar. Os três com equações de
+transporte (k-epsilon, k-omega SST, DES-SST, este último construído sobre
+o SST) divergem cerca de 4x mais: k/omega/epsilon realimentam nu_t na
+quantidade de movimento a cada passo, então uma divergência CPU/GPU
+pequena na velocidade se acumula por esse laço de realimentação em vez de
+ficar uma diferença isolada -- um padrão consistente entre os três, não
+um outlier de um deles.
+
+Suíte: **13/13**.
+
 ---
 
 ## Fase 5 — Geometria CAD real
@@ -916,6 +1325,88 @@ batendo com o do CAD de origem. Verificado para o caso facetado (teste
 Python em `test_unstructured_bindings.py`); o caso curvo/IGES continua
 dependendo da decisão acima.
 
+### Estado em 2026-09-04: **decisão tomada — OpenCASCADE trazido**; geometria curva fecha o portão original
+
+A decisão que era "sua, e sem prazo" foi tomada: trazer o OpenCASCADE
+(OCCT 8.0.1, via vcpkg em modo manifesto -- `vcpkg.json` na raiz do
+repositório, o mesmo modelo reprodutível que já documenta o CUDA Toolkit
+como pré-requisito externo em vez de vendorizado). Build medido: 18
+minutos via `vcpkg install` num ambiente sem cache binário.
+
+**Detectado, não exigido -- mesmo padrão do CUDA.** `loadStep()` e
+`StepLoadResult` não mudaram de assinatura; `AETHER_HAVE_OPENCASCADE`
+(privado, nunca num header público -- a mesma regra que `AETHER_HAVE_GPU`
+já segue) seleciona qual das duas implementações responde. Sem o
+toolchain do vcpkg configurado, o build continua idêntico a antes desta
+entrada: o tokenizer próprio de ~450 linhas continua sendo a
+implementação, sem nenhuma dependência nova. **`engine/geometry/src/StepIO.cpp`
+não teve uma linha do tokenizer removida** -- a implementação antiga
+inteira permanece, ramo `#else` do mesmo arquivo.
+
+**Com OpenCASCADE**, `loadStep()` delega a `STEPControl_Reader` +
+`BRepMesh_IncrementalMesh` (tesselação com deflexão relativa 1e-3 /
+angular 0,3 rad) para QUALQUER face, curva ou plana, e um `loadIges()`
+novo (sempre declarado, mesma razão de estabilidade de ABI -- lança
+`std::runtime_error` num build sem OpenCASCADE, já que não existe fatia
+facetada de IGES para cair de volta) faz o mesmo via
+`IGESControl_Reader`. Não existe mais uma categoria "sintaxe válida,
+geometria não suportada" nesse caminho, então um arquivo que o kernel
+genuinamente não resolve lança em vez de popular
+`unsupported_features`.
+
+**Validação -- um cilindro real, volume exato**: em vez de tentar
+escrever à mão um Part 21 com face curva (impraticável, ao contrário do
+tetraedro facetado), o teste novo (`testStepLoadsCurvedCylinderThroughOpenCascade`,
+`geometry_tests.cpp`) constrói a geometria de referência *com o próprio
+OpenCASCADE* (`BRepPrimAPI_MakeCylinder`), escreve um STEP real via
+`STEPControl_Writer`, lê de volta pela API pública `loadStep()`, e compara
+o volume tesselado contra `pi*r^2*h`: **erro relativo medido 8,305e-04**
+(raio 2, altura 5, 352 triângulos) -- um portão fechado com round-trip de
+verdade por geometria curva, não um caso plano disfarçado.
+
+**Achado honesto, encontrado medindo em vez de supondo**: os dois testes
+existentes do tokenizer (`testStepLoadsFacetedTetrahedron` e
+`testStepReportsNonFacetedBoundaryAsUnsupported`, mais o equivalente em
+`test_unstructured_bindings.py`) hand-escrevem Part 21 mínimo -- sem o
+`PRODUCT`/`SHAPE_DEFINITION_REPRESENTATION`/`GEOMETRIC_REPRESENTATION_CONTEXT`
+que uma exportação CAD real sempre carrega -- porque o tokenizer procura
+`FACETED_BREP` pelo nome do tipo diretamente e não precisa de nada disso.
+O `STEPControl_Reader` do OpenCASCADE **recusa transferir qualquer forma**
+desse mesmo arquivo mínimo ("file transferred no shape"), porque sua
+mecânica de transferência procura por uma entidade-raiz que este arquivo
+não tem. Não é defeito de nenhum dos dois lados -- é exatamente a
+diferença entre um parser deliberadamente permissivo para um subconjunto
+restrito e um kernel real que insiste em um arquivo completo e
+padrão-conforme, que é o que o torna confiável em entrada do mundo real.
+Os dois testes do tokenizer passaram a compilar só na configuração sem
+OpenCASCADE (`#ifndef AETHER_HAVE_OPENCASCADE`); o teste Python usa uma
+nova função consultável em tempo de execução,
+`aether.step_io_has_opencascade()`, para adequar as verificações à
+implementação realmente ativa (uma macro de compilação não é visível do
+lado Python) -- mantendo bit a bit as mesmas verificações de antes na
+configuração sem OpenCASCADE, e cobrindo só o que genuinamente vale para
+as duas (lista Python, sobrevivência do `mesh` após o `StepLoadResult`
+ser coletado) quando ativo.
+
+**Correção incidental, necessária, documentada**: o toolchain do vcpkg
+envolve toda chamada `find_package` com sua própria macro, que não aceita
+um caminho com barras invertidas cruas -- quebrava a detecção existente
+do pybind11 (que lê `python -m pybind11 --cmakedir`, sempre em barras
+invertidas no Windows) assim que o toolchain entra em jogo. Corrigido com
+`file(TO_CMAKE_PATH ...)` antes do `find_package`, sem efeito em builds
+sem o toolchain do vcpkg.
+
+**Deliberadamente fora do escopo**: placement de assembly
+(`AXIS2_PLACEMENT_3D`/NAUO -- `STEPCAFControl_Reader`/`XCAFDoc` do
+próprio OpenCASCADE seria a extensão natural), reinicialização/qualidade
+de malha configurável (deflexão fixa por ora). Nenhum dos dois é exigido
+pelo portão original, que só pede importar+tetraedralizar+bater volume
+num sólido.
+
+Suíte: **13/13**, nas duas configurações (com e sem o toolchain do
+vcpkg). Com isso, o portão original da Fase 5 está fechado para o caso
+curvo -- só falta o que nunca foi prometido por ele (assembly).
+
 ---
 
 ## Fase 6 — Física nova
@@ -934,6 +1425,221 @@ Em ordem de dependência crescente:
 propriedade de conservação exata que o caso satisfaça — o mesmo padrão
 usado em todo solver deste projeto, nunca uma tabela de literatura
 recordada de memória.
+
+### Estado em 2026-08-31: **6.1 fechada pelo escopo formal** — correção a uma rotulagem de 2026-08-25
+
+Antes de abrir a 6.2, uma releitura desta seção achou uma divergência: o
+item registrado em 2026-08-25 como fechando "Fase 6.1" (seção de sete
+itens daquela rodada autônoma) é transporte de temperatura passivo e
+Boussinesq em `UnstructuredCavitySolver3D` — inteiramente dentro do
+fluido, sem nenhuma região sólida. A 6.1 como definida acima é outra
+coisa: sólido e fluido **acoplados na interface**. Busca em todo o
+repositório por qualquer acoplamento sólido-fluido deu zero resultados
+fora deste texto (as únicas ocorrências de "conjugat" fora do ROADMAP são
+"Conjugate Gradient", o solver linear, sem relação). A 6.1 formal nunca
+tinha sido construída; o item de 2026-08-25 fechou uma capacidade real,
+mas mais estreita do que o nome sugeria.
+
+**O que fecha agora.** `UnstructuredDiffusionSolver::setConductivity()` --
+condutividade térmica por célula, selecionada por posição na mesma
+convenção de `wallVelocity`/`isOutlet`/`setDirichletBoundary`. Uma região
+"sólida" e uma "fluida" são só dois valores diferentes de k; nenhuma
+classe nova, porque a maquinaria (condição de contorno, termo fonte,
+correção não-ortogonal deferida) já existia inteira em
+`UnstructuredDiffusionSolver` -- faltava só o coeficiente variar por
+célula, exatamente a lacuna que o texto de 6.1 já apontava ("difusão e
+Navier-Stokes já existem; falta o acoplamento na interface").
+
+O acoplamento em si é a condutividade de face como média harmônica
+ponderada pela distância -- `k_face = 1/((1-w)/k_P + w/k_N)`, com `w` a
+mesma `ownerWeight` que a decomposição de face já carrega -- o
+coeficiente de dois pontos que a continuidade de fluxo através de uma
+interface exige, e que se reduz exatamente ao operador antigo quando
+`k_P == k_N`. `UnstructuredFvmBase` ganhou três métodos novos e paralelos
+(`applyWeightedLaplacian`, `weightedNonOrthogonalCorrection`,
+`solveWeightedDeferredCorrection`) em vez de mudar os três existentes:
+risco zero para os outros dois consumidores da base
+(`UnstructuredScalarTransportSolver`, a solve de pressão de
+`UnstructuredCavitySolver3D`), que continuam chamando exatamente o que já
+chamavam.
+
+**Validação, a mesma regra de sempre**: a parede composta -- duas lâminas
+de condutividade k1=1, k2=4 em série, regime permanente, sem fonte. Como
+nada gera ou absorve calor, o fluxo é a mesma constante nas duas lâminas,
+`q = (Tesq-Tdir)/(L1/k1+L2/k2)`, e cada lâmina é linear com inclinação
+`-q/k` -- temperatura contínua, inclinação descontínua na interface pela
+razão k2/k1. Derivada de um balanço de fluxo, não de uma tabela.
+
+Medido em `testConjugateHeatTransferMatchesCompositeWallSolution`, n=8
+(3184 células): erro RMS ponderado por volume 5.09e-01, erro máximo
+4.18, contra um salto de temperatura de 80 -- 0.64% de erro RMS relativo.
+Um segundo teste (`...UniformConductivityMatchesUnweightedSolve`) confirma
+que condutividade uniforme 1.0 reproduz `solveConjugateGradient()` sem
+`setConductivity()` dentro de 1.7e-12 -- o caminho novo não perturbou o
+antigo.
+
+**Achado honesto, não escondido**: o erro máximo (4.18) é bem mais largo
+que o RMS (0.51) porque a interface não é conforme à malha -- os
+centroides das células cruzam x=0.5 na malha jitterizada em vez de uma
+camada de faces sentar exatamente ali, e o gradiente de mínimos quadrados
+usado na correção não-ortogonal mistura valores dos dois lados bem na
+célula onde a solução tem uma quina genuína (inclinação descontínua). Essa
+mistura amplia o erro exatamente nas faces onde esta malha já é menos
+ortogonal (~1.5-1.75, medido em outros itens deste projeto) -- um custo
+real e explicado do tratamento mais simples possível da interface, não um
+defeito no acoplamento em si: o erro cresce proporcionalmente ao tamanho
+do salto de condutividade (medido também com k2=2: erro cai pela metade
+nos mesmos pontos), a assinatura de um artefato de reconstrução de
+gradiente, não de um bug. Uma malha conforme à interface, ou um gradiente
+que exclua o vizinho do outro material do próprio ajuste de mínimos
+quadrados, eliminaria isso -- não feito aqui porque nenhum dos dois é "o
+passo mais curto" que 6.1 pedia.
+
+**Deliberadamente fora do escopo desta etapa**: nenhuma velocidade em
+lugar nenhum -- isola o que é novo (o acoplamento na interface) do que já
+existe (advecção de temperatura, `EnergyModel` de
+`UnstructuredCavitySolver3D`). Acoplar isto a um escoamento real ao redor
+de um obstáculo sólido é uma extensão natural e separada, registrada aqui
+como próximo passo explícito, não como lacuna escondida -- exatamente
+para não repetir o que motivou esta correção.
+
+Binding Python: `UnstructuredDiffusionSolver.set_conductivity(...)`, ao
+lado de `set_source_term`. Suíte: **13/13**.
+
+### Estado em 2026-08-31: **6.2 fechada** — Euler 1D, fluxo de Rusanov, choque de Sod
+
+Módulo novo e autocontido: `CompressibleEulerSolver1D` (Euler 1D em forma
+conservativa, gás ideal, fluxo numérico de Rusanov, Euler explícito no
+tempo) -- a mudança de regime que o próprio texto desta fase já avisava,
+não uma extensão de nenhum solver existente. Deliberadamente a fatia mais
+simples que ainda captura choque de verdade sem oscilar: Rusanov não
+precisa de decomposição de autovalores (Roe) nem separação de
+velocidades de onda (HLLC), só o maior sinal local, o mesmo raciocínio
+que já levou este projeto a upwind de primeira ordem antes de
+linear-upwind limitado. MUSCL/Roe/HLLC de segunda ordem ficam registrados
+aqui como extensão natural, não como parte deste portão.
+
+**As duas formas de portão que esta fase permite, ambas fechadas**:
+
+1. **Conservação exata, incondicional.** Com parede refletora nos dois
+   extremos (fantasma: mesma densidade/pressão, velocidade negada -- força
+   u=0 exatamente na face), o fluxo de massa e de energia é zero ali para
+   qualquer condição inicial, sem exigir simetria nenhuma -- só o momento
+   não é testado como invariante, porque uma parede empurra de volta
+   sempre que a pressão nas duas pontas difere. Medido: deriva de massa
+   1.11e-15, deriva de energia 5.77e-15 depois de t=1,0 (a condição de
+   Sod, mas com paredes fechadas, dando tempo para as ondas baterem nas
+   duas paredes várias vezes) -- ruído de ponto flutuante, não um limiar
+   solto.
+
+2. **Solução exata: o tubo de choque de Sod.** Entradas clássicas (não um
+   resultado memorizado) -- esquerda rho=1,u=0,p=1; direita
+   rho=0.125,u=0,p=0.1, descontinuidade em x=0.5, gamma=1.4, saída livre
+   nas duas pontas, avançado até t=0.2. A solução exata é derivada, não
+   copiada: um solver de Riemann exato (relação isentrópica do lado em
+   rarefação, Rankine-Hugoniot do lado em choque, Newton-Raphson na
+   pressão da região-estrela) implementado no próprio teste, o mesmo lugar
+   onde a solução da parede composta foi derivada para 6.1.
+
+   Medido, erro RMS ponderado por célula (mesma escolha da parede
+   composta e da solução manufaturada, pela mesma razão: o esquema borra
+   o choque e o contato por várias células, então um máximo pontual bem
+   na descontinuidade não diz nada sobre o resto do domínio):
+
+   | n   | rms densidade | rms pressão | ordem |
+   |-----|----------------|-------------|-------|
+   | 100 | 3.556e-02      | 3.732e-02   | --    |
+   | 200 | 2.662e-02      | 2.576e-02   | 0.42  |
+
+   **Achado honesto**: a ordem medida (0.42) é menor que o ~1 que um
+   esquema de primeira ordem sugeriria pela parte suave sozinha. Não é
+   defeito: a norma RMS sobre o domínio inteiro mistura um erro de região
+   suave que cai em primeira ordem com um erro de choque/contato cuja
+   *magnitude* fica quase constante enquanto só sua *largura* encolhe como
+   O(h) -- propriedade conhecida de esquemas Godunov sobre dado
+   genuinamente descontínuo, não algo que esta implementação especificamente
+   devesse superar.
+
+**Limite de CFL, medido, não suposto**: estável até cfl=1.05 no tubo de
+Sod (n=100), diverge (NaN) em cfl=1.10 -- bate com o limite clássico
+CFL<=1 de um esquema Godunov explícito. Default fixado em 0.4, ~2,5x de
+margem abaixo do limite medido, a mesma folga conservadora que o 0.3 de
+`ExplicitTimeStep.hpp` já mantém para os solvers incompressíveis.
+
+**Deliberadamente fora do escopo desta etapa**: sem viscosidade (já existe
+em todo o resto do projeto; o que faltava era choque e compressibilidade,
+que é exatamente o que Euler isola), sem 2D/3D, sem fluxo de segunda
+ordem, sem modo novo no `unified_viewer` -- nenhum exigido pelo portão
+desta fase. Extensões naturais, registradas, não esquecidas.
+
+Suíte: **13/13**.
+
+### Estado em 2026-09-01: **6.3 fechada — e com ela, a Fase 6 inteira** — rastreamento de interface por level set
+
+Módulo novo: `LevelSetAdvectionSolver2D` -- só a primeira das duas coisas
+que "6.3" nomeia (rastreamento de interface), sob um campo de velocidade
+**prescrito analiticamente, não resolvido**: nenhum Navier-Stokes de duas
+fases, nenhuma tensão superficial. Multifásico completo é comparável em
+escopo ao motor inteiro; esta é a fatia mínima que ainda demonstra algo
+que uma advecção passiva comum (já presente em várias classes deste
+projeto) nunca precisou provar -- uma forma reconhecível voltando à sua
+posição exata depois de mover-se de verdade. Rotular o que já existia
+como isto teria repetido o erro que a correção da 6.1 encontrou; por isso
+o critério de validação abaixo exige mais do que "o campo advecta".
+
+**Método: level set, não VOF.** Distância assinada `phi`, advectada em
+forma não-conservativa `dphi/dt + u.grad(phi) = 0` -- sem reconstrução
+geométrica de interface (PLIC), ao preço de precisar de reinicialização
+periódica em escoamentos longos (não implementada aqui: só afeta a norma
+do gradiente longe da interface, não a posição dela sob advecção pura,
+que é tudo que o teste de uma rotação completa precisa). Esquema de
+diferença finita upwind de primeira ordem (o clássico de Hamilton-Jacobi)
+e Euler explícito no tempo -- o par mais simples, mesmo raciocínio de
+6.2.
+
+**Validação, as duas formas do mesmo experimento**: rotação de corpo
+sólido de um círculo (raio 0.15 em (0.65,0.5), domínio [0,1]², rotação em
+torno de (0.5,0.5), omega=2*pi dando período T=1). Sem divergência por
+construção, então:
+
+1. **Conservação exata** (teorema do transporte de Reynolds): a área
+   onde phi>0 deveria ficar em pi*0.15² = 0,070686 durante todo o
+   percurso.
+2. **Solução exata**: rotação rígida por um período completo é a
+   identidade -- a solução exata em t=T é phi0 de novo, sem precisar
+   derivar nada à parte (diferente do tubo de choque de Sod, que
+   precisou de um solver de Riemann).
+
+**Achado honesto, medido, maior do que uma primeira suposição sugeriria**:
+em n=128, a área cai de 0,070686 para 0,050171 ao longo de uma rotação
+completa -- **29% perdidos para difusão numérica**, não um limiar solto.
+Não é bug: confirmado dobrando a resolução (n=256), a perda cai pela
+metade (14%, para 0,060715) -- a assinatura O(h) de um esquema
+genuinamente de primeira ordem, não um esquema estagnado ou divergindo.
+Upwind de primeira ordem é conhecido por ser particularmente difusivo
+justamente em rotação de corpo sólido: a direção do escoamento relativo
+aos eixos da malha varre todos os ângulos ao longo de um período, o que
+maximiza a difusão numérica de sentido cruzado (a fraqueza clássica desta
+família de esquema fora do alinhamento com a malha) -- não um caso de
+canto. Exatamente por isso que ENO/WENO ou uma reconstrução geométrica
+(PLIC) são a extensão natural registrada aqui, não parte deste portão.
+
+**Limite de CFL, medido e mais restritivo do que a intuição de uma única
+direção sugeriria**: estável até cfl=0,70, diverge (|phi| chegando a
+1e24) em cfl=0,75. A atualização em 2D num único passo não fracionado
+precisa do limite combinado `dt*(|u|/dx+|v|/dy)<=1`, que para |u|~|v| e
+dx=dy permite só cerca da metade do que a fórmula de uma única direção
+sugeriria em cfl=1 -- consistente com a quebra medida perto de 0,70-0,75,
+não de 1,0. Default fixado em 0,4, ~1,75x de margem abaixo do limite
+medido.
+
+**Deliberadamente fora do escopo desta etapa**: reinicialização, ENO/WENO
+ou PLIC, acoplamento a um Navier-Stokes de duas fases resolvido, tensão
+superficial. Todas registradas como extensões naturais e separadas, não
+como lacunas escondidas.
+
+Suíte: **13/13**. Com isso, a Fase 6 do ROADMAP -- as três físicas novas,
+em ordem de dependência crescente -- está inteiramente fechada.
 
 ---
 

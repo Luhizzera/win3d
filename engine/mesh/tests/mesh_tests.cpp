@@ -6,9 +6,11 @@
 #include "aether/mesh/TetrahedralMesh.hpp"
 #include "aether/testing/Check.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <set>
 
 using namespace aether::core;
 using namespace aether::mesh;
@@ -624,6 +626,158 @@ void testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder() {
     AETHER_CHECK(nearlyEqual(sumTetrahedraVolume(tet), baseArea * height, 1e-9));
 }
 
+// Cross-validates tetrahedralize() (point location + adjacency, O(cavity
+// size) per inserted point) against tetrahedralizeReference() (the
+// original full-scan Bowyer-Watson, O(current tetrahedron count) per
+// point) on the same points added in the same order. Delaunay
+// tetrahedralization is unique for a point set once co-spherical ties are
+// broken -- and both algorithms break them the same way, via the identical
+// exact orientation3D/inSphere3D predicates -- so the two must produce
+// *exactly* the same set of tetrahedra, not just the same count or the
+// same total volume. Insertion order into each algorithm's own internal
+// vector may legitimately differ, so tetrahedra are compared as a set of
+// sorted 4-vertex-index tuples, not as an ordered sequence.
+void checkFastMatchesReference(const std::vector<Vector3>& points, const char* label) {
+    std::printf("  [mesh_tests] tetrahedralize() vs tetrahedralizeReference(): %s (%zu pontos)\n", label,
+                points.size());
+
+    DelaunayTetrahedralization3D fast;
+    DelaunayTetrahedralization3D reference;
+    for (const Vector3& p : points) {
+        fast.addPoint(p.x, p.y, p.z);
+        reference.addPoint(p.x, p.y, p.z);
+    }
+    fast.tetrahedralize();
+    reference.tetrahedralizeReference();
+
+    AETHER_CHECK(fast.satisfiesDelaunayProperty());
+    AETHER_CHECK(reference.satisfiesDelaunayProperty());
+    AETHER_CHECK(fast.tetrahedronCount() == reference.tetrahedronCount());
+    AETHER_CHECK(nearlyEqual(sumTetrahedraVolume(fast), sumTetrahedraVolume(reference), 1e-9));
+
+    std::set<std::array<std::size_t, 4>> fastSet;
+    for (std::size_t t = 0; t < fast.tetrahedronCount(); ++t) {
+        std::array<std::size_t, 4> v = fast.tetrahedron(t).vertices;
+        std::sort(v.begin(), v.end());
+        fastSet.insert(v);
+    }
+    std::set<std::array<std::size_t, 4>> referenceSet;
+    for (std::size_t t = 0; t < reference.tetrahedronCount(); ++t) {
+        std::array<std::size_t, 4> v = reference.tetrahedron(t).vertices;
+        std::sort(v.begin(), v.end());
+        referenceSet.insert(v);
+    }
+    AETHER_CHECK(fastSet == referenceSet);
+}
+
+// Reuses the exact point constructions of every geometrically tricky case
+// this class already has a dedicated test for -- the hull-adjacent sliver
+// that once broke on a too-small super-tetrahedron, the sparse cube, the
+// dense prism -- plus two fresh jittered lattices for insertion-order/
+// cavity-size diversity beyond the catalogued fixtures.
+void testFastTetrahedralizeMatchesReferenceImplementation() {
+    // Jittered 3x3x3 lattice (27 points), same formula as
+    // testDelaunayTetrahedralizationSatisfiesDelaunayProperty().
+    {
+        std::vector<Vector3> points;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                for (int k = 0; k < 3; ++k) {
+                    const double x = static_cast<double>(i) + 0.1 * std::sin(3.7 * i + 1.3 * j + 2.4 * k);
+                    const double y = static_cast<double>(j) + 0.1 * std::cos(2.1 * i + 4.2 * j + 1.1 * k);
+                    const double z = static_cast<double>(k) + 0.1 * std::sin(1.6 * i + 2.9 * j + 3.3 * k);
+                    points.emplace_back(x, y, z);
+                }
+            }
+        }
+        checkFastMatchesReference(points, "rede jitterada 3x3x3");
+    }
+
+    // Square bipyramid (6 points), same as
+    // testDelaunayTetrahedralizationOfBipyramidPartitionsExactVolume().
+    checkFastMatchesReference({Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(-1.0, 0.0, 0.0),
+                                Vector3(0.0, -1.0, 0.0), Vector3(0.0, 0.0, 2.0), Vector3(0.0, 0.0, -1.0)},
+                               "bipiramide quadrada");
+
+    // The 7-point hull-adjacent sliver case, verbatim, same as
+    // testTetrahedralizationFillsConvexHullOnHullAdjacentSliverCase().
+    checkFastMatchesReference(
+        {Vector3(1.4737617982207118, -0.8528567809098169, -0.09741757121024008),
+         Vector3(0.8818641874977176, -1.5726403556472421, -1.5119823378293402),
+         Vector3(1.7058871049329896, -0.5884653761446414, 0.4584386055893468),
+         Vector3(-0.21987487313532084, -0.5879755232108659, -0.548828267652588),
+         Vector3(-0.4376550633723242, -1.8110581604919749, 0.034080232074870764),
+         Vector3(1.540759526282839, -1.6205730261557352, 0.6577405728359289),
+         Vector3(0.9445458377233287, 1.12204139437512, -1.1761955929033237)},
+        "sliver perto do casco (7 pontos)");
+
+    // Sparse axis-aligned cube (8 points, no interior points), same as
+    // testTetrahedralization3DFlipRecoversSomeCoplanarQuadFacetsHonestlyReportsTheRest().
+    checkFastMatchesReference({Vector3(0.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(2.0, 2.0, 0.0),
+                                Vector3(0.0, 2.0, 0.0), Vector3(0.0, 0.0, 2.0), Vector3(2.0, 0.0, 2.0),
+                                Vector3(2.0, 2.0, 2.0), Vector3(0.0, 2.0, 2.0)},
+                               "cubo esparso (8 pontos)");
+
+    // Hollow double octahedron (12 points), same as
+    // testTetrahedralization3DRecoversHollowOctahedronFacetsAndCarvesHoleWithExactVolume().
+    {
+        std::vector<Vector3> points;
+        const Vector3 center(1.0, 1.0, 1.0);
+        for (double radius : {2.0, 0.5}) {
+            points.push_back(center + Vector3(radius, 0.0, 0.0));
+            points.push_back(center + Vector3(-radius, 0.0, 0.0));
+            points.push_back(center + Vector3(0.0, radius, 0.0));
+            points.push_back(center + Vector3(0.0, -radius, 0.0));
+            points.push_back(center + Vector3(0.0, 0.0, radius));
+            points.push_back(center + Vector3(0.0, 0.0, -radius));
+        }
+        checkFastMatchesReference(points, "octaedro oco duplo (12 pontos)");
+    }
+
+    // Dense 24-sided polygonal prism (50 points), same as
+    // testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder().
+    {
+        constexpr std::size_t n = 24;
+        constexpr double radius = 0.7;
+        constexpr double height = 5.3;
+        constexpr double kPi = 3.14159265358979323846;
+        std::vector<Vector3> points;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double angle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(n);
+            const double x = radius * std::cos(angle);
+            const double y = radius * std::sin(angle);
+            points.emplace_back(x, y, 0.0);
+            points.emplace_back(x, y, height);
+        }
+        points.emplace_back(0.0, 0.0, 0.0);
+        points.emplace_back(0.0, 0.0, height);
+        checkFastMatchesReference(points, "prisma poligonal denso (50 pontos)");
+    }
+
+    // Two fresh, larger jittered lattices, for insertion-order and
+    // cavity-size diversity beyond the fixtures above -- same jitter
+    // formula, larger n.
+    for (std::size_t n : {4, 6}) {
+        std::vector<Vector3> points;
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                for (std::size_t k = 0; k < n; ++k) {
+                    const double fi = static_cast<double>(i);
+                    const double fj = static_cast<double>(j);
+                    const double fk = static_cast<double>(k);
+                    const double x = fi + 0.1 * std::sin(3.7 * fi + 1.3 * fj + 2.4 * fk);
+                    const double y = fj + 0.1 * std::cos(2.1 * fi + 4.2 * fj + 1.1 * fk);
+                    const double z = fk + 0.1 * std::sin(1.6 * fi + 2.9 * fj + 3.3 * fk);
+                    points.emplace_back(x, y, z);
+                }
+            }
+        }
+        char label[64];
+        std::snprintf(label, sizeof(label), "rede jitterada %zux%zux%zu", n, n, n);
+        checkFastMatchesReference(points, label);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TetrahedralMesh (Fase 2.1 do ROADMAP): face connectivity, the prerequisite
 // for any unstructured finite-volume solver.
@@ -913,6 +1067,7 @@ int main() {
     testTetrahedralization3DRecoversHollowOctahedronFacetsAndCarvesHoleWithExactVolume();
     testTetrahedralization3DFlipRecoversSomeCoplanarQuadFacetsHonestlyReportsTheRest();
     testTetrahedralization3DRecoversPolygonalPrismSideFacetsLikeACylinder();
+    testFastTetrahedralizeMatchesReferenceImplementation();
     testPredicateFilterAgreesWithExactArithmetic();
     std::puts("aether_mesh_tests: all tests passed");
     return 0;

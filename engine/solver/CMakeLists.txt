@@ -25,6 +25,8 @@ add_library(aether_solver STATIC
     src/KEpsilonLidDrivenCavitySolver2D.cpp
     src/KOmegaSSTChannelFlowSolver1D.cpp
     src/KOmegaSSTLidDrivenCavitySolver2D.cpp
+    src/CompressibleEulerSolver1D.cpp
+    src/LevelSetAdvectionSolver2D.cpp
 )
 
 target_include_directories(aether_solver PUBLIC
@@ -32,6 +34,18 @@ target_include_directories(aether_solver PUBLIC
 )
 
 target_link_libraries(aether_solver PUBLIC aether_mesh)
+
+# Module 10 (GPU), opt-in and detected rather than required -- same
+# if(TARGET aether_gpu) conditional bindings/python/CMakeLists.txt already
+# uses for aether_gpu_py, correct regardless of AETHER_ENABLE_CUDA/
+# CMAKE_CUDA_COMPILER scoping details between the two CMakeLists.txt files.
+# AETHER_HAVE_GPU is PRIVATE: only StaggeredCavityBase3D.cpp's own #ifdef
+# ever sees it (the public header never references it), so it cannot cause
+# an ABI mismatch between translation units that include the header.
+if(TARGET aether_gpu)
+    target_link_libraries(aether_solver PRIVATE aether_gpu)
+    target_compile_definitions(aether_solver PRIVATE AETHER_HAVE_GPU)
+endif()
 
 if(AETHER_BUILD_TESTS)
     add_subdirectory(tests)

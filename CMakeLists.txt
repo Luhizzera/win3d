@@ -27,6 +27,16 @@ option(AETHER_BUILD_APPS "Build the example plugins and desktop viewer app" ON)
 # every other module untouched, the same optional-dependency pattern
 # AETHER_BUILD_PYTHON_BINDINGS already uses for pybind11 below.
 option(AETHER_ENABLE_CUDA "Build GPU kernels via CUDA (Module 10)" ON)
+# Fase 5: curved-surface STEP/IGES via a real CAD kernel. Detected rather
+# than required, the same optional-dependency shape as AETHER_ENABLE_CUDA
+# above: a machine without the OpenCASCADE vcpkg toolchain configured still
+# builds everything else untouched, including the existing planar-faceted
+# STEP loader (engine/geometry/src/StepIO.cpp), which needs no external
+# dependency at all. See vcpkg.json (repo root) -- configure with
+# -DCMAKE_TOOLCHAIN_FILE=<vcpkg-clone>/scripts/buildsystems/vcpkg.cmake to
+# enable it; that toolchain file installs the manifest's own dependencies
+# (currently just "opencascade") on first configure.
+option(AETHER_ENABLE_OPENCASCADE "Import curved-surface STEP/IGES via OpenCASCADE (Fase 5)" ON)
 
 enable_testing()
 
@@ -43,7 +53,26 @@ if(AETHER_ENABLE_CUDA)
     endif()
 endif()
 
+if(AETHER_ENABLE_OPENCASCADE)
+    find_package(OpenCASCADE CONFIG QUIET)
+    if(NOT OpenCASCADE_FOUND)
+        message(STATUS "OpenCASCADE not found - skipping curved-surface STEP/IGES import (Fase 5). "
+                        "The planar-faceted STEP loader still builds and works without it. "
+                        "Configure with -DCMAKE_TOOLCHAIN_FILE=<vcpkg-clone>/scripts/buildsystems/vcpkg.cmake "
+                        "to enable it.")
+    endif()
+endif()
+
 add_subdirectory(engine/testing)
+# engine/gpu added here, before engine/solver: Module 10's own opt-in GPU
+# path inside StaggeredCavityBase3D (engine/solver) needs the aether_gpu
+# target to already exist by the time engine/solver/CMakeLists.txt runs
+# its own `if(TARGET aether_gpu)` check. engine/gpu itself links nothing
+# else in this project (confirmed by reading its own CMakeLists.txt), so
+# moving it this early changes nothing about what it depends on.
+if(AETHER_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+    add_subdirectory(engine/gpu)
+endif()
 add_subdirectory(engine/core)
 add_subdirectory(engine/geometry)
 add_subdirectory(engine/mesh)
@@ -62,9 +91,6 @@ add_subdirectory(engine/plugin)
 # portable C libraries with no Win32/OpenGL dependency of their own -- the
 # thing AETHER_BUILD_APPS actually exists to skip.
 add_subdirectory(plugins)
-if(AETHER_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
-    add_subdirectory(engine/gpu)
-endif()
 if(AETHER_BUILD_APPS)
     add_subdirectory(apps/common)
     # apps/unified_viewer supersedes the four standalone viewers this
@@ -103,6 +129,17 @@ if(AETHER_BUILD_PYTHON_BINDINGS)
                             OUTPUT_STRIP_TRAILING_WHITESPACE
                             ERROR_QUIET)
             if(AETHER_PYBIND11_DIR)
+                # Forward slashes, not the backslashes `--cmakedir` prints on
+                # Windows: the vcpkg toolchain file (in play once
+                # AETHER_ENABLE_OPENCASCADE finds a vcpkg-provided
+                # OpenCASCADE) wraps every find_package call through its own
+                # macro, which re-parses string arguments and treats a raw
+                # backslash as an escape character -- "\J" in
+                # "C:\JS\Win3d\..." is not a valid escape, which is a hard
+                # configure error, not a warning. file(TO_CMAKE_PATH ...) is
+                # the standard normalization for exactly this, and is a
+                # no-op for a build without the vcpkg toolchain.
+                file(TO_CMAKE_PATH "${AETHER_PYBIND11_DIR}" AETHER_PYBIND11_DIR)
                 find_package(pybind11 CONFIG QUIET
                              PATHS "${AETHER_PYBIND11_DIR}" NO_DEFAULT_PATH)
             endif()

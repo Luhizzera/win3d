@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 
 namespace aether::mesh {
@@ -272,7 +273,312 @@ double DelaunayTetrahedralization3D::inCircumsphere(const Tetrahedron& t, std::s
     return static_cast<double>(inSphere3D(a, b, c, d, p));
 }
 
+namespace {
+
+// Everything below is scratch state local to tetrahedralize()'s main loop
+// -- never stored on the class, never touching the public Tetrahedron
+// struct. It exists to answer, in O(1) amortized instead of O(current
+// tetrahedron count), the one question findCavity()/findOtherFaceOwner()
+// used to answer by scanning every tetrahedron: "which tetrahedron, if
+// any, shares this face?"
+constexpr std::size_t kNoNeighbor = std::numeric_limits<std::size_t>::max();
+
+// One tetrahedron plus incremental adjacency. neighbor[li] mirrors
+// tetrahedronFaces()'s own convention: the tetrahedron sharing the face
+// opposite local vertex li, or kNoNeighbor if that face is currently
+// exposed (owned by only one live tetrahedron so far). Dead tetrahedra are
+// tombstoned (alive=false), never erased -- so no index anywhere ever
+// needs correcting because some other element "moved".
+struct WorkTet {
+    DelaunayTetrahedralization3D::Tetrahedron t;
+    std::array<std::size_t, 4> neighbor;
+    bool alive;
+};
+
+// Faces owned by exactly one live WorkTet so far, keyed by sortedFace().
+// A face with two owners is fully resolved (each side's `neighbor` already
+// points at the other) and has no entry here. std::map, not
+// unordered_map: avoids writing/testing a hash for array<size_t,3>, and
+// this map's size tracks the perimeter of the currently-exposed region
+// (small), not the point count, so O(log k) here is irrelevant next to
+// the O(N) scans it replaces.
+using FaceOwnerMap = std::map<std::array<std::size_t, 3>, std::pair<std::size_t, int>>;
+
+// Registers tetIdx's local face li: links it to a previously-exposed owner
+// on the other side if one exists (resolving the face -- it stops being
+// an `owners` entry), or exposes it for the first time otherwise. Same
+// "first touch exposes, second touch resolves" rule
+// TetrahedralMesh::fromCells() already uses in one batch pass over a
+// finished cell list -- mirrored here, applied incrementally instead.
+void linkOrExposeFace(std::vector<WorkTet>& work, FaceOwnerMap& owners, std::size_t tetIdx, int li) {
+    const Face f = tetrahedronFaces(work[tetIdx].t)[li];
+    const auto key = sortedFace({f.a, f.b, f.c});
+    const auto it = owners.find(key);
+    if (it == owners.end()) {
+        owners.emplace(key, std::make_pair(tetIdx, li));
+        return;
+    }
+    const std::size_t otherIdx = it->second.first;
+    const int otherLi = it->second.second;
+    work[tetIdx].neighbor[static_cast<std::size_t>(li)] = otherIdx;
+    work[otherIdx].neighbor[static_cast<std::size_t>(otherLi)] = tetIdx;
+    owners.erase(it);
+}
+
+// Marks every tetrahedron in `bad` dead. Deliberately separate from the
+// neighbor-fixup pass below: that pass must see the *final* liveness of
+// both sides of a shared face, which is only guaranteed once every
+// tetrahedron in this batch has already been marked -- doing both in one
+// combined pass would let a face between two tetrahedra that are *both*
+// dying in this same cavity replacement get wrongly re-exposed, depending
+// on which of the two happened to be visited first.
+void markDead(std::vector<WorkTet>& work, const std::vector<std::size_t>& bad) {
+    for (std::size_t idx : bad) {
+        work[idx].alive = false;
+    }
+}
+
+// Re-exposes whichever faces of the now-dead tetrahedra in `bad` still
+// have a *surviving* neighbor on the other side -- the inverse of
+// linkOrExposeFace(). Must run after every element of `bad` has already
+// had markDead() applied (see its own comment for why).
+void reexposeSurvivingNeighbors(std::vector<WorkTet>& work, FaceOwnerMap& owners,
+                                 const std::vector<std::size_t>& bad) {
+    for (std::size_t deadIdx : bad) {
+        for (int li = 0; li < 4; ++li) {
+            const std::size_t nb = work[deadIdx].neighbor[static_cast<std::size_t>(li)];
+            if (nb == kNoNeighbor) {
+                const Face f = tetrahedronFaces(work[deadIdx].t)[li];
+                owners.erase(sortedFace({f.a, f.b, f.c}));
+                continue;
+            }
+            if (!work[nb].alive) {
+                continue; // both sides of this internal face are dying together
+            }
+            for (int nbLi = 0; nbLi < 4; ++nbLi) {
+                if (work[nb].neighbor[static_cast<std::size_t>(nbLi)] == deadIdx) {
+                    work[nb].neighbor[static_cast<std::size_t>(nbLi)] = kNoNeighbor;
+                    linkOrExposeFace(work, owners, nb, nbLi);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// Point location: walks from `hint` toward point `p` across face
+// adjacency, using isFaceVisible() (the same substitution test
+// pointInTetrahedron() already uses) to decide which face, if any, p is
+// on the far side of. Returns the (live) tetrahedron containing p, which
+// is therefore guaranteed "bad" for Bowyer-Watson purposes: a
+// tetrahedron's own interior always lies inside its circumsphere, since
+// its four vertices lie exactly on that sphere and a ball is convex.
+//
+// Never revisits a tetrahedron within the same call -- tracked via
+// `visitedStamp`/`generation` (a persistent array reused across every
+// point, stamped rather than re-cleared, so this costs O(1) amortized to
+// set up per call instead of O(current tetrahedron count)) -- which makes
+// the walk self-bounding at `work.size()` steps regardless of geometry,
+// closing off the classic failure mode of a naive "first violated face"
+// visibility walk cycling forever. Returns kNoNeighbor only if every
+// tetrahedron reachable from `hint` without revisiting is exhausted
+// without finding one containing p: not expected for a point interior to
+// the super-tetrahedron (every point tetrahedralize() inserts is, by
+// construction), but the caller falls back to an exhaustive scan for that
+// one point rather than trust the walk unconditionally.
+std::size_t locateContaining(std::vector<WorkTet>& work, const std::vector<Vector3>& points,
+                              std::vector<std::size_t>& visitedStamp, std::size_t generation,
+                              std::size_t hint, std::size_t p) {
+    std::size_t current = hint;
+    while (true) {
+        visitedStamp[current] = generation;
+        bool anyViolated = false;
+        std::size_t next = kNoNeighbor;
+        for (int li = 0; li < 4; ++li) {
+            if (!isFaceVisible(work[current].t, li, p, points)) {
+                continue;
+            }
+            anyViolated = true;
+            const std::size_t candidate = work[current].neighbor[static_cast<std::size_t>(li)];
+            if (candidate != kNoNeighbor && visitedStamp[candidate] != generation) {
+                next = candidate;
+                break;
+            }
+        }
+        if (!anyViolated) {
+            return current; // p is inside (or on the boundary of) this tetrahedron
+        }
+        if (next == kNoNeighbor) {
+            return kNoNeighbor; // every violated direction is a hull face or already visited
+        }
+        current = next;
+    }
+}
+
+} // namespace
+
 void DelaunayTetrahedralization3D::tetrahedralize() {
+    const std::size_t originalPointCount = points_.size();
+    tetrahedra_.clear();
+    if (originalPointCount == 0) {
+        return;
+    }
+
+    // Bounding box and super-tetrahedron sizing: identical to
+    // tetrahedralizeReference() -- see its own extensive comment for why R
+    // must be this large. Duplicated rather than shared because the two
+    // functions otherwise share no state (one builds `tetrahedra_`
+    // directly, this one builds a local `work` list), and the block is
+    // small enough that a shared helper would need to return six values
+    // for little benefit.
+    double minX = std::numeric_limits<double>::max();
+    double maxX = std::numeric_limits<double>::lowest();
+    double minY = std::numeric_limits<double>::max();
+    double maxY = std::numeric_limits<double>::lowest();
+    double minZ = std::numeric_limits<double>::max();
+    double maxZ = std::numeric_limits<double>::lowest();
+    for (std::size_t i = 0; i < originalPointCount; ++i) {
+        minX = std::min(minX, points_[i].x);
+        maxX = std::max(maxX, points_[i].x);
+        minY = std::min(minY, points_[i].y);
+        maxY = std::max(maxY, points_[i].y);
+        minZ = std::min(minZ, points_[i].z);
+        maxZ = std::max(maxZ, points_[i].z);
+    }
+    const double dx = maxX - minX;
+    const double dy = maxY - minY;
+    const double dz = maxZ - minZ;
+    const double deltaMax = std::max({dx, dy, dz}) + 1.0;
+    const double midX = (minX + maxX) / 2.0;
+    const double midY = (minY + maxY) / 2.0;
+    const double midZ = (minZ + maxZ) / 2.0;
+    const double r = 1.0e8 * deltaMax;
+    const std::size_t superA = points_.size();
+    points_.emplace_back(midX + r, midY + r, midZ + r);
+    const std::size_t superB = points_.size();
+    points_.emplace_back(midX + r, midY - r, midZ - r);
+    const std::size_t superC = points_.size();
+    points_.emplace_back(midX - r, midY + r, midZ - r);
+    const std::size_t superD = points_.size();
+    points_.emplace_back(midX - r, midY - r, midZ + r);
+
+    std::vector<WorkTet> work;
+    work.reserve(originalPointCount * 4 + 8);
+    std::vector<std::size_t> visitedStamp; // point-location walk's own visited marker
+    visitedStamp.reserve(originalPointCount * 4 + 8);
+    std::vector<std::size_t> badStamp; // cavity BFS's own "in this point's bad set" marker
+    badStamp.reserve(originalPointCount * 4 + 8);
+    FaceOwnerMap owners;
+
+    work.push_back(WorkTet{makeTetrahedron(superA, superB, superC, superD, points_),
+                            {kNoNeighbor, kNoNeighbor, kNoNeighbor, kNoNeighbor}, true});
+    visitedStamp.push_back(0);
+    badStamp.push_back(0);
+    for (int li = 0; li < 4; ++li) {
+        linkOrExposeFace(work, owners, 0, li);
+    }
+
+    std::size_t hint = 0;
+    std::vector<std::size_t> badIndices;
+    std::vector<std::array<std::size_t, 3>> boundary;
+    std::vector<std::size_t> queue;
+
+    for (std::size_t p = 0; p < originalPointCount; ++p) {
+        const std::size_t generation = p + 1; // 0 is reserved as "never visited/never bad"
+
+        std::size_t seedTet = locateContaining(work, points_, visitedStamp, generation, hint, p);
+        if (seedTet == kNoNeighbor) {
+            // Not expected for a point interior to the super-tetrahedron
+            // (see locateContaining()'s own comment) -- correctness must
+            // never depend on the walk succeeding, only speed does. Falls
+            // back to an exhaustive scan of live tetrahedra for this one
+            // point; some live tetrahedron's circumsphere is guaranteed to
+            // contain p, by the same interior-to-the-super-tetrahedron
+            // argument tetrahedralizeReference() itself relies on.
+            for (std::size_t t = 0; t < work.size(); ++t) {
+                if (work[t].alive && inCircumsphere(work[t].t, p) > 0.0) {
+                    seedTet = t;
+                    break;
+                }
+            }
+        }
+
+        badIndices.clear();
+        boundary.clear();
+        queue.clear();
+        queue.push_back(seedTet);
+        badIndices.push_back(seedTet);
+        badStamp[seedTet] = generation;
+
+        std::size_t qi = 0;
+        while (qi < queue.size()) {
+            const std::size_t cur = queue[qi++];
+            for (int li = 0; li < 4; ++li) {
+                const std::size_t nb = work[cur].neighbor[static_cast<std::size_t>(li)];
+                const Face f = tetrahedronFaces(work[cur].t)[li];
+                if (nb == kNoNeighbor) {
+                    // Hull face of the current live region: unconditionally
+                    // boundary, same semantics findCavity() documents for
+                    // considerHullVisibility=false -- always correct here
+                    // since every point tetrahedralize() inserts is
+                    // strictly interior to the enclosing super-tetrahedron.
+                    boundary.push_back({f.a, f.b, f.c});
+                    continue;
+                }
+                if (badStamp[nb] == generation) {
+                    continue; // interior to the cavity, already counted from the other side
+                }
+                if (inCircumsphere(work[nb].t, p) > 0.0) {
+                    badStamp[nb] = generation;
+                    badIndices.push_back(nb);
+                    queue.push_back(nb);
+                } else {
+                    boundary.push_back({f.a, f.b, f.c});
+                }
+            }
+        }
+
+        markDead(work, badIndices);
+        reexposeSurvivingNeighbors(work, owners, badIndices);
+
+        for (const auto& f : boundary) {
+            WorkTet nt;
+            nt.t = makeTetrahedron(f[0], f[1], f[2], p, points_);
+            nt.neighbor = {kNoNeighbor, kNoNeighbor, kNoNeighbor, kNoNeighbor};
+            nt.alive = true;
+            work.push_back(nt);
+            visitedStamp.push_back(0);
+            badStamp.push_back(0);
+            const std::size_t newIdx = work.size() - 1;
+            for (int li = 0; li < 4; ++li) {
+                linkOrExposeFace(work, owners, newIdx, li);
+            }
+            hint = newIdx;
+        }
+    }
+
+    // Compaction: the same "drop anything touching a super vertex" filter
+    // tetrahedralizeReference() applies at the end, with one extra
+    // criterion -- liveness -- since dead tetrahedra were tombstoned
+    // rather than physically removed during the loop above.
+    std::vector<Tetrahedron> result;
+    result.reserve(work.size());
+    for (const WorkTet& wt : work) {
+        if (!wt.alive) {
+            continue;
+        }
+        if (tetrahedronHasVertex(wt.t, superA) || tetrahedronHasVertex(wt.t, superB) ||
+            tetrahedronHasVertex(wt.t, superC) || tetrahedronHasVertex(wt.t, superD)) {
+            continue;
+        }
+        result.push_back(wt.t);
+    }
+    tetrahedra_ = std::move(result);
+
+    points_.resize(originalPointCount);
+}
+
+void DelaunayTetrahedralization3D::tetrahedralizeReference() {
     const std::size_t originalPointCount = points_.size();
     tetrahedra_.clear();
     if (originalPointCount == 0) {

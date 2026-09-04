@@ -404,6 +404,11 @@ PYBIND11_MODULE(aether_solver_py, m) {
         // S = -laplacian(phi), and the discretization error is all that is
         // left to measure.
         .def("set_source_term", &UnstructuredDiffusionSolver::setSourceTerm, py::arg("source"))
+        // Per-cell thermal conductivity (ROADMAP Fase 6.1: conjugate heat
+        // transfer). Default uniform 1.0; a solid and a fluid region are
+        // just two different values selected by position, same convention
+        // as set_dirichlet_boundary's selector.
+        .def("set_conductivity", &UnstructuredDiffusionSolver::setConductivity, py::arg("conductivity"))
         .def("solve_conjugate_gradient", &UnstructuredDiffusionSolver::solveConjugateGradient,
              py::arg("max_iterations") = 20000, py::arg("tolerance") = 1e-10,
              py::arg("max_outer_sweeps") = 50)

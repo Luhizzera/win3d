@@ -1,5 +1,7 @@
 #include "aether/gpu/PoissonOperatorCuda.hpp"
 
+#include "detail/PoissonStencilCuda.cuh"
+
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -9,16 +11,14 @@ namespace aether::gpu {
 
 namespace {
 
-// Line-for-line the same stencil as StaggeredCavityBase3D::applyLaplacian
-// on the CPU: for the pinned cell (idx==0) the operator is the identity;
-// otherwise each of the six neighbour lookups clamps to the current cell's
-// own layer at a domain boundary (the "ghost = interior" Neumann mirror),
-// and the result is weightTotal*x[idx] minus the weighted neighbour sum.
 // One thread per cell -- nx*ny*nz is small enough at every resolution this
 // project uses (up to a few hundred thousand cells) that one cell per
 // thread, no shared-memory tiling, is the right amount of complexity for a
 // first kernel whose entire purpose is to be checked bit-for-bit against
-// the CPU original.
+// the CPU original. The per-cell formula itself lives in
+// detail/PoissonStencilCuda.cuh, shared with ConjugateGradientSolverCuda's
+// own applyLaplacianKernel -- this wrapper only supplies the launch's own
+// 3D indexing and bounds check.
 __global__ void poissonKernel(const double* x, double* result, std::size_t nx, std::size_t ny, std::size_t nz,
                                double ax, double ay, double az, double weightTotal) {
     const auto i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -28,19 +28,7 @@ __global__ void poissonKernel(const double* x, double* result, std::size_t nx, s
         return;
     }
     const std::size_t idx = i + j * nx + k * nx * ny;
-    if (idx == 0) {
-        result[idx] = x[idx];
-        return;
-    }
-    const std::size_t left = (i > 0 ? i - 1 : 0) + j * nx + k * nx * ny;
-    const std::size_t right = (i + 1 < nx ? i + 1 : nx - 1) + j * nx + k * nx * ny;
-    const std::size_t down = i + (j > 0 ? j - 1 : 0) * nx + k * nx * ny;
-    const std::size_t up = i + (j + 1 < ny ? j + 1 : ny - 1) * nx + k * nx * ny;
-    const std::size_t back = i + j * nx + (k > 0 ? k - 1 : 0) * nx * ny;
-    const std::size_t front = i + j * nx + (k + 1 < nz ? k + 1 : nz - 1) * nx * ny;
-
-    const double weightedSum = ax * (x[left] + x[right]) + ay * (x[down] + x[up]) + az * (x[back] + x[front]);
-    result[idx] = weightTotal * x[idx] - weightedSum;
+    result[idx] = detail::poissonStencilValue(x, i, j, k, nx, ny, nz, ax, ay, az, weightTotal);
 }
 
 } // namespace
